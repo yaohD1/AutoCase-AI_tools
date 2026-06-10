@@ -1,0 +1,9 @@
+{
+  "name": "autocase-backend",
+  "version": "1.0.0",
+  "description": "XMind generation for AutoCase",
+  "main": "generate_xmind.js",
+  "dependencies": {
+    "xmind": "^2.2.33"
+  }
+}
