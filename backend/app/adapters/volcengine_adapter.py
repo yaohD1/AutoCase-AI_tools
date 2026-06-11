@@ -107,3 +107,62 @@ class VolcengineAdapter(BaseAIAdapter):
         finally:
             if os.path.exists(optimized_path):
                 os.remove(optimized_path)
+
+    def generate_from_text(self, prompt: str) -> List[Dict]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": """你是一位专业的测试工程师，擅长分析文档/接口文档并生成详细的测试用例。
+请严格按照以下格式输出（JSON数组格式）：
+
+[
+  {
+    "module": "模块名",
+    "test_point": "测试点",
+    "title": "用例：用例名 #优先级",
+    "priority": "P0/P1/P2",
+    "preconditions": "前置条件：...",
+    "steps": ["步骤：步骤1", "步骤：步骤2", "..."],
+    "expected": "预期：预期结果",
+    "case_type": "functional/ui/boundary/exception"
+  }
+]
+
+注意：
+1. 基于提供的文档内容分析测试点
+2. 模块、测试点默认以"模块："、"测试点："开头
+3. 用例格式为："用例：用例名 #优先级"，优先级为P0/P1/P2
+4. 前置条件、步骤、预期都需带前缀
+5. 返回有效的JSON数组"""
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens
+        }
+
+        response = requests.post(
+            self.api_base,
+            headers=headers,
+            json=payload,
+            timeout=self.timeout
+        )
+
+        if response.status_code != 200:
+            raise Exception(f"API request failed: {response.status_code} - {response.text}")
+
+        result = response.json()
+        content = result['choices'][0]['message']['content']
+
+        json_match = content[content.find('['):content.rfind(']')+1]
+        return json.loads(json_match)

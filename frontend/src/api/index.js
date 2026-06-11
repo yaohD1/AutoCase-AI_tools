@@ -73,14 +73,19 @@ batchDeleteTestcases(ids) {
     return api.post(`/cases/${id}/fail`)
   },
 
-  // 导出
+// 导出
   exportXmind(data) {
     return api.post('/export', data)
   },
   downloadFile(filename) {
     return api.get(`/download/${filename}`, { responseType: 'blob' })
   },
-  
+
+  // 文档
+  getDocumentContent(filename) {
+    return api.get(`/documents/${filename}/content`)
+  },
+
   // AI配置
   getAIConfigs() {
     return api.get('/ai-configs')

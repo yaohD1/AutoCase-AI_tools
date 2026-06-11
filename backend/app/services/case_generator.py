@@ -2,6 +2,7 @@ from typing import List, Dict
 from app.models import AIConfig
 from app.adapters import VolcengineAdapter, KimiAdapter
 from app.utils import PromptTemplates
+from app.utils.file_utils import is_document, read_document_content
 
 class CaseGenerator:
     def __init__(self, ai_config: AIConfig):
@@ -36,7 +37,12 @@ class CaseGenerator:
             prompt = f"{prompt}\n\n## 额外功能介绍/业务说明\n{description}"
 
         try:
-            testcases = self.adapter.generate_cases(image_path, prompt)
+            if is_document(image_path):
+                doc_content = read_document_content(image_path)
+                prompt = f"{prompt}\n\n## 参考文档内容\n```\n{doc_content}\n```"
+                testcases = self.adapter.generate_from_text(prompt)
+            else:
+                testcases = self.adapter.generate_cases(image_path, prompt)
 
             for case in testcases:
                 priority = case.get('priority', 'P2')

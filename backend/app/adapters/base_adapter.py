@@ -8,11 +8,15 @@ class BaseAIAdapter(ABC):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-    
+
     @abstractmethod
     def generate_cases(self, image_path: str, prompt: str) -> List[Dict]:
         pass
-    
+
     @abstractmethod
     def optimize_image(self, image_path: str) -> str:
+        pass
+
+    @abstractmethod
+    def generate_from_text(self, prompt: str) -> List[Dict]:
         pass

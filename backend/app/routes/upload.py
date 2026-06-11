@@ -31,7 +31,11 @@ def upload_file():
         return jsonify({'error': 'Project not found'}), 404
     
     filename = secure_filename(file.filename)
-    unique_filename = f"{uuid.uuid4()}_{filename}"
+    name, ext = os.path.splitext(filename)
+    if ext and ext.lower() in ('.jpg', '.jpeg', '.png', '.webp'):
+        unique_filename = f"{uuid.uuid4()}{ext}"
+    else:
+        unique_filename = f"{uuid.uuid4()}_{filename}"
     upload_folder = current_app.config['UPLOAD_FOLDER']
     
     if not os.path.exists(upload_folder):
@@ -85,3 +89,15 @@ def serve_image(filename):
     if not image or not os.path.exists(image.file_path):
         return jsonify({'error': 'Image not found'}), 404
     return send_file(image.file_path, mimetype='image/jpeg')
+
+
+@upload_bp.route('/documents/<filename>/content', methods=['GET'])
+def serve_document_content(filename):
+    from app.utils.file_utils import is_document, read_document_content
+    image = Image.query.filter_by(filename=filename).first()
+    if not image or not os.path.exists(image.file_path):
+        return jsonify({'error': 'File not found'}), 404
+    if not is_document(image.filename):
+        return jsonify({'error': 'Not a document file'}), 400
+    content = read_document_content(image.file_path)
+    return jsonify({'content': content, 'filename': image.filename})

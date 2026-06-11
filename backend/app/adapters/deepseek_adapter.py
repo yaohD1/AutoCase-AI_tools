@@ -13,8 +13,8 @@ class DeepSeekAdapter(BaseAIAdapter):
     
     def optimize_image(self, image_path: str) -> str:
         img = Image.open(image_path)
-        if img.width > 1920 or img.height > 1920:
-            img.thumbnail((1920, 1920))
+        if img.width > 2048 or img.height > 2048:
+            img.thumbnail((2048, 2048))
         temp_path = image_path.rsplit('.', 1)[0] + '_optimized.jpg'
         img.convert('RGB').save(temp_path, quality=85, optimize=True)
         return temp_path

@@ -19,14 +19,25 @@
       <div class="status-divider"></div>
       <div class="status-item">
         <span class="status-num">{{ approvalRate }}</span>
-        <span class="status-label">AI用例通过率</span>
+        <span class="status-label">通过率</span>
+      </div>
+    </div>
+
+    <div class="mode-tabs">
+      <div :class="['mode-tab', { active: uploadMode === 'image' }]" @click="switchMode('image')">
+        <el-icon><PictureFilled /></el-icon>
+        <span>原型图模式</span>
+      </div>
+      <div :class="['mode-tab', { active: uploadMode === 'doc' }]" @click="switchMode('doc')">
+        <el-icon><Document /></el-icon>
+        <span>文档模式</span>
       </div>
     </div>
 
     <el-card class="upload-card">
       <template #header>
         <div class="card-header">
-          <span>上传Figma设计图</span>
+          <span>{{ uploadMode === 'image' ? '上传Figma设计图' : '上传接口文档' }}</span>
         </div>
       </template>
 
@@ -53,7 +64,7 @@
             <el-form-item label="AI服务">
               <el-select v-model="form.aiProvider" placeholder="选择AI服务" style="width: 100%">
                 <el-option
-                  v-for="config in aiConfigs"
+                  v-for="config in filteredAIConfigs"
                   :key="config.provider"
                   :label="getProviderLabel(config)"
                   :value="config.provider"
@@ -91,17 +102,20 @@
             :on-change="handleFileChange"
             :on-remove="handleFileRemove"
             :file-list="fileList"
-            list-type="picture"
-            accept=".jpg,.jpeg,.png,.webp"
+            :list-type="uploadMode === 'image' ? 'picture' : 'text'"
+            :accept="uploadMode === 'image' ? '.jpg,.jpeg,.png,.webp' : '.docx,.doc,.md'"
             multiple
           >
-            <el-icon class="el-icon--upload"><upload-filled /></el-icon>
+            <el-icon class="el-icon--upload">
+              <PictureFilled v-if="uploadMode === 'image'" />
+              <Document v-else />
+            </el-icon>
             <div class="el-upload__text">
-              拖拽图片到此处或 <em>点击上传</em>
+              {{ uploadMode === 'image' ? '拖拽图片到此处或' : '拖拽文档到此处或' }} <em>点击上传</em>
             </div>
             <template #tip>
               <div class="el-upload__tip">
-                支持 JPG/PNG/WebP 格式，单个文件不超过 10MB
+                {{ uploadMode === 'image' ? '支持 JPG/PNG/WebP 格式，单个文件不超过 10MB' : '支持 Word(.docx/.doc) / Markdown(.md) 格式' }}
               </div>
             </template>
           </el-upload>
@@ -112,7 +126,11 @@
               :key="file.uid"
               class="file-preview-item"
             >
-              <img :src="file.url" />
+              <img v-if="isImageFile(file)" :src="file.url" />
+              <div v-else class="file-doc-preview">
+                <el-icon :size="28"><Document /></el-icon>
+                <span>{{ file.name }}</span>
+              </div>
               <span class="file-preview-badge" @click="removeFile(index)">&times;</span>
             </div>
           </div>
@@ -147,23 +165,56 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showDescDialog" title="填写功能介绍" width="1200px" top="3vh" :close-on-click-modal="false">
+    <el-dialog v-model="showDescDialog" title="填写功能介绍" width="1400px" top="3vh" :close-on-click-modal="false">
       <div class="desc-layout" v-if="fileList.length > 0">
         <div class="desc-image-panel">
-          <div class="desc-image-viewer">
-            <img :src="getFilePreviewUrl(currentFileIndex)" />
+          <div v-if="isImageFile(currentFile)" class="desc-image-viewer"
+               @wheel="handleDescZoom"
+               @mousedown="startDescDrag"
+               @mousemove="onDescDrag"
+               @mouseup="endDescDrag"
+               @mouseleave="endDescDrag">
+              <img
+                :src="getFilePreviewUrl(currentFileIndex)"
+                :style="{
+                  transform: `scale(${descImageScale}) translate(${descDragOffset.x}px, ${descDragOffset.y}px)`,
+                  cursor: descIsDragging ? 'grabbing' : descImageScale > 1 ? 'grab' : 'default'
+                }"
+                draggable="false"
+              />
+            </div>
+          <div v-else class="desc-doc-viewer">
+            <pre>{{ currentDocContent }}</pre>
           </div>
           <div class="desc-image-thumbs" v-if="fileList.length > 1">
-            <img
-              v-for="(file, index) in fileList"
-              :key="file.uid"
-              :src="getFilePreviewUrl(index)"
-              :class="{ active: index === currentFileIndex }"
-              @click="currentFileIndex = index"
-            />
+            <template v-if="uploadMode === 'image'">
+              <img
+                v-for="(file, index) in fileList"
+                :key="file.uid"
+                :src="getFilePreviewUrl(index)"
+                :class="{ active: index === currentFileIndex }"
+                @click="switchFile(index)"
+              />
+            </template>
+            <template v-else>
+              <div
+                v-for="(file, index) in fileList"
+                :key="file.uid"
+                :class="['desc-doc-thumb', { active: index === currentFileIndex }]"
+                @click="switchFile(index)"
+              >
+                {{ file.name }}
+              </div>
+            </template>
           </div>
           <div class="desc-image-info">
             {{ currentFileIndex + 1 }} / {{ fileList.length }}
+          </div>
+          <div class="desc-zoom-controls" v-if="isImageFile(currentFile)">
+            <el-button circle size="small" @click="descZoomOut">-</el-button>
+            <span>{{ Math.round(descImageScale * 100) }}%</span>
+            <el-button circle size="small" @click="descZoomIn">+</el-button>
+            <el-button size="small" @click="descImageScale = 1; descDragOffset = { x: 0, y: 0 }">重置</el-button>
           </div>
         </div>
         <div class="desc-form-panel">
@@ -172,11 +223,11 @@
             v-model="imageDescriptions[currentFileIndex]"
             type="textarea"
             :rows="20"
-            placeholder="请描述这张设计图的功能、业务逻辑、您关注的测试重点等...&#10;&#10;例如：&#10;- 这是登录注册流程，包含手机号验证和微信一键登录&#10;- 重点关注密码校验规则和验证码发送频率限制&#10;- 需要测试多种登录方式的切换逻辑"
+            placeholder="请描述功能介绍、业务逻辑、您关注的测试重点等..."
           />
         </div>
       </div>
-      <el-empty v-else description="请先上传图片" />
+      <el-empty v-else description="请先上传文件" />
       <template #footer>
         <el-button @click="showDescDialog = false">完成</el-button>
       </template>
@@ -188,12 +239,10 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Plus } from '@element-plus/icons-vue'
+import { UploadFilled, Plus, PictureFilled, Document } from '@element-plus/icons-vue'
 import api from '../api'
-import { useCaseStore } from '../stores/caseStore'
 
 const router = useRouter()
-const store = useCaseStore()
 
 const projects = ref([])
 const aiConfigs = ref([])
@@ -203,6 +252,12 @@ const showCreateProject = ref(false)
 const showDescDialog = ref(false)
 const currentFileIndex = ref(0)
 const imageDescriptions = ref([])
+const uploadMode = ref('image')
+const currentDocContent = ref('')
+const descImageScale = ref(1)
+const descIsDragging = ref(false)
+const descDragStart = ref({ x: 0, y: 0 })
+const descDragOffset = ref({ x: 0, y: 0 })
 
 const form = ref({
   projectId: '',
@@ -228,6 +283,22 @@ const approvalRate = computed(() => {
   return Math.round(statusCount.value.approved / total * 100) + '%'
 })
 
+const filteredAIConfigs = computed(() => {
+  return aiConfigs.value.filter(c => {
+    if (uploadMode.value === 'image') return c.provider === 'volcengine'
+    return c.provider === 'kimi'
+  })
+})
+
+const currentFile = computed(() => {
+  return fileList.value[currentFileIndex.value]
+})
+
+function isImageFile(file) {
+  const name = file?.name || ''
+  return /\.(jpg|jpeg|png|webp)$/i.test(name)
+}
+
 onMounted(() => {
   loadProjects()
   loadAIConfigs()
@@ -243,7 +314,6 @@ async function loadStatusCount() {
     const pending = pendingRes.data.counts?.pending || 0
     const failed = pendingRes.data.counts?.failed || 0
     const approved = (approvedRes.data.testcases || []).length
-    const totalGen = pendingRes.data.counts?.total_generated || 0
     statusCount.value = {
       pending,
       approved,
@@ -278,6 +348,14 @@ function getProviderLabel(config) {
   return `${name}${model}`
 }
 
+function switchMode(mode) {
+  uploadMode.value = mode
+  fileList.value = []
+  imageDescriptions.value = []
+  currentDocContent.value = ''
+  form.value.aiProvider = ''
+}
+
 async function createProject() {
   const trimmedName = newProject.value.name.trim()
   if (!trimmedName) {
@@ -310,6 +388,9 @@ function handleFileChange(file, newFileList) {
     imageDescriptions.value.push('')
     currentFileIndex.value = newFileList.length - 1
     showDescDialog.value = true
+    if (uploadMode.value === 'doc') {
+      loadDocContent(newFileList.length - 1)
+    }
   }
 }
 
@@ -320,19 +401,93 @@ function handleFileRemove(file, newFileList) {
 
 function removeFile(index) {
   const newList = fileList.value.filter((_, i) => i !== index)
-  const removedFile = fileList.value[index]
-  handleFileRemove(removedFile, newList)
+  handleFileRemove(null, newList)
+}
+
+function switchFile(index) {
+  currentFileIndex.value = index
+  descImageScale.value = 1
+  descDragOffset.value = { x: 0, y: 0 }
+  if (uploadMode.value === 'doc') {
+    loadDocContent(index)
+  }
+}
+
+async function loadDocContent(index) {
+  const file = fileList.value[index]
+  if (!file) return
+  currentDocContent.value = ''
+  try {
+    if (file.raw && file.raw instanceof File) {
+      const text = await file.raw.text()
+      currentDocContent.value = text.slice(0, 10000)
+    }
+  } catch {
+    currentDocContent.value = '无法读取文件内容'
+  }
+}
+
+function handleDescZoom(e) {
+  e.preventDefault()
+  const delta = e.deltaY > 0 ? -0.1 : 0.1
+  descImageScale.value = Math.max(0.5, Math.min(3, descImageScale.value + delta))
+  if (descImageScale.value <= 1) {
+    descDragOffset.value = { x: 0, y: 0 }
+  }
+}
+
+function descZoomIn() {
+  descImageScale.value = Math.min(3, descImageScale.value + 0.2)
+}
+
+function descZoomOut() {
+  descImageScale.value = Math.max(0.5, descImageScale.value - 0.2)
+  if (descImageScale.value <= 1) {
+    descDragOffset.value = { x: 0, y: 0 }
+  }
+}
+
+function startDescDrag(e) {
+  if (descImageScale.value <= 1) return
+  e.preventDefault()
+  descIsDragging.value = true
+  descDragStart.value = { x: e.clientX, y: e.clientY }
+}
+
+function onDescDrag(e) {
+  if (!descIsDragging.value) return
+  descDragOffset.value = {
+    x: descDragOffset.value.x + (e.clientX - descDragStart.value.x) / descImageScale.value,
+    y: descDragOffset.value.y + (e.clientY - descDragStart.value.y) / descImageScale.value
+  }
+  descDragStart.value = { x: e.clientX, y: e.clientY }
+}
+
+function endDescDrag() {
+  descIsDragging.value = false
+}
+
+async function openDescDialog() {
+  if (fileList.value.length === 0) return
+  currentFileIndex.value = 0
+  showDescDialog.value = true
+  if (uploadMode.value === 'doc') {
+    loadDocContent(0)
+  }
+}
+
+function getFilePreviewUrl(index) {
+  const file = fileList.value[index]
+  return file?.url || ''
 }
 
 async function generateCases() {
-  if (!canGenerate.value) {
-    return
-  }
+  if (!canGenerate.value) return
 
   generating.value = true
 
   try {
-    const uploadedImageIds = []
+    const uploadedIds = []
 
     for (const file of fileList.value) {
       const formData = new FormData()
@@ -340,12 +495,12 @@ async function generateCases() {
       formData.append('project_id', form.value.projectId)
 
       const uploadRes = await api.uploadFile(formData)
-      uploadedImageIds.push(uploadRes.data.image.id)
+      uploadedIds.push(uploadRes.data.image.id)
     }
 
-    for (let i = 0; i < uploadedImageIds.length; i++) {
+    for (let i = 0; i < uploadedIds.length; i++) {
       await api.generateTestcases({
-        image_id: uploadedImageIds[i],
+        image_id: uploadedIds[i],
         project_id: form.value.projectId,
         provider: form.value.aiProvider,
         case_types: form.value.caseTypes,
@@ -356,12 +511,9 @@ async function generateCases() {
 
     ElMessageBox.alert('生成完成，请到用例列表进行审批', '成功', {
       confirmButtonText: '前往查看',
-      callback: () => {
-        router.push({
-          path: '/cases',
-          query: { project_id: form.value.projectId }
-        })
-      }
+callback: () => {
+          router.push({ path: '/cases', query: { project_id: form.value.projectId, tab: 'pending' } })
+        }
     })
 
   } catch (error) {
@@ -371,22 +523,8 @@ async function generateCases() {
   }
 }
 
-function openDescDialog() {
-  if (fileList.value.length === 0) return
-  currentFileIndex.value = 0
-  showDescDialog.value = true
-}
-
-function getFilePreviewUrl(index) {
-  const file = fileList.value[index]
-  return file?.url || ''
-}
-
 function goToCases() {
-  router.push({
-    path: '/cases',
-    query: { project_id: form.value.projectId }
-  })
+  router.push({ path: '/cases', query: { project_id: form.value.projectId } })
 }
 </script>
 
@@ -436,6 +574,40 @@ function goToCases() {
   width: 0.5px;
   height: 36px;
   background: rgba(0, 0, 0, 0.12);
+}
+
+.mode-tabs {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.mode-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: #86868b;
+  transition: all 0.25s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+}
+
+.mode-tab:hover {
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #1d1d1f;
+}
+
+.mode-tab.active {
+  background: #0071e3;
+  border-color: #0071e3;
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(0, 113, 227, 0.25);
 }
 
 .upload-card {
@@ -595,6 +767,27 @@ function goToCases() {
   object-fit: cover;
 }
 
+.file-doc-preview {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: #86868b;
+}
+
+.file-doc-preview span {
+  font-size: 9px;
+  text-align: center;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60px;
+}
+
 .file-preview-badge {
   position: absolute;
   top: 3px;
@@ -681,6 +874,37 @@ function goToCases() {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+  transition: transform 0.2s ease;
+  user-select: none;
+}
+
+.desc-zoom-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.desc-doc-viewer {
+  flex: 1;
+  background: #fff;
+  border-radius: 10px;
+  border: 0.5px solid rgba(0, 0, 0, 0.04);
+  overflow: auto;
+  padding: 16px;
+}
+
+.desc-doc-viewer pre {
+  margin: 0;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #1d1d1f;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .desc-image-thumbs {
@@ -707,6 +931,27 @@ function goToCases() {
 
 .desc-image-thumbs img:hover {
   border-color: rgba(0, 0, 0, 0.15);
+}
+
+.desc-doc-thumb {
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #86868b;
+  background: #f5f5f7;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.desc-doc-thumb.active {
+  background: #0071e3;
+  color: #fff;
+}
+
+.desc-doc-thumb:hover:not(.active) {
+  background: #e8e8ed;
+  color: #1d1d1f;
 }
 
 .desc-image-info {

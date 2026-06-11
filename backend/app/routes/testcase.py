@@ -107,8 +107,18 @@ def get_testcases():
         query = query.filter_by(status=status)
 
     testcases = query.order_by(TestCase.created_at.desc()).all()
-
-    return jsonify({'testcases': [tc.to_dict() for tc in testcases]}), 200
+    
+    pending_count = 0
+    if project_id:
+        pending_count = TestCase.query.filter_by(
+            project_id=project_id, 
+            status='pending'
+        ).count()
+    
+    return jsonify({
+        'testcases': [tc.to_dict() for tc in testcases],
+        'pending_count': pending_count
+    }), 200
 
 @testcase_bp.route('/cases/<case_id>', methods=['GET'])
 def get_testcase(case_id):

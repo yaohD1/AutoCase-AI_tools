@@ -104,13 +104,12 @@
     >
       <div v-if="reviewForm.id" class="review-layout">
         <div class="review-image-panel">
-          <div
-            class="image-viewer"
-            @wheel="handleZoom"
-            @mousedown="startDrag"
-            @mousemove="onDrag"
-            @mouseup="endDrag"
-            @mouseleave="endDrag"
+          <div v-if="isCurrentFileImage" class="image-viewer"
+               @wheel="handleZoom"
+               @mousedown="startDrag"
+               @mousemove="onDrag"
+               @mouseup="endDrag"
+               @mouseleave="endDrag"
           >
             <img
               :src="`/api/images/${currentImageFile}`"
@@ -121,6 +120,9 @@
               draggable="false"
             />
           </div>
+          <div v-else class="doc-viewer">
+            <pre>{{ reviewDocContent }}</pre>
+          </div>
           <div class="image-thumbs" v-if="projectImages.length > 1">
             <img
               v-for="img in projectImages"
@@ -130,7 +132,7 @@
               @click="switchImage(img.filename)"
             />
           </div>
-          <div class="zoom-controls">
+          <div class="zoom-controls" v-if="isCurrentFileImage">
             <el-button circle size="small" @click="zoomOut">-</el-button>
             <span>{{ Math.round(imageScale * 100) }}%</span>
             <el-button circle size="small" @click="zoomIn">+</el-button>
@@ -222,7 +224,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
@@ -255,6 +257,8 @@ const projectImages = ref([])
 const isDragging = ref(false)
 const dragStart = ref({ x: 0, y: 0 })
 const dragOffset = ref({ x: 0, y: 0 })
+const reviewDocContent = ref('')
+const isCurrentFileImage = ref(true)
 
 const reviewForm = reactive({
   id: '',
@@ -275,7 +279,16 @@ const paginatedTestcases = computed(() => {
 })
 
 onMounted(() => {
+  if (route.query.tab) {
+    activeTab.value = route.query.tab
+  }
   loadProjects()
+})
+
+watch(() => route.path, () => {
+  if (route.path === '/cases') {
+    loadProjects()
+  }
 })
 
 async function loadProjects() {
@@ -300,10 +313,14 @@ async function loadProjects() {
 
 async function loadTestcases() {
   if (!selectedProject.value) {
+    testcases.value = []
+    total.value = 0
     return
   }
 
   loading.value = true
+  testcases.value = []
+  total.value = 0
 
   try {
     const res = await api.getTestcases({
@@ -312,7 +329,12 @@ async function loadTestcases() {
     })
     testcases.value = res.data.testcases
     total.value = testcases.value.length
+    if (res.data.pending_count !== undefined) {
+      pendingCount.value = res.data.pending_count
+    }
   } catch (error) {
+    testcases.value = []
+    total.value = 0
     ElMessage.error('加载用例列表失败')
   } finally {
     loading.value = false
@@ -468,10 +490,27 @@ function loadTestCaseToForm(testcase) {
 
   if (testcase.image_source) {
     currentImageFile.value = testcase.image_source
+    isCurrentFileImage.value = /[\._](jpg|jpeg|png|webp)$/i.test(testcase.image_source)
   } else if (projectImages.value.length > 0) {
     currentImageFile.value = projectImages.value[0].filename
+    isCurrentFileImage.value = /[\._](jpg|jpeg|png|webp)$/i.test(projectImages.value[0].filename)
   }
   imageScale.value = 1
+
+  if (!isCurrentFileImage.value && currentImageFile.value) {
+    loadReviewDocContent(currentImageFile.value)
+  } else {
+    reviewDocContent.value = ''
+  }
+}
+
+async function loadReviewDocContent(filename) {
+  try {
+    const res = await api.getDocumentContent(filename)
+    reviewDocContent.value = res.data.content || ''
+  } catch {
+    reviewDocContent.value = '加载失败'
+  }
 }
 
 function switchImage(filename) {
@@ -709,7 +748,7 @@ function getPriorityTag(priority) {
 }
 
 .review-image-panel {
-  width: 50%;
+  width: 55%;
   display: flex;
   flex-direction: column;
   background: #f5f7fa;
@@ -734,6 +773,25 @@ function getPriorityTag(priority) {
   max-height: 100%;
   object-fit: contain;
   transition: transform 0.2s ease;
+}
+
+.doc-viewer {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+  background: #fff;
+  border-radius: 4px;
+  border: 0.5px solid rgba(0, 0, 0, 0.04);
+}
+
+.doc-viewer pre {
+  margin: 0;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #1d1d1f;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .image-thumbs {
