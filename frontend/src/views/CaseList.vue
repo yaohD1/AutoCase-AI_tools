@@ -9,12 +9,20 @@
               待审用例
               <el-badge :value="pendingCount" :hidden="pendingCount === 0" class="pending-badge" />
             </el-button>
-            <el-select v-model="selectedProject" placeholder="选择项目" class="project-select" @change="loadTestcases">
+            <el-select v-model="selectedProject" placeholder="选择项目" class="project-select" @change="onProjectChange">
               <el-option
                 v-for="project in projects"
                 :key="project.id"
                 :label="project.name"
                 :value="project.id"
+              />
+            </el-select>
+            <el-select v-model="selectedSprint" placeholder="选择迭代" class="sprint-select" @change="loadTestcases" clearable>
+              <el-option
+                v-for="sprint in sprints"
+                :key="sprint.id"
+                :label="sprint.name"
+                :value="sprint.id"
               />
             </el-select>
             <el-button type="danger" @click="batchDelete" :disabled="selectedCases.length === 0">
@@ -236,6 +244,8 @@ const exporting = ref(false)
 const projects = ref([])
 const testcases = ref([])
 const selectedProject = ref('')
+const selectedSprint = ref('')
+const sprints = ref([])
 const showDetail = ref(false)
 const currentTestcase = ref({})
 const currentPage = ref(1)
@@ -303,12 +313,27 @@ async function loadProjects() {
     }
 
     if (selectedProject.value) {
+      loadSprints()
       loadTestcases()
       loadPendingCount()
     }
   } catch (error) {
     ElMessage.error('加载项目列表失败')
   }
+}
+
+async function loadSprints() {
+  if (!selectedProject.value) return
+  try {
+    const res = await api.getSprints({ project_id: selectedProject.value })
+    sprints.value = res.data.sprints || []
+  } catch {}
+}
+
+function onProjectChange() {
+  selectedSprint.value = ''
+  loadSprints()
+  loadTestcases()
 }
 
 async function loadTestcases() {
@@ -323,10 +348,12 @@ async function loadTestcases() {
   total.value = 0
 
   try {
-    const res = await api.getTestcases({
+    const params = {
       project_id: selectedProject.value,
       status: 'approved'
-    })
+    }
+    if (selectedSprint.value) params.sprint_id = selectedSprint.value
+    const res = await api.getTestcases(params)
     testcases.value = res.data.testcases
     total.value = testcases.value.length
     if (res.data.pending_count !== undefined) {
@@ -344,7 +371,9 @@ async function loadTestcases() {
 async function loadPendingCount() {
   if (!selectedProject.value) return
   try {
-    const res = await api.getPendingTestcases({ project_id: selectedProject.value })
+    const params = { project_id: selectedProject.value }
+    if (selectedSprint.value) params.sprint_id = selectedSprint.value
+    const res = await api.getPendingTestcases(params)
     pendingCount.value = res.data.testcases.length
   } catch {
   }
@@ -697,7 +726,7 @@ function getPriorityTag(priority) {
   background: rgba(0, 0, 0, 0.04) !important;
 }
 
-.project-select {
+.project-select, .sprint-select {
   width: 200px;
 }
 
