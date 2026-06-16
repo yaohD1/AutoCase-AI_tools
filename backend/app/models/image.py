@@ -10,6 +10,7 @@ class Image(db.Model):
     filename = db.Column(db.String(255), nullable=False)
     file_path = db.Column(db.String(500), nullable=False)
     file_size = db.Column(db.Integer)
+    sprint_id = db.Column(db.String(36), db.ForeignKey('sprints.id'), nullable=True)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def to_dict(self):

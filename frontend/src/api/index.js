@@ -28,6 +28,14 @@ export default {
     return api.get(`/projects/${id}`)
   },
   
+  // 迭代
+  getSprints(params) {
+    return api.get('/sprints', { params })
+  },
+  createSprint(data) {
+    return api.post('/sprints', data)
+  },
+  
   // 文件上传
   uploadFile(formData, onUploadProgress) {
     return api.post('/upload', formData, {
@@ -45,6 +53,9 @@ export default {
   // 用例生成
   generateTestcases(data) {
     return api.post('/generate', data)
+  },
+  analyzeImage(data) {
+    return api.post('/analyze-image', data)
   },
   getTestcases(params) {
     return api.get('/cases', { params })

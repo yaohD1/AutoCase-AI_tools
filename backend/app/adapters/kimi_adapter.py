@@ -166,3 +166,65 @@ class KimiAdapter(BaseAIAdapter):
 
         json_match = content[content.find('['):content.rfind(']')+1]
         return json.loads(json_match)
+
+    def analyze_image(self, image_path: str, prompt: str) -> List[Dict]:
+        optimized_path = self.optimize_image(image_path)
+        
+        try:
+            base64_image = self.image_to_base64(optimized_path)
+            
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "你是一位资深的UI测试分析师，擅长分析UI设计图并输出结构化模块描述。只输出JSON数组，不要加任何解释。"
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "temperature": 0.3,
+                "max_tokens": self.max_tokens
+            }
+            
+            response = requests.post(
+                self.api_base,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"API request failed: {response.status_code} - {response.text}")
+            
+            result = response.json()
+            content = result['choices'][0]['message']['content']
+            
+            json_match = content[content.find('['):content.rfind(']')+1]
+            return json.loads(json_match)
+            
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Kimi API request error: {str(e)}")
+        except Exception as e:
+            raise Exception(f"Kimi API error: {str(e)}")
+        finally:
+            if os.path.exists(optimized_path):
+                os.remove(optimized_path)

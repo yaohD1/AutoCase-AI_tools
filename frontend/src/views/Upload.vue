@@ -57,12 +57,28 @@
                 </el-select>
                 <el-button text :icon="Plus" class="new-project-btn" @click="showCreateProject = true">
                   新建项目
+</el-button>
+              </div>
+            </el-form-item>
+
+            <el-form-item label="迭代">
+              <div class="project-select-row">
+                <el-select v-model="form.sprintId" placeholder="选择迭代" style="flex: 1" @change="loadStatusCount">
+                  <el-option
+                    v-for="s in sprints"
+                    :key="s.id"
+                    :label="s.name"
+                    :value="s.id"
+                  />
+                </el-select>
+                <el-button text :icon="Plus" class="new-project-btn" @click="showCreateSprint = true">
+                  新建迭代
                 </el-button>
               </div>
             </el-form-item>
 
-            <el-form-item label="AI服务">
-              <el-select v-model="form.aiProvider" placeholder="选择AI服务" style="width: 100%">
+            <el-form-item label="原型分析模型">
+              <el-select v-model="form.analyzeProvider" placeholder="选择分析模型" style="width: 100%">
                 <el-option
                   v-for="config in filteredAIConfigs"
                   :key="config.provider"
@@ -71,25 +87,89 @@
                 />
               </el-select>
             </el-form-item>
+            <div v-if="currentAnalyzeModel" class="model-preview-card">
+              <div class="model-preview-row">
+                <span class="model-preview-value model-preview-name">{{ currentAnalyzeModel.model || '-' }}</span>
+                <el-button v-if="!editingAnalyzeModel" link type="primary" size="small" :icon="Edit" @click="editingAnalyzeModel = true" />
+                <el-input
+                  v-if="editingAnalyzeModel"
+                  v-model="currentAnalyzeModel.model"
+                  size="small"
+                  style="width: 160px"
+                  @blur="editingAnalyzeModel = false; saveModelConfig(currentAnalyzeModel)"
+                />
+              </div>
+              <div class="model-preview-divider" />
+              <div class="model-preview-row">
+                <span class="model-preview-label">温度</span>
+                <el-input-number
+                  v-model="currentAnalyzeModel.temperature"
+                  :min="0" :max="2" :step="0.1"
+                  size="small" controls-position="right"
+                  style="width: 100px"
+                  @change="saveModelConfig(currentAnalyzeModel)"
+                />
+                <span class="model-preview-label" style="margin-left:16px">Token</span>
+                <el-input-number
+                  v-model="currentAnalyzeModel.max_tokens"
+                  :min="100" :max="32000" :step="200"
+                  size="small" controls-position="right"
+                  style="width: 120px"
+                  @change="saveModelConfig(currentAnalyzeModel)"
+                />
+              </div>
+              <div class="model-preview-row">
+                <span class="model-preview-label">API</span>
+                <span class="model-preview-value model-preview-url">{{ currentAnalyzeModel.api_base || '-' }}</span>
+              </div>
+            </div>
 
-            <el-form-item label="用例类型">
-              <el-checkbox-group v-model="form.caseTypes">
-                <el-checkbox label="functional">功能测试</el-checkbox>
-                <el-checkbox label="ui">UI交互测试</el-checkbox>
-                <el-checkbox label="boundary">边界值测试</el-checkbox>
-                <el-checkbox label="exception">异常场景测试</el-checkbox>
-              </el-checkbox-group>
+            <el-form-item label="用例生成模型">
+              <el-select v-model="form.genProvider" placeholder="选择生成模型" style="width: 100%">
+                <el-option
+                  v-for="config in aiConfigs"
+                  :key="config.provider"
+                  :label="getProviderLabel(config)"
+                  :value="config.provider"
+                />
+              </el-select>
             </el-form-item>
-
-            <el-form-item label="生成数量">
-              <el-input-number
-                v-model="form.caseCount"
-                :min="1"
-                :max="50"
-                :step="1"
-              />
-              <span class="form-hint">每种类型的用例数量（建议5-15个）</span>
-            </el-form-item>
+            <div v-if="currentGenModel" class="model-preview-card">
+              <div class="model-preview-row">
+                <span class="model-preview-value model-preview-name">{{ currentGenModel.model || '-' }}</span>
+                <el-button v-if="!editingGenModel" link type="primary" size="small" :icon="Edit" @click="editingGenModel = true" />
+                <el-input
+                  v-if="editingGenModel"
+                  v-model="currentGenModel.model"
+                  size="small"
+                  style="width: 160px"
+                  @blur="editingGenModel = false; saveModelConfig(currentGenModel)"
+                />
+              </div>
+              <div class="model-preview-divider" />
+              <div class="model-preview-row">
+                <span class="model-preview-label">温度</span>
+                <el-input-number
+                  v-model="currentGenModel.temperature"
+                  :min="0" :max="2" :step="0.1"
+                  size="small" controls-position="right"
+                  style="width: 100px"
+                  @change="saveModelConfig(currentGenModel)"
+                />
+                <span class="model-preview-label" style="margin-left:16px">Token</span>
+                <el-input-number
+                  v-model="currentGenModel.max_tokens"
+                  :min="100" :max="32000" :step="200"
+                  size="small" controls-position="right"
+                  style="width: 120px"
+                  @change="saveModelConfig(currentGenModel)"
+                />
+              </div>
+              <div class="model-preview-row">
+                <span class="model-preview-label">API</span>
+                <span class="model-preview-value model-preview-url">{{ currentGenModel.api_base || '-' }}</span>
+              </div>
+            </div>
           </el-form>
         </div>
 
@@ -165,6 +245,18 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="showCreateSprint" title="新建迭代" width="400px">
+      <el-form :model="newSprint" label-width="100px">
+        <el-form-item label="迭代名称">
+          <el-input v-model="newSprint.name" placeholder="如 v1.0、sprint-3" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showCreateSprint = false">取消</el-button>
+        <el-button type="primary" @click="createSprint">确定</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="showDescDialog" title="填写功能介绍" width="1400px" top="3vh" :close-on-click-modal="false">
       <div class="desc-layout" v-if="fileList.length > 0">
         <div class="desc-image-panel">
@@ -232,6 +324,93 @@
         <el-button @click="showDescDialog = false">完成</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showModuleReview" title="模块审核" width="1400px" top="2vh" :close-on-click-modal="false">
+      <div v-if="modules.length > 0" class="module-review-layout">
+        <div class="module-review-image-panel">
+          <div class="module-image-viewer"
+               @wheel="handleModuleZoom"
+               @mousedown="startModuleDrag"
+               @mousemove="onModuleDrag"
+               @mouseup="endModuleDrag"
+               @mouseleave="endModuleDrag">
+            <img
+              :src="getFilePreviewUrl(0)"
+              :style="{
+                transform: `scale(${moduleImageScale}) translate(${moduleDragOffset.x}px, ${moduleDragOffset.y}px)`,
+                cursor: moduleIsDragging ? 'grabbing' : moduleImageScale > 1 ? 'grab' : 'default',
+                maxWidth: '100%',
+                maxHeight: '100%',
+                objectFit: 'contain',
+                transition: 'transform 0.2s ease',
+                userSelect: 'none'
+              }"
+              draggable="false"
+            />
+          </div>
+          <div class="module-zoom-controls" v-if="uploadMode === 'image'">
+            <el-button circle size="small" @click="moduleZoomOut">-</el-button>
+            <span>{{ Math.round(moduleImageScale * 100) }}%</span>
+            <el-button circle size="small" @click="moduleZoomIn">+</el-button>
+            <el-button size="small" @click="moduleImageScale = 1; moduleDragOffset = { x: 0, y: 0 }">重置</el-button>
+          </div>
+        </div>
+        <div class="module-review-form-panel">
+          <div class="module-progress">
+            <span class="progress-text">模块 {{ currentModuleIndex + 1 }} / {{ modules.length }}</span>
+            <el-button size="small" :disabled="currentModuleIndex <= 0" @click="prevModule">上一个</el-button>
+            <el-button size="small" :disabled="currentModuleIndex >= moduleForms.length - 1" @click="nextModule">下一个</el-button>
+          </div>
+          <el-form v-if="moduleForms[currentModuleIndex]" label-width="120px" class="module-form">
+            <el-form-item label="模块名称">
+              <el-input v-model="moduleForms[currentModuleIndex].module" />
+            </el-form-item>
+            <el-form-item label="UI元素">
+              <el-input v-model="moduleForms[currentModuleIndex].ui_elements" placeholder="用逗号分隔，如：按钮、输入框、下拉菜单" />
+            </el-form-item>
+            <el-form-item label="功能描述">
+              <el-input v-model="moduleForms[currentModuleIndex].function_description" type="textarea" :rows="4" />
+            </el-form-item>
+            <el-form-item label="交互流程">
+              <el-input v-model="moduleForms[currentModuleIndex].interaction_flow" type="textarea" :rows="3" />
+            </el-form-item>
+            <el-form-item label="测试关注点">
+              <el-input v-model="moduleForms[currentModuleIndex].test_focus" type="textarea" :rows="3" placeholder="用逗号分隔" />
+            </el-form-item>
+            <el-form-item label="用例类型">
+              <el-checkbox-group v-model="moduleForms[currentModuleIndex].case_types">
+                <el-checkbox label="functional">功能测试</el-checkbox>
+                <el-checkbox label="ui">UI交互测试</el-checkbox>
+                <el-checkbox label="boundary">边界值测试</el-checkbox>
+                <el-checkbox label="exception">异常场景测试</el-checkbox>
+              </el-checkbox-group>
+            </el-form-item>
+            <el-form-item label="生成数量">
+              <el-input-number
+                v-model="moduleForms[currentModuleIndex].case_count"
+                :min="1"
+                :max="50"
+                :step="1"
+                :disabled="moduleForms[currentModuleIndex].smart_mode"
+              />
+              <el-switch
+                v-model="moduleForms[currentModuleIndex].smart_mode"
+                active-text="智能"
+                style="margin-left: 12px"
+              />
+            </el-form-item>
+          </el-form>
+          <el-empty v-else description="暂无模块数据" />
+        </div>
+      </div>
+      <el-empty v-else description="AI分析中或分析失败，请重试" />
+      <template #footer>
+        <el-button @click="showModuleReview = false">取消</el-button>
+        <el-button type="primary" @click="confirmModules" :loading="confirming" :disabled="modules.length === 0">
+          确认并生成用例
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -239,13 +418,17 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Plus, PictureFilled, Document } from '@element-plus/icons-vue'
+import { UploadFilled, Plus, PictureFilled, Document, Edit } from '@element-plus/icons-vue'
 import api from '../api'
 
 const router = useRouter()
 
 const projects = ref([])
 const aiConfigs = ref([])
+const sprintNames = ref([])
+const sprints = ref([])
+const showCreateSprint = ref(false)
+const newSprint = ref({ name: '' })
 const fileList = ref([])
 const generating = ref(false)
 const showCreateProject = ref(false)
@@ -258,12 +441,28 @@ const descImageScale = ref(1)
 const descIsDragging = ref(false)
 const descDragStart = ref({ x: 0, y: 0 })
 const descDragOffset = ref({ x: 0, y: 0 })
+const showModuleReview = ref(false)
+const confirming = ref(false)
+const moduleImageScale = ref(1)
+const moduleIsDragging = ref(false)
+const moduleDragStart = ref({ x: 0, y: 0 })
+const moduleDragOffset = ref({ x: 0, y: 0 })
+const modules = ref([])
+const currentModuleIndex = ref(0)
+const moduleForms = ref([])
+const uploadedImageIds = ref([])
+const analyzing = ref(false)
+const editingAnalyzeModel = ref(false)
+const editingGenModel = ref(false)
 
 const form = ref({
   projectId: '',
-  aiProvider: '',
-  caseTypes: [],
-  caseCount: 10
+  sprintId: '',
+  analyzeProvider: '',
+  genProvider: '',
+  caseTypes: ['functional', 'ui', 'boundary', 'exception'],
+  caseCount: 10,
+  smartMode: false
 })
 
 const newProject = ref({
@@ -272,7 +471,15 @@ const newProject = ref({
 })
 
 const canGenerate = computed(() => {
-  return form.value.projectId && fileList.value.length > 0
+  return form.value.projectId && fileList.value.length > 0 && form.value.analyzeProvider && form.value.genProvider
+})
+
+const currentAnalyzeModel = computed(() => {
+  return aiConfigs.value.find(c => c.provider === form.value.analyzeProvider)
+})
+
+const currentGenModel = computed(() => {
+  return aiConfigs.value.find(c => c.provider === form.value.genProvider)
 })
 
 const statusCount = ref({ pending: 0, approved: 0, total: 0 })
@@ -305,11 +512,14 @@ onMounted(() => {
 })
 
 async function loadStatusCount() {
+  loadSprints()
   if (!form.value.projectId) return
   try {
+    const params = { project_id: form.value.projectId }
+    if (form.value.sprintId) params.sprint_id = form.value.sprintId
     const [pendingRes, approvedRes] = await Promise.all([
-      api.getPendingTestcases({ project_id: form.value.projectId }),
-      api.getTestcases({ project_id: form.value.projectId, status: 'approved' })
+      api.getPendingTestcases(params),
+      api.getTestcases({ ...params, status: 'approved' })
     ])
     const pending = pendingRes.data.counts?.pending || 0
     const failed = pendingRes.data.counts?.failed || 0
@@ -332,12 +542,51 @@ async function loadProjects() {
   }
 }
 
+async function saveModelConfig(config) {
+  if (!config || !config.id) return
+  try {
+    await api.updateAIConfig(config.id, {
+      model: config.model,
+      temperature: config.temperature,
+      max_tokens: config.max_tokens
+    })
+  } catch {
+  }
+}
+
 async function loadAIConfigs() {
   try {
     const res = await api.getAIConfigs()
     aiConfigs.value = (res.data.configs || []).filter(c => c.is_active)
   } catch (error) {
     ElMessage.error('加载AI配置失败')
+  }
+}
+
+async function loadSprints() {
+  if (!form.value.projectId) return
+  try {
+    const res = await api.getSprints({ project_id: form.value.projectId })
+    sprints.value = res.data.sprints || []
+  } catch {}
+}
+
+function onSprintChange() {
+}
+
+async function createSprint() {
+  const name = newSprint.value.name.trim()
+  if (!name) { ElMessage.warning('请输入迭代名称'); return }
+  if (sprints.value.some(s => s.name === name)) { ElMessage.warning('迭代名称已存在'); return }
+  try {
+    const res = await api.createSprint({ project_id: form.value.projectId, name })
+    sprints.value.unshift(res.data.sprint)
+    form.value.sprintId = res.data.sprint.id
+    showCreateSprint.value = false
+    newSprint.value.name = ''
+    ElMessage.success('迭代创建成功')
+  } catch (error) {
+    ElMessage.error('创建迭代失败')
   }
 }
 
@@ -353,7 +602,6 @@ function switchMode(mode) {
   fileList.value = []
   imageDescriptions.value = []
   currentDocContent.value = ''
-  form.value.aiProvider = ''
 }
 
 async function createProject() {
@@ -366,7 +614,6 @@ async function createProject() {
     ElMessage.warning('项目名称已存在')
     return
   }
-
   try {
     const res = await api.createProject({ name: trimmedName, description: newProject.value.description })
     projects.value.unshift(res.data.project)
@@ -485,36 +732,42 @@ async function generateCases() {
   if (!canGenerate.value) return
 
   generating.value = true
+  uploadedImageIds.value = []
 
   try {
-    const uploadedIds = []
-
     for (const file of fileList.value) {
       const formData = new FormData()
       formData.append('file', file.raw)
       formData.append('project_id', form.value.projectId)
-
       const uploadRes = await api.uploadFile(formData)
-      uploadedIds.push(uploadRes.data.image.id)
+      uploadedImageIds.value.push(uploadRes.data.image.id)
     }
 
-    for (let i = 0; i < uploadedIds.length; i++) {
-      await api.generateTestcases({
-        image_id: uploadedIds[i],
-        project_id: form.value.projectId,
-        provider: form.value.aiProvider,
-        case_types: form.value.caseTypes,
-        case_count: form.value.caseCount,
-        description: imageDescriptions.value[i] || ''
+    analyzing.value = true
+    try {
+      const res = await api.analyzeImage({
+        image_id: uploadedImageIds.value[0],
+        provider: form.value.analyzeProvider,
+        description: imageDescriptions.value[0] || ''
       })
+      modules.value = res.data.modules || []
+      moduleForms.value = modules.value.map(m => ({
+        module: m.module || '',
+        ui_elements: (m.ui_elements || []).join(', '),
+        function_description: m.function_description || '',
+        interaction_flow: m.interaction_flow || '',
+        test_focus: (m.test_focus || []).join(', '),
+        case_types: [...form.value.caseTypes],
+        case_count: form.value.caseCount,
+        smart_mode: form.value.smartMode
+      }))
+      currentModuleIndex.value = 0
+      showModuleReview.value = true
+    } catch (err) {
+      ElMessage.error('图片分析失败：' + (err.response?.data?.error || err.message))
+    } finally {
+      analyzing.value = false
     }
-
-    ElMessageBox.alert('生成完成，请到用例列表进行审批', '成功', {
-      confirmButtonText: '前往查看',
-callback: () => {
-          router.push({ path: '/cases', query: { project_id: form.value.projectId, tab: 'pending' } })
-        }
-    })
 
   } catch (error) {
     ElMessage.error('生成失败：' + (error.response?.data?.error || error.message))
@@ -522,6 +775,91 @@ callback: () => {
     generating.value = false
   }
 }
+
+async function confirmModules() {
+  confirming.value = true
+  try {
+    generating.value = true
+    for (let i = 0; i < uploadedImageIds.value.length; i++) {
+      for (let j = 0; j < moduleForms.value.length; j++) {
+        const mod = moduleForms.value[j]
+        await api.generateTestcases({
+          image_id: uploadedImageIds.value[i],
+          project_id: form.value.projectId,
+          provider: form.value.genProvider,
+          case_types: mod.case_types || [],
+          case_count: mod.case_count || 10,
+          description: imageDescriptions.value[i] || '',
+          sprint_id: form.value.sprintId || '',
+          modules: [{
+            module: mod.module,
+            ui_elements: mod.ui_elements.split(',').map(s => s.trim()).filter(Boolean),
+            function_description: mod.function_description,
+            interaction_flow: mod.interaction_flow,
+            test_focus: mod.test_focus.split(',').map(s => s.trim()).filter(Boolean)
+          }],
+          smart_mode: mod.smart_mode || false
+        })
+      }
+    }
+    showModuleReview.value = false
+
+    ElMessageBox.alert('生成完成，请到用例列表进行审批', '成功', {
+      confirmButtonText: '前往查看',
+      callback: () => {
+        router.push({ path: '/cases', query: { project_id: form.value.projectId, tab: 'pending' } })
+      }
+    })
+  } catch (error) {
+    ElMessage.error('生成失败：' + (error.response?.data?.error || error.message))
+  } finally {
+    generating.value = false
+    confirming.value = false
+  }
+}
+
+function prevModule() {
+  if (currentModuleIndex.value > 0) {
+    currentModuleIndex.value--
+  }
+}
+
+function nextModule() {
+  if (currentModuleIndex.value < moduleForms.value.length - 1) {
+    currentModuleIndex.value++
+  }
+}
+
+function handleModuleZoom(e) {
+  e.preventDefault()
+  const delta = e.deltaY > 0 ? -0.1 : 0.1
+  moduleImageScale.value = Math.max(0.5, Math.min(3, moduleImageScale.value + delta))
+  if (moduleImageScale.value <= 1) moduleDragOffset.value = { x: 0, y: 0 }
+}
+
+function moduleZoomIn() { moduleImageScale.value = Math.min(3, moduleImageScale.value + 0.2) }
+function moduleZoomOut() {
+  moduleImageScale.value = Math.max(0.5, moduleImageScale.value - 0.2)
+  if (moduleImageScale.value <= 1) moduleDragOffset.value = { x: 0, y: 0 }
+}
+
+function startModuleDrag(e) {
+  if (moduleImageScale.value <= 1) return
+  e.preventDefault()
+  moduleIsDragging.value = true
+  moduleDragStart.value = { x: e.clientX, y: e.clientY }
+}
+
+function onModuleDrag(e) {
+  if (!moduleIsDragging.value) return
+  moduleDragOffset.value = {
+    x: moduleDragOffset.value.x + (e.clientX - moduleDragStart.value.x) / moduleImageScale.value,
+    y: moduleDragOffset.value.y + (e.clientY - moduleDragStart.value.y) / moduleImageScale.value
+  }
+  moduleDragStart.value = { x: e.clientX, y: e.clientY }
+}
+
+function endModuleDrag() { moduleIsDragging.value = false }
 
 function goToCases() {
   router.push({ path: '/cases', query: { project_id: form.value.projectId } })
@@ -993,4 +1331,122 @@ function goToCases() {
   border-color: #0071e3;
   box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.1);
 }
+
+.module-review-layout {
+  display: flex;
+  gap: 20px;
+  height: 70vh;
+}
+
+.module-review-image-panel {
+  width: 45%;
+  display: flex;
+  flex-direction: column;
+  background: #f5f7fa;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.module-image-viewer {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.module-review-form-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.module-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.progress-text {
+  font-weight: 500;
+  color: #409EFF;
+  margin-right: auto;
+}
+
+.module-form .el-form-item {
+  margin-bottom: 16px;
+}
+
+.module-zoom-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.model-preview-card {
+  margin: -4px 0 16px 100px;
+  padding: 12px 16px;
+  background: #fafbfc;
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,0.08);
+  font-size: 13px;
+}
+
+.model-preview-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.model-preview-row:last-child { margin-bottom: 0; }
+
+.model-preview-label {
+  color: #909399;
+  margin-right: 8px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.model-preview-value {
+  color: #303133;
+  font-weight: 500;
+}
+
+.model-preview-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1d1d1f;
+  flex: 1;
+}
+
+.model-preview-url {
+  font-size: 11px;
+  color: #909399;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.model-preview-divider {
+  height: 1px;
+  background: rgba(0,0,0,0.06);
+  margin: 6px 0;
+}
+
+.edit-icon {
+  margin-left: 6px;
+  cursor: pointer;
+  color: #909399;
+  font-size: 14px;
+}
+.edit-icon:hover { color: #0071e3; }
 </style>

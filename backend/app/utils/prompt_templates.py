@@ -1,5 +1,27 @@
 class PromptTemplates:
     
+    IMAGE_ANALYSIS_PROMPT = """你是一位资深的UI测试分析师。请分析这张UI设计图，按模块输出结构化描述。
+
+要求：
+1. 按照从上到下、从左到右的顺序，识别所有功能模块
+2. 对每个模块描述：
+   - 模块名称
+   - 该模块包含的UI元素（按钮、输入框、下拉菜单等）
+   - 该模块的功能说明
+   - 用户的预期操作流程
+   - 测试关注点
+
+输出JSON格式，只输出JSON数组，不要加任何解释：
+[
+  {
+    "module": "模块名称",
+    "ui_elements": ["元素1", "元素2"],
+    "function_description": "该模块的功能说明",
+    "interaction_flow": "用户操作流程描述",
+    "test_focus": ["测试关注点1", "测试关注点2"]
+  }
+]"""
+    
     FUNCTIONAL_TEST_TEMPLATE = """请分析这张UI设计图，生成功能测试用例。
 
 重点关注：
@@ -40,6 +62,16 @@ class PromptTemplates:
 5. 并发操作
 
 请生成{count}个异常场景测试用例。"""
+    
+    SMART_TEST_TEMPLATE = """请根据模块描述，全面分析后生成完整的测试用例。
+
+每个模块都要生成用例，按模块自由发挥，不限制数量，确保覆盖：
+1. 核心功能路径
+2. 边界条件
+3. 异常场景
+4. UI交互细节
+
+请生成全面覆盖的测试用例。"""
     
     @classmethod
     def get_prompt_by_type(cls, case_type: str, count: int = 10) -> str:

@@ -1,7 +1,7 @@
 import json
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
-from app.models import db, TestCase, Image, Project, AIConfig
+from app.models import db, TestCase, Image, Project, AIConfig, Sprint
 from app.services.case_generator import CaseGenerator
 
 testcase_bp = Blueprint('testcase', __name__)
@@ -39,6 +39,31 @@ def get_project(project_id):
     
     return jsonify({'project': project.to_dict()}), 200
 
+@testcase_bp.route('/analyze-image', methods=['POST'])
+def analyze_image():
+    data = request.get_json()
+    image_id = data.get('image_id')
+    provider = data.get('provider', 'kimi')
+    description = data.get('description', '')
+    
+    if not image_id:
+        return jsonify({'error': 'image_id required'}), 400
+    
+    image = Image.query.get(image_id)
+    if not image:
+        return jsonify({'error': 'Image not found'}), 404
+    
+    ai_config = AIConfig.query.filter_by(provider=provider, is_active=True).first()
+    if not ai_config:
+        return jsonify({'error': f'AI config for {provider} not found'}), 404
+    
+    try:
+        generator = CaseGenerator(ai_config)
+        modules = generator.analyze_image(image.file_path, description)
+        return jsonify({'success': True, 'modules': modules}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @testcase_bp.route('/generate', methods=['POST'])
 def generate_testcases():
     data = request.get_json()
@@ -48,6 +73,9 @@ def generate_testcases():
     case_types = data.get('case_types', ['functional', 'ui', 'boundary', 'exception'])
     case_count = data.get('case_count', 10)
     description = data.get('description', '')
+    modules = data.get('modules', None)
+    smart_mode = data.get('smart_mode', False)
+    sprint_id = data.get('sprint_id', '')
     
     if not image_id or not project_id:
         return jsonify({'error': 'image_id and project_id required'}), 400
@@ -62,7 +90,10 @@ def generate_testcases():
     
     try:
         generator = CaseGenerator(ai_config)
-        testcases = generator.generate(image.file_path, case_types, case_count, description)
+        if modules:
+            testcases = generator.generate_from_modules(modules, case_types, case_count, description, smart_mode)
+        else:
+            testcases = generator.generate(image.file_path, case_types, case_count, description)
         
         for case_data in testcases:
             testcase = TestCase(
@@ -77,7 +108,8 @@ def generate_testcases():
                 case_type=case_data.get('case_type', 'functional'),
                 image_source=image.filename,
                 ai_provider=provider,
-                status='pending'
+                status='pending',
+                sprint_id=sprint_id
             )
             db.session.add(testcase)
         
@@ -96,6 +128,7 @@ def get_testcases():
     project_id = request.args.get('project_id')
     case_type = request.args.get('case_type')
     status = request.args.get('status')
+    sprint_id = request.args.get('sprint_id')
 
     query = TestCase.query
 
@@ -105,6 +138,8 @@ def get_testcases():
         query = query.filter_by(case_type=case_type)
     if status:
         query = query.filter_by(status=status)
+    if sprint_id:
+        query = query.filter_by(sprint_id=sprint_id)
 
     testcases = query.order_by(TestCase.created_at.desc()).all()
     

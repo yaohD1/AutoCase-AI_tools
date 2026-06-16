@@ -21,6 +21,7 @@ class TestCase(db.Model):
     image_source = db.Column(db.String(500))
     ai_provider = db.Column(db.String(50))
     status = db.Column(db.String(20), default='pending', nullable=False)
+    sprint_id = db.Column(db.String(36), db.ForeignKey('sprints.id'), nullable=True)
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -40,6 +41,7 @@ class TestCase(db.Model):
             'image_source': self.image_source,
             'ai_provider': self.ai_provider,
             'status': self.status,
+            'sprint_id': self.sprint_id,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
