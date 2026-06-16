@@ -107,6 +107,9 @@ batchDeleteTestcases(ids) {
   updateAIConfig(id, data) {
     return api.put(`/ai-configs/${id}`, data)
   },
+  testAIConnection(data) {
+    return api.post('/ai-configs/test-connection', data)
+  },
   deleteAIConfig(id) {
     return api.delete(`/ai-configs/${id}`)
   }

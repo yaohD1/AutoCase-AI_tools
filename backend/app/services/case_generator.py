@@ -1,34 +1,14 @@
 from typing import List, Dict
 import json
 from app.models import AIConfig
-from app.adapters import VolcengineAdapter, KimiAdapter
+from app.adapters import GeneralAdapter
 from app.utils import PromptTemplates
 from app.utils.file_utils import is_document, read_document_content
 
 class CaseGenerator:
     def __init__(self, ai_config: AIConfig):
         self.ai_config = ai_config
-        self.adapter = self._get_adapter()
-
-    def _get_adapter(self):
-        if self.ai_config.provider == 'volcengine':
-            return VolcengineAdapter(
-                api_key=self.ai_config.api_key,
-                api_base=self.ai_config.api_base or "https://api.yygu.cn/v3/llm.chat/chat/completions",
-                model=self.ai_config.model or "doubao-seed-2.0-lite",
-                temperature=self.ai_config.temperature,
-                max_tokens=self.ai_config.max_tokens
-            )
-        elif self.ai_config.provider == 'kimi':
-            return KimiAdapter(
-                api_key=self.ai_config.api_key,
-                api_base=self.ai_config.api_base or "https://api.yygu.cn/v3/llm.chat/chat/completions",
-                model=self.ai_config.model or "kimi-k2.6",
-                temperature=self.ai_config.temperature,
-                max_tokens=self.ai_config.max_tokens
-            )
-        else:
-            raise ValueError(f"Unsupported AI provider: {self.ai_config.provider}")
+        self.adapter = GeneralAdapter(ai_config)
 
     def generate(self, image_path: str, case_types: List[str], case_count: int = 10, description: str = '') -> List[Dict]:
         all_testcases = []
@@ -63,10 +43,16 @@ class CaseGenerator:
         return all_testcases
 
     def analyze_image(self, image_path: str, description: str = '') -> List[Dict]:
-        prompt = PromptTemplates.IMAGE_ANALYSIS_PROMPT
+        prompt = PromptTemplates.IMAGE_ANALYSIS_PROMPT_SINGLE
         if description:
             prompt = f"{description}\n\n{prompt}"
         return self.adapter.analyze_image(image_path, prompt)
+    
+    def analyze_images(self, image_paths: List[str], description: str = '') -> List[Dict]:
+        prompt = PromptTemplates.IMAGE_ANALYSIS_PROMPT.format(count=len(image_paths))
+        if description:
+            prompt = f"{description}\n\n{prompt}"
+        return self.adapter.analyze_images(image_paths, prompt)
     
     def generate_from_modules(self, modules: List[Dict], case_types: List[str], case_count: int, description: str = '', smart_mode: bool = False) -> List[Dict]:
         all_testcases = []

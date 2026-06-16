@@ -43,23 +43,40 @@ def get_project(project_id):
 def analyze_image():
     data = request.get_json()
     image_id = data.get('image_id')
+    image_ids = data.get('image_ids')
+    config_id = data.get('config_id') or data.get('provider')
     provider = data.get('provider', 'kimi')
     description = data.get('description', '')
     
-    if not image_id:
-        return jsonify({'error': 'image_id required'}), 400
+    if not image_id and not image_ids:
+        return jsonify({'error': 'image_id or image_ids required'}), 400
     
-    image = Image.query.get(image_id)
-    if not image:
-        return jsonify({'error': 'Image not found'}), 404
-    
-    ai_config = AIConfig.query.filter_by(provider=provider, is_active=True).first()
+    ai_config = None
+    if config_id:
+        ai_config = AIConfig.query.get(config_id)
     if not ai_config:
-        return jsonify({'error': f'AI config for {provider} not found'}), 404
+        ai_config = AIConfig.query.filter_by(provider=provider, is_active=True).first()
+    if not ai_config:
+        return jsonify({'error': 'AI config not found'}), 404
     
     try:
         generator = CaseGenerator(ai_config)
-        modules = generator.analyze_image(image.file_path, description)
+        if image_ids and len(image_ids) > 1:
+            paths = []
+            for iid in image_ids:
+                img = Image.query.get(iid)
+                if not img:
+                    return jsonify({'error': f'Image {iid} not found'}), 404
+                paths.append(img.file_path)
+            modules = generator.analyze_images(paths, description)
+        else:
+            iid = image_id or (image_ids[0] if image_ids else None)
+            if not iid:
+                return jsonify({'error': 'No image provided'}), 400
+            image = Image.query.get(iid)
+            if not image:
+                return jsonify({'error': 'Image not found'}), 404
+            modules = generator.analyze_image(image.file_path, description)
         return jsonify({'success': True, 'modules': modules}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -70,6 +87,7 @@ def generate_testcases():
     image_id = data.get('image_id')
     project_id = data.get('project_id')
     provider = data.get('provider', 'deepseek')
+    config_id = data.get('config_id')
     case_types = data.get('case_types', ['functional', 'ui', 'boundary', 'exception'])
     case_count = data.get('case_count', 10)
     description = data.get('description', '')
@@ -84,9 +102,13 @@ def generate_testcases():
     if not image:
         return jsonify({'error': 'Image not found'}), 404
     
-    ai_config = AIConfig.query.filter_by(provider=provider, is_active=True).first()
+    ai_config = None
+    if config_id:
+        ai_config = AIConfig.query.get(config_id)
     if not ai_config:
-        return jsonify({'error': f'AI config for {provider} not found'}), 404
+        ai_config = AIConfig.query.filter_by(provider=provider, is_active=True).first()
+    if not ai_config:
+        return jsonify({'error': 'AI config not found'}), 404
     
     try:
         generator = CaseGenerator(ai_config)

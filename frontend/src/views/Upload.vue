@@ -75,15 +75,20 @@
                   新建迭代
                 </el-button>
               </div>
-            </el-form-item>
+</el-form-item>
+
+            <div class="linked-analysis-bar">
+              <el-switch v-model="form.linkedAnalysis" active-text="关联分析" />
+              <span class="form-hint" style="margin-left:8px">多图时合并分析，AI理解页面关联流程</span>
+            </div>
 
             <el-form-item label="原型分析模型">
-              <el-select v-model="form.analyzeProvider" placeholder="选择分析模型" style="width: 100%">
+              <el-select v-model="form.analyzeConfigId" placeholder="选择分析模型" style="width: 100%">
                 <el-option
                   v-for="config in filteredAIConfigs"
-                  :key="config.provider"
+                  :key="config.id"
                   :label="getProviderLabel(config)"
-                  :value="config.provider"
+                  :value="config.id"
                 />
               </el-select>
             </el-form-item>
@@ -125,12 +130,12 @@
             </div>
 
             <el-form-item label="用例生成模型">
-              <el-select v-model="form.genProvider" placeholder="选择生成模型" style="width: 100%">
+              <el-select v-model="form.genConfigId" placeholder="选择生成模型" style="width: 100%">
                 <el-option
                   v-for="config in aiConfigs"
-                  :key="config.provider"
+                  :key="config.id"
                   :label="getProviderLabel(config)"
-                  :value="config.provider"
+                  :value="config.id"
                 />
               </el-select>
             </el-form-item>
@@ -458,8 +463,9 @@ const editingGenModel = ref(false)
 const form = ref({
   projectId: '',
   sprintId: '',
-  analyzeProvider: '',
-  genProvider: '',
+  analyzeConfigId: '',
+  genConfigId: '',
+  linkedAnalysis: true,
   caseTypes: ['functional', 'ui', 'boundary', 'exception'],
   caseCount: 10,
   smartMode: false
@@ -471,15 +477,15 @@ const newProject = ref({
 })
 
 const canGenerate = computed(() => {
-  return form.value.projectId && fileList.value.length > 0 && form.value.analyzeProvider && form.value.genProvider
+  return form.value.projectId && fileList.value.length > 0 && form.value.analyzeConfigId && form.value.genConfigId
 })
 
 const currentAnalyzeModel = computed(() => {
-  return aiConfigs.value.find(c => c.provider === form.value.analyzeProvider)
+  return aiConfigs.value.find(c => c.id === form.value.analyzeConfigId)
 })
 
 const currentGenModel = computed(() => {
-  return aiConfigs.value.find(c => c.provider === form.value.genProvider)
+  return aiConfigs.value.find(c => c.id === form.value.genConfigId)
 })
 
 const statusCount = ref({ pending: 0, approved: 0, total: 0 })
@@ -491,10 +497,7 @@ const approvalRate = computed(() => {
 })
 
 const filteredAIConfigs = computed(() => {
-  return aiConfigs.value.filter(c => {
-    if (uploadMode.value === 'image') return c.provider === 'volcengine'
-    return c.provider === 'kimi'
-  })
+  return aiConfigs.value.filter(c => c.supports_vision !== false)
 })
 
 const currentFile = computed(() => {
@@ -591,8 +594,7 @@ async function createSprint() {
 }
 
 function getProviderLabel(config) {
-  const nameMap = { volcengine: '豆包', kimi: 'Kimi-2.6' }
-  const name = nameMap[config.provider] || config.provider
+  const name = config.provider || config.id
   const model = config.model ? ` / ${config.model}` : ''
   return `${name}${model}`
 }
@@ -600,8 +602,10 @@ function getProviderLabel(config) {
 function switchMode(mode) {
   uploadMode.value = mode
   fileList.value = []
-  imageDescriptions.value = []
+imageDescriptions.value = []
   currentDocContent.value = ''
+  form.value.analyzeConfigId = ''
+  form.value.genConfigId = ''
 }
 
 async function createProject() {
@@ -745,11 +749,16 @@ async function generateCases() {
 
     analyzing.value = true
     try {
-      const res = await api.analyzeImage({
-        image_id: uploadedImageIds.value[0],
-        provider: form.value.analyzeProvider,
+      const payload = {
+        config_id: form.value.analyzeConfigId,
         description: imageDescriptions.value[0] || ''
-      })
+      }
+      if (form.value.linkedAnalysis && uploadedImageIds.value.length > 1) {
+        payload.image_ids = uploadedImageIds.value
+      } else {
+        payload.image_id = uploadedImageIds.value[0]
+      }
+      const res = await api.analyzeImage(payload)
       modules.value = res.data.modules || []
       moduleForms.value = modules.value.map(m => ({
         module: m.module || '',
@@ -786,7 +795,7 @@ async function confirmModules() {
         await api.generateTestcases({
           image_id: uploadedImageIds.value[i],
           project_id: form.value.projectId,
-          provider: form.value.genProvider,
+          config_id: form.value.genConfigId,
           case_types: mod.case_types || [],
           case_count: mod.case_count || 10,
           description: imageDescriptions.value[i] || '',
@@ -1449,4 +1458,10 @@ function goToCases() {
   font-size: 14px;
 }
 .edit-icon:hover { color: #0071e3; }
+
+.linked-analysis-bar {
+  margin: -8px 0 16px 100px;
+  display: flex;
+  align-items: center;
+}
 </style>

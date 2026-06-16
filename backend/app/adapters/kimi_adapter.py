@@ -168,10 +168,21 @@ class KimiAdapter(BaseAIAdapter):
         return json.loads(json_match)
 
     def analyze_image(self, image_path: str, prompt: str) -> List[Dict]:
-        optimized_path = self.optimize_image(image_path)
-        
+        return self._analyze_images([image_path], prompt)
+    
+    def analyze_images(self, image_paths: List[str], prompt: str) -> List[Dict]:
+        optimized_paths = []
         try:
-            base64_image = self.image_to_base64(optimized_path)
+            for p in image_paths:
+                optimized_paths.append(self.optimize_image(p))
+            
+            content_parts = [{"type": "text", "text": prompt}]
+            for op in optimized_paths:
+                base64_image = self.image_to_base64(op)
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                })
             
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
@@ -187,22 +198,11 @@ class KimiAdapter(BaseAIAdapter):
                     },
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": prompt
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                }
-                            }
-                        ]
+                        "content": content_parts
                     }
                 ],
                 "temperature": 0.3,
-                "max_tokens": self.max_tokens
+                "max_tokens": max(self.max_tokens, len(image_paths) * 2000)
             }
             
             response = requests.post(
@@ -226,5 +226,6 @@ class KimiAdapter(BaseAIAdapter):
         except Exception as e:
             raise Exception(f"Kimi API error: {str(e)}")
         finally:
-            if os.path.exists(optimized_path):
-                os.remove(optimized_path)
+            for op in optimized_paths:
+                if os.path.exists(op):
+                    os.remove(op)
