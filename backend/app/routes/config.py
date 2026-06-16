@@ -80,10 +80,10 @@ def test_connection():
     data = request.get_json()
     api_key = data.get('api_key')
     api_base = data.get('api_base') or "https://api.yygu.cn/v3/llm.chat/chat/completions"
-    model = data.get('model') or "kimi-k2.6"
+    model = data.get('model')
     
-    if not api_key:
-        return jsonify({'success': False, 'error': 'API Key required'}), 400
+    if not api_key or not model:
+        return jsonify({'success': False, 'error': 'API Key and model required'}), 400
     
     try:
         response = requests.post(
