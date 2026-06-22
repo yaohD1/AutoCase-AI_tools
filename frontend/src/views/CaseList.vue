@@ -215,7 +215,9 @@
       <template #footer>
         <div class="review-footer">
           <span class="progress-info">
+            <el-button size="small" :disabled="currentReviewIndex <= 0" @click="moveToPrev">上一个</el-button>
             审批进度: {{ reviewForm.id ? currentReviewIndex + 1 : 0 }} / {{ allPendingCount }}
+            <el-button size="small" :disabled="currentReviewIndex >= allPendingTestcases.length - 1" @click="moveToNextManual">下一个</el-button>
           </span>
           <div class="review-actions">
             <el-button type="danger" @click="handleFail" :loading="failing" :disabled="!reviewForm.id">
@@ -653,6 +655,18 @@ function moveToNext() {
     return
   }
 
+  loadTestCaseToForm(allPendingTestcases.value[currentReviewIndex.value])
+}
+
+function moveToPrev() {
+  if (currentReviewIndex.value <= 0) return
+  currentReviewIndex.value--
+  loadTestCaseToForm(allPendingTestcases.value[currentReviewIndex.value])
+}
+
+function moveToNextManual() {
+  if (currentReviewIndex.value >= allPendingTestcases.value.length - 1) return
+  currentReviewIndex.value++
   loadTestCaseToForm(allPendingTestcases.value[currentReviewIndex.value])
 }
 

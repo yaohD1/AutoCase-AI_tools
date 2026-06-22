@@ -244,9 +244,7 @@ def batch_delete_testcases():
 def get_pending_testcases():
     project_id = request.args.get('project_id')
 
-    query = TestCase.query.filter(
-        TestCase.status.in_(['pending', 'failed'])
-    )
+    query = TestCase.query.filter_by(status='pending')
 
     if project_id:
         query = query.filter_by(project_id=project_id)

@@ -141,7 +141,7 @@ class GeneralAdapter(BaseAIAdapter):
         return json.loads(json_match)
     
     def analyze_image(self, image_path: str, prompt: str) -> List[Dict]:
-        return self._analyze_images([image_path], prompt)
+        return self.analyze_images([image_path], prompt)
     
     def analyze_images(self, image_paths: List[str], prompt: str) -> List[Dict]:
         optimized_paths = []

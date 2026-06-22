@@ -196,11 +196,11 @@
               <Document v-else />
             </el-icon>
             <div class="el-upload__text">
-              {{ uploadMode === 'image' ? '拖拽图片到此处或' : '拖拽文档到此处或' }} <em>点击上传</em>
+              {{ uploadMode === 'image' ? '拖拽图片、Ctrl+V 粘贴截图或' : '拖拽文档到此处或' }} <em>点击上传</em>
             </div>
             <template #tip>
               <div class="el-upload__tip">
-                {{ uploadMode === 'image' ? '支持 JPG/PNG/WebP 格式，单个文件不超过 10MB' : '支持 Word(.docx/.doc) / Markdown(.md) 格式' }}
+                {{ uploadMode === 'image' ? '支持 JPG/PNG/WebP 格式，支持 Ctrl+V 粘贴截图，单文件不超过 10MB' : '支持 Word(.docx/.doc) / Markdown(.md) 格式' }}
               </div>
             </template>
           </el-upload>
@@ -234,6 +234,29 @@
         </el-button>
       </div>
     </el-card>
+
+    <el-dialog
+      v-model="showProgressDialog"
+      :title="generateStep === 'uploading' ? '上传图片' : 'AI 图片分析'"
+      width="420px"
+      top="18vh"
+      :close-on-click-modal="false"
+      :show-close="false"
+      center
+      class="progress-dialog"
+    >
+      <div class="progress-content">
+        <div class="ios-spinner">
+          <div v-for="i in 12" :key="i" class="ios-bar" :style="{ transform: `rotate(${i * 30}deg)`, animationDelay: `${i * 0.08}s` }" />
+        </div>
+        <div class="progress-text">
+          {{ generateStep === 'uploading' ? '正在上传图片...' : 'AI 正在分析原型图' }}
+        </div>
+        <div class="progress-sub">
+          {{ generateStep === 'uploading' ? '请稍候' : '通常需要 30-60 秒，图片越复杂耗时越长' }}
+        </div>
+      </div>
+    </el-dialog>
 
     <el-dialog v-model="showCreateProject" title="新建项目" width="500px">
       <el-form :model="newProject" label-width="100px">
@@ -420,10 +443,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Plus, PictureFilled, Document, Edit } from '@element-plus/icons-vue'
+import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading } from '@element-plus/icons-vue'
 import api from '../api'
 
 const router = useRouter()
@@ -457,6 +480,8 @@ const currentModuleIndex = ref(0)
 const moduleForms = ref([])
 const uploadedImageIds = ref([])
 const analyzing = ref(false)
+const generateStep = ref('')
+const showProgressDialog = computed(() => !!generateStep.value)
 const editingAnalyzeModel = ref(false)
 const editingGenModel = ref(false)
 
@@ -512,6 +537,11 @@ function isImageFile(file) {
 onMounted(() => {
   loadProjects()
   loadAIConfigs()
+  document.addEventListener('paste', handlePaste)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('paste', handlePaste)
 })
 
 async function loadStatusCount() {
@@ -597,6 +627,30 @@ function getProviderLabel(config) {
   const name = config.provider || config.id
   const model = config.model ? ` / ${config.model}` : ''
   return `${name}${model}`
+}
+
+function handlePaste(e) {
+  if (uploadMode.value !== 'image') return
+  const items = e.clipboardData?.items
+  if (!items) return
+  
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault()
+      const blob = item.getAsFile()
+      const filename = `screenshot_${Date.now()}.png`
+      const file = new File([blob], filename, { type: 'image/png' })
+      
+      fileList.value.push({
+        name: filename,
+        url: URL.createObjectURL(blob),
+        raw: file
+      })
+      imageDescriptions.value.push('')
+      ElMessage.success('截图已添加')
+      break
+    }
+  }
 }
 
 function switchMode(mode) {
@@ -736,6 +790,7 @@ async function generateCases() {
   if (!canGenerate.value) return
 
   generating.value = true
+  generateStep.value = 'uploading'
   uploadedImageIds.value = []
 
   try {
@@ -747,6 +802,7 @@ async function generateCases() {
       uploadedImageIds.value.push(uploadRes.data.image.id)
     }
 
+    generateStep.value = 'analyzing'
     analyzing.value = true
     try {
       const payload = {
@@ -771,14 +827,17 @@ async function generateCases() {
         smart_mode: form.value.smartMode
       }))
       currentModuleIndex.value = 0
+      generateStep.value = ''
       showModuleReview.value = true
     } catch (err) {
+      generateStep.value = ''
       ElMessage.error('图片分析失败：' + (err.response?.data?.error || err.message))
     } finally {
       analyzing.value = false
     }
 
   } catch (error) {
+    generateStep.value = ''
     ElMessage.error('生成失败：' + (error.response?.data?.error || error.message))
   } finally {
     generating.value = false
@@ -812,6 +871,7 @@ async function confirmModules() {
       }
     }
     showModuleReview.value = false
+    generateStep.value = ''
 
     ElMessageBox.alert('生成完成，请到用例列表进行审批', '成功', {
       confirmButtonText: '前往查看',
@@ -1463,5 +1523,54 @@ function goToCases() {
   margin: -8px 0 16px 100px;
   display: flex;
   align-items: center;
+}
+
+.progress-dialog :deep(.el-dialog) {
+  border-radius: 16px;
+}
+
+.progress-content {
+  text-align: center;
+  padding: 32px 0 16px;
+}
+
+.progress-text {
+  margin-top: 24px;
+  font-size: 14px;
+  color: #303133;
+  font-weight: 500;
+}
+
+.progress-sub {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.ios-spinner {
+  width: 36px;
+  height: 36px;
+  position: relative;
+  margin: 0 auto;
+}
+
+.ios-bar {
+  position: absolute;
+  left: 50%;
+  top: 8%;
+  width: 6%;
+  height: 18%;
+  margin-left: -3%;
+  background: #0071e3;
+  border-radius: 2px;
+  transform-origin: 50% 350%;
+  opacity: 0.05;
+  animation: ios-fade 1.2s linear infinite;
+}
+
+@keyframes ios-fade {
+  0%, 100% { opacity: 0.05; }
+  10% { opacity: 1; }
+  50% { opacity: 0.05; }
 }
 </style>
