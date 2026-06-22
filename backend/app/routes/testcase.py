@@ -1,7 +1,7 @@
 import json
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
-from app.models import db, TestCase, Image, Project, AIConfig, Sprint
+from app.models import db, TestCase, Image, Project, AIConfig, Sprint, PendingModule
 from app.services.case_generator import CaseGenerator
 
 testcase_bp = Blueprint('testcase', __name__)
@@ -200,6 +200,83 @@ def update_testcase(case_id):
     db.session.commit()
     
     return jsonify({'success': True, 'testcase': testcase.to_dict()}), 200
+
+
+@testcase_bp.route('/pending-modules', methods=['GET'])
+def get_pending_modules():
+    project_id = request.args.get('project_id')
+    sprint_id = request.args.get('sprint_id')
+    
+    query = PendingModule.query.filter_by(status='pending')
+    if project_id:
+        query = query.filter_by(project_id=project_id)
+    if sprint_id:
+        query = query.filter_by(sprint_id=sprint_id)
+    
+    modules = query.order_by(PendingModule.created_at.asc()).all()
+    
+    return jsonify({'modules': [m.to_dict() for m in modules]}), 200
+
+
+@testcase_bp.route('/pending-modules/<module_id>/approve', methods=['POST'])
+def approve_pending_module(module_id):
+    mod = PendingModule.query.get(module_id)
+    if not mod:
+        return jsonify({'error': 'Module not found'}), 404
+    
+    data = request.get_json()
+    if data:
+        for key in ['module', 'ui_elements', 'function_description', 'interaction_flow', 'test_focus', 'case_types', 'case_count', 'smart_mode']:
+            if key in data:
+                setattr(mod, key, data[key])
+    
+    mod.status = 'approved'
+    mod.updated_at = datetime.utcnow()
+    db.session.commit()
+    
+    return jsonify({'success': True, 'module': mod.to_dict()}), 200
+
+
+@testcase_bp.route('/pending-modules/<module_id>/fail', methods=['POST'])
+def fail_pending_module(module_id):
+    mod = PendingModule.query.get(module_id)
+    if not mod:
+        return jsonify({'error': 'Module not found'}), 404
+    
+    mod.status = 'failed'
+    mod.updated_at = datetime.utcnow()
+    db.session.commit()
+    
+    return jsonify({'success': True, 'module': mod.to_dict()}), 200
+
+
+@testcase_bp.route('/pending-modules', methods=['POST'])
+def save_pending_modules():
+    data_list = request.get_json()
+    if not data_list or not isinstance(data_list, list):
+        return jsonify({'error': 'Array of modules required'}), 400
+    
+    saved = []
+    for d in data_list:
+        mod = PendingModule(
+            project_id=d.get('project_id', ''),
+            sprint_id=d.get('sprint_id', ''),
+            image_id=d.get('image_id', ''),
+            module=d.get('module', ''),
+            ui_elements=d.get('ui_elements', ''),
+            function_description=d.get('function_description', ''),
+            interaction_flow=d.get('interaction_flow', ''),
+            test_focus=d.get('test_focus', ''),
+            case_types=d.get('case_types', ''),
+            case_count=d.get('case_count', 10),
+            smart_mode=d.get('smart_mode', False),
+            status='pending'
+        )
+        db.session.add(mod)
+        saved.append(mod)
+    
+    db.session.commit()
+    return jsonify({'success': True, 'count': len(saved)}), 201
 
 @testcase_bp.route('/cases/<case_id>', methods=['DELETE'])
 def delete_testcase(case_id):

@@ -84,6 +84,20 @@ batchDeleteTestcases(ids) {
     return api.post(`/cases/${id}/fail`)
   },
 
+  // 待审模块
+  getPendingModules(params) {
+    return api.get('/pending-modules', { params })
+  },
+  approvePendingModule(id, data) {
+    return api.post(`/pending-modules/${id}/approve`, data)
+  },
+  failPendingModule(id) {
+    return api.post(`/pending-modules/${id}/fail`)
+  },
+  savePendingModules(data) {
+    return api.post('/pending-modules', data)
+  },
+
 // 导出
   exportXmind(data) {
     return api.post('/export', data)

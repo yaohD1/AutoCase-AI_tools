@@ -226,6 +226,10 @@
         <el-button @click="openDescDialog" :disabled="fileList.length === 0" class="btn-secondary">
           填写功能介绍
         </el-button>
+        <el-button type="warning" @click="openPendingModuleDialog">
+          待审模块
+          <el-badge :value="pendingModuleCount" :hidden="pendingModuleCount === 0" class="pending-badge" />
+        </el-button>
         <el-button type="primary" @click="generateCases" :loading="generating" :disabled="!canGenerate">
           生成测试用例
         </el-button>
@@ -439,6 +443,49 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="showModuleApproval"
+      title="审批模块"
+      width="800px"
+      top="8vh"
+      :close-on-click-modal="false"
+    >
+      <div v-if="pendingModules.length > 0 && pendingModules[currentModuleApprovalIndex]" class="review-layout">
+        <el-form label-width="100px">
+          <el-form-item label="模块名称">
+            <el-input v-model="pendingModules[currentModuleApprovalIndex].module" />
+          </el-form-item>
+          <el-form-item label="UI元素">
+            <el-input v-model="pendingModules[currentModuleApprovalIndex].ui_elements" />
+          </el-form-item>
+          <el-form-item label="功能描述">
+            <el-input v-model="pendingModules[currentModuleApprovalIndex].function_description" type="textarea" :rows="3" />
+          </el-form-item>
+          <el-form-item label="交互流程">
+            <el-input v-model="pendingModules[currentModuleApprovalIndex].interaction_flow" type="textarea" :rows="3" />
+          </el-form-item>
+          <el-form-item label="测试关注点">
+            <el-input v-model="pendingModules[currentModuleApprovalIndex].test_focus" type="textarea" :rows="2" />
+          </el-form-item>
+        </el-form>
+      </div>
+      <el-empty v-else description="没有待审模块" />
+
+      <template #footer>
+        <div class="review-footer">
+          <span class="progress-info">
+            <el-button size="small" :disabled="currentModuleApprovalIndex <= 0" @click="moveToPrevPendingModule">上一个</el-button>
+            审批进度: {{ pendingModules.length > 0 ? currentModuleApprovalIndex + 1 : 0 }} / {{ pendingModules.length }}
+            <el-button size="small" :disabled="currentModuleApprovalIndex >= pendingModules.length - 1" @click="moveToNextPendingModuleManual">下一个</el-button>
+          </span>
+          <div class="review-actions">
+            <el-button type="danger" @click="handleModuleFail" :loading="moduleApprovalFailing">不通过</el-button>
+            <el-button type="success" @click="handleModuleApprove" :loading="moduleApprovalPassing">通过</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -482,6 +529,12 @@ const uploadedImageIds = ref([])
 const analyzing = ref(false)
 const generateStep = ref('')
 const showProgressDialog = computed(() => !!generateStep.value)
+const pendingModuleCount = ref(0)
+const pendingModules = ref([])
+const showModuleApproval = ref(false)
+const currentModuleApprovalIndex = ref(0)
+const moduleApprovalPassing = ref(false)
+const moduleApprovalFailing = ref(false)
 const editingAnalyzeModel = ref(false)
 const editingGenModel = ref(false)
 
@@ -546,6 +599,7 @@ onUnmounted(() => {
 
 async function loadStatusCount() {
   loadSprints()
+  loadPendingModuleCount()
   if (!form.value.projectId) return
   try {
     const params = { project_id: form.value.projectId }
@@ -564,6 +618,94 @@ async function loadStatusCount() {
     }
   } catch {
   }
+}
+
+async function loadPendingModuleCount() {
+  if (!form.value.projectId) return
+  try {
+    const params = { project_id: form.value.projectId }
+    if (form.value.sprintId) params.sprint_id = form.value.sprintId
+    const res = await api.getPendingModules(params)
+    pendingModuleCount.value = (res.data.modules || []).length
+  } catch {}
+}
+
+async function openPendingModuleDialog() {
+  if (!form.value.projectId) {
+    ElMessage.warning('请先选择项目')
+    return
+  }
+  try {
+    const params = { project_id: form.value.projectId }
+    if (form.value.sprintId) params.sprint_id = form.value.sprintId
+    const res = await api.getPendingModules(params)
+    pendingModules.value = res.data.modules || []
+    if (pendingModules.value.length === 0) {
+      ElMessage.info('没有待审模块')
+      return
+    }
+    currentModuleApprovalIndex.value = 0
+    showModuleApproval.value = true
+  } catch {
+    ElMessage.error('加载待审模块失败')
+  }
+}
+
+async function handleModuleApprove() {
+  moduleApprovalPassing.value = true
+  try {
+    const mod = pendingModules.value[currentModuleApprovalIndex.value]
+    await api.approvePendingModule(mod.id, {
+      module: mod.module,
+      ui_elements: mod.ui_elements,
+      function_description: mod.function_description,
+      interaction_flow: mod.interaction_flow,
+      test_focus: mod.test_focus,
+      case_types: mod.case_types,
+      case_count: mod.case_count,
+      smart_mode: mod.smart_mode
+    })
+    ElMessage.success('模块审批通过')
+    moveToNextPendingModule()
+  } catch (error) {
+    ElMessage.error('审批失败')
+  } finally {
+    moduleApprovalPassing.value = false
+  }
+}
+
+async function handleModuleFail() {
+  moduleApprovalFailing.value = true
+  try {
+    const mod = pendingModules.value[currentModuleApprovalIndex.value]
+    await api.failPendingModule(mod.id)
+    ElMessage.warning('模块不通过')
+    moveToNextPendingModule()
+  } catch {
+    ElMessage.error('操作失败')
+  } finally {
+    moduleApprovalFailing.value = false
+  }
+}
+
+function moveToNextPendingModule() {
+  currentModuleApprovalIndex.value++
+  if (currentModuleApprovalIndex.value >= pendingModules.value.length) {
+    ElMessage.success('所有待审模块已完成审批')
+    showModuleApproval.value = false
+    loadPendingModuleCount()
+    return
+  }
+}
+
+function moveToPrevPendingModule() {
+  if (currentModuleApprovalIndex.value <= 0) return
+  currentModuleApprovalIndex.value--
+}
+
+function moveToNextPendingModuleManual() {
+  if (currentModuleApprovalIndex.value >= pendingModules.value.length - 1) return
+  currentModuleApprovalIndex.value++
 }
 
 async function loadProjects() {
@@ -828,6 +970,23 @@ async function generateCases() {
       }))
       currentModuleIndex.value = 0
       generateStep.value = ''
+      
+      const imageId = uploadedImageIds.value[0] || ''
+      api.savePendingModules(modules.value.map(m => ({
+        project_id: form.value.projectId,
+        sprint_id: form.value.sprintId || '',
+        image_id: imageId,
+        module: m.module || '',
+        ui_elements: (m.ui_elements || []).join(', '),
+        function_description: m.function_description || '',
+        interaction_flow: m.interaction_flow || '',
+        test_focus: (m.test_focus || []).join(', '),
+        case_types: (form.value.caseTypes || []).join(','),
+        case_count: form.value.caseCount,
+        smart_mode: form.value.smartMode
+      }))).catch(() => {})
+      
+      loadPendingModuleCount()
       showModuleReview.value = true
     } catch (err) {
       generateStep.value = ''
