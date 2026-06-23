@@ -54,7 +54,7 @@ class CaseGenerator:
             prompt = f"{description}\n\n{prompt}"
         return self.adapter.analyze_images(image_paths, prompt)
     
-    def generate_from_modules(self, modules: List[Dict], case_types: List[str], case_count: int, description: str = '', smart_mode: bool = False) -> List[Dict]:
+    def generate_from_modules(self, modules: List[Dict], case_types: List[str], case_count: int, description: str = '', smart_mode: bool = False, image_path: str = None) -> List[Dict]:
         all_testcases = []
         
         if smart_mode:
@@ -68,7 +68,10 @@ class CaseGenerator:
         full_prompt = f"{prompt}\n\n## 模块描述（基于设计图分析）\n```json\n{modules_text}\n```"
         
         try:
-            testcases = self.adapter.generate_from_text(full_prompt)
+            if image_path and self.adapter.supports_vision:
+                testcases = self.adapter.generate_with_image(image_path, full_prompt)
+            else:
+                testcases = self.adapter.generate_from_text(full_prompt)
             
             for case in testcases:
                 priority = case.get('priority', 'P2')

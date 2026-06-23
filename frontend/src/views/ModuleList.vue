@@ -219,6 +219,15 @@
                 style="margin-left: 12px"
               />
             </el-form-item>
+            <el-form-item label="附带原图">
+              <el-switch
+                v-model="generatingModules[genIndex].use_vision"
+                :disabled="!moduleGenModelSupportsVision"
+              />
+              <span class="form-hint" style="margin-left:8px;color:#909399;font-size:12px">
+                {{ moduleGenModelSupportsVision ? '附带原图可提升用例质量' : '当前模型不支持图片分析' }}
+              </span>
+            </el-form-item>
           </el-form>
         </div>
       </div>
@@ -285,6 +294,12 @@ const genDragOffset = ref({ x: 0, y: 0 })
 const genIsDragging = ref(false)
 let genDragStart = { x: 0, y: 0 }
 
+const aiConfigList = ref([])
+const moduleGenModelSupportsVision = computed(() => {
+  const activeConfig = aiConfigList.value.find(c => c.is_active)
+  return activeConfig?.supports_vision !== false
+})
+
 function onSelectionChange(val) {
   selection.value = val
 }
@@ -304,6 +319,7 @@ async function batchDeleteModules() {
 
 onMounted(() => {
   loadProjects()
+  loadAIConfigs()
 })
 
 async function loadProjects() {
@@ -323,6 +339,13 @@ async function loadProjects() {
     console.error('加载项目失败:', error)
     ElMessage.error('加载项目失败')
   }
+}
+
+async function loadAIConfigs() {
+  try {
+    const res = await api.getAIConfigs()
+    aiConfigList.value = res.data.configs || []
+  } catch {}
 }
 
 async function loadSprints() {
@@ -495,7 +518,8 @@ function openGenerateDialog() {
     ...m,
     case_types: typeof m.case_types === 'string' ? m.case_types.split(',').filter(Boolean) : (m.case_types || ['functional', 'ui', 'boundary', 'exception']),
     case_count: m.case_count || 10,
-    smart_mode: m.smart_mode || false
+    smart_mode: m.smart_mode || false,
+    use_vision: false
   }))
   genIndex.value = 0
   genImageScale.value = 1
@@ -522,7 +546,7 @@ async function confirmGenerate() {
   try {
     for (const mod of generatingModules.value) {
       await api.generateTestcases({
-        image_id: mod.image_id || undefined,
+        image_id: (mod.use_vision && moduleGenModelSupportsVision.value) ? (mod.image_id || undefined) : undefined,
         project_id: selectedProject.value,
         case_types: mod.case_types,
         case_count: mod.case_count,

@@ -117,7 +117,8 @@ def generate_testcases():
     try:
         generator = CaseGenerator(ai_config)
         if modules:
-            testcases = generator.generate_from_modules(modules, case_types, case_count, description, smart_mode)
+            image_path = image.file_path if image else None
+            testcases = generator.generate_from_modules(modules, case_types, case_count, description, smart_mode, image_path)
         else:
             testcases = generator.generate(image.file_path, case_types, case_count, description)
         

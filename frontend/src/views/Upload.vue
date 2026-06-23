@@ -311,13 +311,19 @@
           </div>
           <div class="desc-image-thumbs" v-if="fileList.length > 1">
             <template v-if="uploadMode === 'image'">
-              <img
+              <div
                 v-for="(file, index) in fileList"
                 :key="file.uid"
-                :src="getFilePreviewUrl(index)"
-                :class="{ active: index === currentFileIndex }"
-                @click="switchFile(index)"
-              />
+                class="desc-thumb-wrap"
+              >
+                <img
+                  :src="getFilePreviewUrl(index)"
+                  :class="{ active: index === currentFileIndex }"
+                  @click="switchFile(index)"
+                />
+                <span v-if="isCropFile(file)" class="crop-badge">裁剪</span>
+                <span class="thumb-delete" @click.stop="removeThumb(index)">&times;</span>
+              </div>
             </template>
             <template v-else>
               <div
@@ -352,8 +358,32 @@
       </div>
       <el-empty v-else description="请先上传文件" />
       <template #footer>
-        <el-button @click="showDescDialog = false">完成</el-button>
+        <div class="desc-footer">
+          <el-button type="warning" @click="startCrop" :disabled="!isImageFile(currentFile)">框选原图</el-button>
+          <el-button @click="showDescDialog = false">完成</el-button>
+        </div>
       </template>
+      <div v-if="isCropping" class="crop-fullscreen" @click.self="cancelCrop">
+        <div class="crop-image-container"
+             @mousedown="startCropDrag"
+             @mousemove="onCropDrag"
+             @mouseup="endCropDrag"
+             @mouseleave="endCropDrag">
+          <img
+            ref="cropImageRef"
+            :src="getFilePreviewUrl(currentFileIndex)"
+            class="crop-full-image"
+            draggable="false"
+          />
+          <div class="crop-event-layer" />
+          <div v-if="cropRect" class="crop-overlay" :style="cropOverlayStyle" />
+        </div>
+        <div class="crop-fullscreen-bar">
+          <el-button @click="cancelCrop">取消</el-button>
+          <el-button @click="clearCropRect" :disabled="!cropRect">清空</el-button>
+          <el-button type="primary" @click="confirmCrop" :disabled="!cropRect" :loading="cropEnding">确定</el-button>
+        </div>
+      </div>
     </el-dialog>
 
     <el-dialog v-model="showModuleReview" title="模块审核" width="1400px" top="2vh" :close-on-click-modal="false">
@@ -429,6 +459,15 @@
                 active-text="智能"
                 style="margin-left: 12px"
               />
+            </el-form-item>
+            <el-form-item label="附带原图">
+              <el-switch
+                v-model="moduleForms[currentModuleIndex].use_vision"
+                :disabled="!genModelSupportsVision"
+              />
+              <span class="form-hint" style="margin-left:8px;color:#909399;font-size:12px">
+                {{ genModelSupportsVision ? '附带原图可提升用例质量' : '当前模型不支持图片分析' }}
+              </span>
             </el-form-item>
           </el-form>
           <el-empty v-else description="暂无模块数据" />
@@ -519,6 +558,12 @@ const descImageScale = ref(1)
 const descIsDragging = ref(false)
 const descDragStart = ref({ x: 0, y: 0 })
 const descDragOffset = ref({ x: 0, y: 0 })
+const isCropping = ref(false)
+const cropStart = ref(null)
+const cropRect = ref(null)
+const cropLocked = ref(false)
+const cropImageRef = ref(null)
+const cropEnding = ref(false)
 const showModuleReview = ref(false)
 const confirming = ref(false)
 const moduleImageScale = ref(1)
@@ -561,6 +606,21 @@ const newProject = ref({
 
 const canGenerate = computed(() => {
   return form.value.projectId && fileList.value.length > 0 && form.value.analyzeConfigId && form.value.genConfigId
+})
+
+const genModelSupportsVision = computed(() => {
+  const config = aiConfigs.value.find(c => c.id === form.value.genConfigId)
+  return config?.supports_vision !== false
+})
+
+const cropOverlayStyle = computed(() => {
+  if (!cropRect.value) return { display: 'none' }
+  return {
+    left: cropRect.value.x + 'px',
+    top: cropRect.value.y + 'px',
+    width: cropRect.value.width + 'px',
+    height: cropRect.value.height + 'px'
+  }
 })
 
 const currentAnalyzeModel = computed(() => {
@@ -860,6 +920,9 @@ function switchFile(index) {
   currentFileIndex.value = index
   descImageScale.value = 1
   descDragOffset.value = { x: 0, y: 0 }
+  isCropping.value = false
+  cropRect.value = null
+  cropStart.value = null
   if (uploadMode.value === 'doc') {
     loadDocContent(index)
   }
@@ -919,6 +982,97 @@ function endDescDrag() {
   descIsDragging.value = false
 }
 
+function startCrop() {
+  isCropping.value = true
+  cropRect.value = null
+  cropStart.value = null
+  cropLocked.value = false
+}
+
+function startCropDrag(e) {
+  e.stopPropagation()
+  if (cropLocked.value) return
+  const viewer = e.currentTarget
+  const rect = viewer.getBoundingClientRect()
+  cropStart.value = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+}
+
+function onCropDrag(e) {
+  if (!cropStart.value || cropLocked.value) return
+  const viewer = e.currentTarget
+  const rect = viewer.getBoundingClientRect()
+  const cx = e.clientX - rect.left
+  const cy = e.clientY - rect.top
+  const x = Math.min(cropStart.value.x, cx)
+  const y = Math.min(cropStart.value.y, cy)
+  const w = Math.abs(cx - cropStart.value.x)
+  const h = Math.abs(cy - cropStart.value.y)
+  if (w < 5 || h < 5) {
+    cropRect.value = null
+    return
+  }
+  cropRect.value = { x, y, width: w, height: h }
+}
+
+function endCropDrag() {
+  if (cropRect.value && cropRect.value.width >= 5 && cropRect.value.height >= 5) {
+    cropLocked.value = true
+  }
+}
+
+async function confirmCrop() {
+  if (!cropRect.value || !cropImageRef.value) return
+  cropEnding.value = true
+  const img = cropImageRef.value
+  const viewer = img.parentElement
+  const viewerRect = viewer.getBoundingClientRect()
+  const imgRect = img.getBoundingClientRect()
+  const scaleX = img.naturalWidth / imgRect.width
+  const scaleY = img.naturalHeight / imgRect.height
+  const offsetX = imgRect.left - viewerRect.left
+  const offsetY = imgRect.top - viewerRect.top
+  const sx = (cropRect.value.x - offsetX) * scaleX
+  const sy = (cropRect.value.y - offsetY) * scaleY
+  const sw = cropRect.value.width * scaleX
+  const sh = cropRect.value.height * scaleY
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(sw)
+  canvas.height = Math.round(sh)
+  const ctx = canvas.getContext('2d')
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
+  const url = URL.createObjectURL(blob)
+  const uid = Date.now()
+  const cropFile = {
+    uid: uid,
+    name: `crop_${uid}.png`,
+    url: url,
+    raw: new File([blob], `crop_${uid}.png`, { type: 'image/png' })
+  }
+  fileList.value.push(cropFile)
+  imageDescriptions.value.push('')
+  currentFileIndex.value = fileList.value.length - 1
+  isCropping.value = false
+  cropRect.value = null
+  cropStart.value = null
+  cropLocked.value = false
+  ElMessage.success('截图已添加')
+  cropEnding.value = false
+}
+
+function cancelCrop() {
+  isCropping.value = false
+  cropRect.value = null
+  cropStart.value = null
+  cropLocked.value = false
+}
+
+function clearCropRect() {
+  cropRect.value = null
+  cropStart.value = null
+  cropLocked.value = false
+}
+
 async function openDescDialog() {
   if (fileList.value.length === 0) return
   currentFileIndex.value = 0
@@ -931,6 +1085,21 @@ async function openDescDialog() {
 function getFilePreviewUrl(index) {
   const file = fileList.value[index]
   return file?.url || ''
+}
+
+function isCropFile(file) {
+  return file.name && file.name.startsWith('crop_')
+}
+
+function removeThumb(index) {
+  if (fileList.value.length <= 1) {
+    ElMessage.warning('至少保留一张图片')
+    return
+  }
+  removeFile(index)
+  if (currentFileIndex.value >= fileList.value.length) {
+    currentFileIndex.value = fileList.value.length - 1
+  }
 }
 
 async function generateCases() {
@@ -971,7 +1140,8 @@ async function generateCases() {
         test_focus: (m.test_focus || []).join(', '),
         case_types: [...form.value.caseTypes],
         case_count: form.value.caseCount,
-        smart_mode: form.value.smartMode
+        smart_mode: form.value.smartMode,
+        use_vision: false
       }))
       currentModuleIndex.value = 0
       generateStep.value = ''
@@ -1038,7 +1208,7 @@ async function confirmModules() {
       for (let j = 0; j < moduleForms.value.length; j++) {
         const mod = moduleForms.value[j]
         await api.generateTestcases({
-          image_id: uploadedImageIds.value[i],
+          image_id: (mod.use_vision && genModelSupportsVision.value) ? uploadedImageIds.value[i] : undefined,
           project_id: form.value.projectId,
           config_id: form.value.genConfigId,
           case_types: mod.case_types || [],
@@ -1512,6 +1682,61 @@ function goToModules() {
   color: #606266;
 }
 
+.desc-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.crop-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  flex-direction: column;
+}
+
+.crop-image-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  position: relative;
+  cursor: crosshair;
+  padding: 20px;
+}
+
+.crop-full-image {
+  max-width: 90vw;
+  max-height: 80vh;
+  object-fit: contain;
+  user-select: none;
+}
+
+.crop-overlay {
+  position: absolute;
+  border: 2px dashed #409EFF;
+  background: rgba(64, 158, 255, 0.15);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.crop-event-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.crop-fullscreen-bar {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px 0 24px;
+}
+
 .desc-doc-viewer {
   flex: 1;
   background: #fff;
@@ -1537,6 +1762,44 @@ function goToModules() {
   margin-top: 8px;
   overflow-x: auto;
   padding-bottom: 2px;
+}
+
+.desc-thumb-wrap {
+  position: relative;
+}
+
+.crop-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: #409EFF;
+  color: #fff;
+  font-size: 9px;
+  border-radius: 3px;
+  padding: 1px 4px;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.thumb-delete {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 16px;
+  height: 16px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  border-radius: 0 8px 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.thumb-delete:hover {
+  background: rgba(220, 38, 38, 0.85);
 }
 
 .desc-image-thumbs img {
