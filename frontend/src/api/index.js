@@ -94,8 +94,14 @@ batchDeleteTestcases(ids) {
   failPendingModule(id) {
     return api.post(`/pending-modules/${id}/fail`)
   },
+  batchDeleteModules(ids) {
+    return api.post('/pending-modules/batch-delete', { ids })
+  },
   savePendingModules(data) {
     return api.post('/pending-modules', data)
+  },
+  getApprovedModules(params) {
+    return api.get('/pending-modules/approved', { params })
   },
 
 // 导出

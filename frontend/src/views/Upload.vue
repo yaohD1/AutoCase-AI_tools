@@ -226,15 +226,14 @@
         <el-button @click="openDescDialog" :disabled="fileList.length === 0" class="btn-secondary">
           填写功能介绍
         </el-button>
-        <el-button type="warning" @click="openPendingModuleDialog">
-          待审模块
-          <el-badge :value="pendingModuleCount" :hidden="pendingModuleCount === 0" class="pending-badge" />
-        </el-button>
         <el-button type="primary" @click="generateCases" :loading="generating" :disabled="!canGenerate">
           生成测试用例
         </el-button>
         <el-button @click="goToCases" :disabled="!form.projectId" class="btn-secondary">
           查看用例列表
+        </el-button>
+        <el-button type="warning" @click="goToModules" :disabled="!form.projectId">
+          查看模块列表
         </el-button>
       </div>
     </el-card>
@@ -437,10 +436,14 @@
       </div>
       <el-empty v-else description="AI分析中或分析失败，请重试" />
       <template #footer>
-        <el-button @click="showModuleReview = false">取消</el-button>
-        <el-button type="primary" @click="confirmModules" :loading="confirming" :disabled="modules.length === 0">
-          确认并生成用例
-        </el-button>
+        <div class="review-footer">
+          <div class="review-actions">
+            <el-button @click="showModuleReview = false">取消</el-button>
+            <el-button type="primary" @click="confirmModules" :loading="confirming" :disabled="modules.length === 0">
+              确认并生成用例
+            </el-button>
+          </div>
+        </div>
       </template>
     </el-dialog>
 
@@ -535,6 +538,8 @@ const showModuleApproval = ref(false)
 const currentModuleApprovalIndex = ref(0)
 const moduleApprovalPassing = ref(false)
 const moduleApprovalFailing = ref(false)
+const modulePassing = ref(false)
+const moduleFailing = ref(false)
 const editingAnalyzeModel = ref(false)
 const editingGenModel = ref(false)
 
@@ -970,22 +975,7 @@ async function generateCases() {
       }))
       currentModuleIndex.value = 0
       generateStep.value = ''
-      
-      const imageId = uploadedImageIds.value[0] || ''
-      api.savePendingModules(modules.value.map(m => ({
-        project_id: form.value.projectId,
-        sprint_id: form.value.sprintId || '',
-        image_id: imageId,
-        module: m.module || '',
-        ui_elements: (m.ui_elements || []).join(', '),
-        function_description: m.function_description || '',
-        interaction_flow: m.interaction_flow || '',
-        test_focus: (m.test_focus || []).join(', '),
-        case_types: (form.value.caseTypes || []).join(','),
-        case_count: form.value.caseCount,
-        smart_mode: form.value.smartMode
-      }))).catch(() => {})
-      
+
       loadPendingModuleCount()
       showModuleReview.value = true
     } catch (err) {
@@ -1007,6 +997,43 @@ async function confirmModules() {
   confirming.value = true
   try {
     generating.value = true
+    const imageId = uploadedImageIds.value[0] || ''
+
+    await api.savePendingModules(moduleForms.value.map(m => ({
+      project_id: form.value.projectId,
+      sprint_id: form.value.sprintId || '',
+      image_id: imageId,
+      module: m.module || '',
+      ui_elements: m.ui_elements || '',
+      function_description: m.function_description || '',
+      interaction_flow: m.interaction_flow || '',
+      test_focus: m.test_focus || '',
+      case_types: (m.case_types || []).join(','),
+      case_count: m.case_count || 10,
+      smart_mode: m.smart_mode || false
+    })))
+
+    const pendingResult = await api.getPendingModules({
+      project_id: form.value.projectId,
+      sprint_id: form.value.sprintId || ''
+    })
+    const pendingList = (pendingResult.data.modules || []).filter(m => m.status === 'pending')
+    for (const mod of moduleForms.value) {
+      const matched = pendingList.find(m => m.module === mod.module)
+      if (matched?.id) {
+        await api.approvePendingModule(matched.id, {
+          module: mod.module,
+          ui_elements: mod.ui_elements,
+          function_description: mod.function_description,
+          interaction_flow: mod.interaction_flow,
+          test_focus: mod.test_focus,
+          case_types: (mod.case_types || []).join(','),
+          case_count: mod.case_count || 10,
+          smart_mode: mod.smart_mode || false
+        })
+      }
+    }
+
     for (let i = 0; i < uploadedImageIds.value.length; i++) {
       for (let j = 0; j < moduleForms.value.length; j++) {
         const mod = moduleForms.value[j]
@@ -1058,6 +1085,33 @@ function nextModule() {
   }
 }
 
+async function handleModulePassInReview() {
+  modulePassing.value = true
+  try {
+    ElMessage.success('模块通过')
+    if (currentModuleIndex.value < moduleForms.value.length - 1) {
+      currentModuleIndex.value++
+    }
+  } catch {
+    ElMessage.error('操作失败')
+  } finally {
+    modulePassing.value = false
+  }
+}
+
+async function handleModuleFailInReview() {
+  moduleFailing.value = true
+  try {
+    ElMessage.warning('模块不通过')
+    if (currentModuleIndex.value < moduleForms.value.length - 1) {
+      currentModuleIndex.value++
+    }
+  } catch {
+  } finally {
+    moduleFailing.value = false
+  }
+}
+
 function handleModuleZoom(e) {
   e.preventDefault()
   const delta = e.deltaY > 0 ? -0.1 : 0.1
@@ -1091,6 +1145,10 @@ function endModuleDrag() { moduleIsDragging.value = false }
 
 function goToCases() {
   router.push({ path: '/cases', query: { project_id: form.value.projectId } })
+}
+
+function goToModules() {
+  router.push({ path: '/modules', query: { project_id: form.value.projectId } })
 }
 </script>
 

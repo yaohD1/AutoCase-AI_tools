@@ -95,12 +95,16 @@ def generate_testcases():
     smart_mode = data.get('smart_mode', False)
     sprint_id = data.get('sprint_id', '')
     
-    if not image_id or not project_id:
-        return jsonify({'error': 'image_id and project_id required'}), 400
+    if not project_id:
+        return jsonify({'error': 'project_id required'}), 400
+    if not image_id and not modules:
+        return jsonify({'error': 'image_id or modules required'}), 400
     
-    image = Image.query.get(image_id)
-    if not image:
-        return jsonify({'error': 'Image not found'}), 404
+    image = None
+    if image_id:
+        image = Image.query.get(image_id)
+        if not image:
+            return jsonify({'error': 'Image not found'}), 404
     
     ai_config = None
     if config_id:
@@ -128,7 +132,7 @@ def generate_testcases():
                 steps=json.dumps(case_data.get('steps', []), ensure_ascii=False),
                 expected=case_data.get('expected', ''),
                 case_type=case_data.get('case_type', 'functional'),
-                image_source=image.filename,
+                image_source=image.filename if image else '',
                 ai_provider=provider,
                 status='pending',
                 sprint_id=sprint_id
@@ -202,6 +206,30 @@ def update_testcase(case_id):
     return jsonify({'success': True, 'testcase': testcase.to_dict()}), 200
 
 
+@testcase_bp.route('/pending-modules/approved', methods=['GET'])
+def get_approved_modules():
+    project_id = request.args.get('project_id')
+    sprint_id = request.args.get('sprint_id')
+    
+    query = PendingModule.query.filter_by(status='approved')
+    if project_id:
+        query = query.filter_by(project_id=project_id)
+    if sprint_id:
+        query = query.filter_by(sprint_id=sprint_id)
+    
+    modules = query.order_by(PendingModule.created_at.desc()).all()
+    result = []
+    for m in modules:
+        d = m.to_dict()
+        if m.image_id:
+            img = Image.query.get(m.image_id)
+            d['image_filename'] = img.filename if img else None
+        else:
+            d['image_filename'] = None
+        result.append(d)
+    return jsonify({'modules': result}), 200
+
+
 @testcase_bp.route('/pending-modules', methods=['GET'])
 def get_pending_modules():
     project_id = request.args.get('project_id')
@@ -214,8 +242,16 @@ def get_pending_modules():
         query = query.filter_by(sprint_id=sprint_id)
     
     modules = query.order_by(PendingModule.created_at.asc()).all()
-    
-    return jsonify({'modules': [m.to_dict() for m in modules]}), 200
+    result = []
+    for m in modules:
+        d = m.to_dict()
+        if m.image_id:
+            img = Image.query.get(m.image_id)
+            d['image_filename'] = img.filename if img else None
+        else:
+            d['image_filename'] = None
+        result.append(d)
+    return jsonify({'modules': result}), 200
 
 
 @testcase_bp.route('/pending-modules/<module_id>/approve', methods=['POST'])
@@ -312,6 +348,26 @@ def batch_delete_testcases():
             'deleted_count': count,
             'message': f'Successfully deleted {count} testcases'
         }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@testcase_bp.route('/pending-modules/batch-delete', methods=['POST'])
+def batch_delete_pending_modules():
+    data = request.get_json()
+    ids = data.get('ids', [])
+    if not ids:
+        return jsonify({'error': 'No module ids provided'}), 400
+    try:
+        count = 0
+        for mid in ids:
+            mod = PendingModule.query.get(mid)
+            if mod:
+                db.session.delete(mod)
+                count += 1
+        db.session.commit()
+        return jsonify({'success': True, 'deleted_count': count}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500

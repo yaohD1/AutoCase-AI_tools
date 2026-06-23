@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Upload from '../views/Upload.vue'
 import CaseList from '../views/CaseList.vue'
+import ModuleList from '../views/ModuleList.vue'
 import Settings from '../views/Settings.vue'
 
 const routes = [
@@ -13,6 +14,11 @@ const routes = [
     path: '/cases',
     name: 'CaseList',
     component: CaseList
+  },
+  {
+    path: '/modules',
+    name: 'ModuleList',
+    component: ModuleList
   },
   {
     path: '/settings',
