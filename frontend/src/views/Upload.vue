@@ -359,7 +359,10 @@
       <el-empty v-else description="请先上传文件" />
       <template #footer>
         <div class="desc-footer">
-          <el-button type="warning" @click="startCrop" :disabled="!isImageFile(currentFile)">框选原图</el-button>
+          <div class="desc-footer-left">
+            <el-button type="warning" @click="startCrop" :disabled="!isImageFile(currentFile)">框选原图</el-button>
+            <el-button type="warning" @click="startAnnotation" :disabled="!isImageFile(currentFile)">标注交互</el-button>
+          </div>
           <el-button @click="showDescDialog = false">完成</el-button>
         </div>
       </template>
@@ -382,6 +385,72 @@
           <el-button @click="cancelCrop">取消</el-button>
           <el-button @click="clearCropRect" :disabled="!cropRect">清空</el-button>
           <el-button type="primary" @click="confirmCrop" :disabled="!cropRect" :loading="cropEnding">确定</el-button>
+        </div>
+      </div>
+      <div v-if="isAnnotating" class="crop-fullscreen annotation-mode">
+        <div class="annotation-layout">
+          <div class="annotation-paths">
+            <div class="annotation-paths-title">交互路径标注</div>
+            <div class="paths-panel">
+              <div v-for="(path, pi) in interactionPaths" :key="pi" class="path-item">
+                <div class="path-header">
+                  <el-input v-model="path.name" placeholder="路径名称" size="small" style="flex:1" />
+                  <el-button size="small" type="danger" text @click="removePath(pi)">
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </div>
+                <el-input v-model="path.hint" placeholder="定位提示（可选）" size="small" style="margin-top:4px" />
+                <div class="path-steps">
+                  <div v-for="(step, si) in path.steps" :key="si" class="step-item">
+                    <el-select v-model="step.type" size="small" style="width:80px">
+                      <el-option label="按钮" value="按钮" />
+                      <el-option label="输入框" value="输入框" />
+                      <el-option label="下拉菜单" value="下拉菜单" />
+                      <el-option label="文本" value="文本" />
+                      <el-option label="图片" value="图片" />
+                    </el-select>
+                    <el-input v-model="step.label" placeholder="名称" size="small" style="flex:1" />
+                    <el-button size="small" type="danger" text @click="removeStep(pi, si)">
+                      <el-icon><Close /></el-icon>
+                    </el-button>
+                  </div>
+                </div>
+                <el-button size="small" @click="addStep(pi)" style="margin-top:4px">+ 添加步骤</el-button>
+              </div>
+              <el-button size="small" type="warning" @click="addPath" style="width:100%;margin-top:8px">+ 添加路径</el-button>
+            </div>
+          </div>
+          <div class="annotation-image">
+            <div class="desc-image-viewer" style="flex:1;border-radius:10px;background:#fff"
+                 @wheel="handleDescZoom"
+                 @mousedown="startDescDrag"
+                 @mousemove="onDescDrag"
+                 @mouseup="endDescDrag"
+                 @mouseleave="endDescDrag">
+              <img
+                :src="getFilePreviewUrl(currentFileIndex)"
+                :style="{
+                  transform: `scale(${descImageScale}) translate(${descDragOffset.x}px, ${descDragOffset.y}px)`,
+                  cursor: descIsDragging ? 'grabbing' : descImageScale > 1 ? 'grab' : 'default',
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  objectFit: 'contain',
+                  transition: 'transform 0.2s ease',
+                  userSelect: 'none'
+                }"
+                draggable="false"
+              />
+            </div>
+            <div class="desc-zoom-controls">
+              <el-button circle size="small" @click="descZoomOut">-</el-button>
+              <span>{{ Math.round(descImageScale * 100) }}%</span>
+              <el-button circle size="small" @click="descZoomIn">+</el-button>
+              <el-button size="small" @click="descImageScale = 1; descDragOffset = { x: 0, y: 0 }">重置</el-button>
+            </div>
+          </div>
+        </div>
+        <div class="crop-fullscreen-bar">
+          <el-button @click="isAnnotating = false">完成</el-button>
         </div>
       </div>
     </el-dialog>
@@ -535,7 +604,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading } from '@element-plus/icons-vue'
+import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading, Delete, Close } from '@element-plus/icons-vue'
 import api from '../api'
 
 const router = useRouter()
@@ -552,6 +621,7 @@ const showCreateProject = ref(false)
 const showDescDialog = ref(false)
 const currentFileIndex = ref(0)
 const imageDescriptions = ref([])
+const interactionPaths = ref([])
 const uploadMode = ref('image')
 const currentDocContent = ref('')
 const descImageScale = ref(1)
@@ -559,6 +629,7 @@ const descIsDragging = ref(false)
 const descDragStart = ref({ x: 0, y: 0 })
 const descDragOffset = ref({ x: 0, y: 0 })
 const isCropping = ref(false)
+const isAnnotating = ref(false)
 const cropStart = ref(null)
 const cropRect = ref(null)
 const cropLocked = ref(false)
@@ -898,6 +969,7 @@ function handleFileChange(file, newFileList) {
   fileList.value = newFileList
   if (newFileList.length > oldLen) {
     imageDescriptions.value.push('')
+    interactionPaths.value = []
     currentFileIndex.value = newFileList.length - 1
     showDescDialog.value = true
     if (uploadMode.value === 'doc') {
@@ -980,6 +1052,12 @@ function onDescDrag(e) {
 
 function endDescDrag() {
   descIsDragging.value = false
+}
+
+function startAnnotation() {
+  isAnnotating.value = true
+  descImageScale.value = 1
+  descDragOffset.value = { x: 0, y: 0 }
 }
 
 function startCrop() {
@@ -1073,6 +1151,40 @@ function clearCropRect() {
   cropLocked.value = false
 }
 
+function addPath() {
+  interactionPaths.value.push({
+    name: '',
+    hint: '',
+    steps: [{ type: '按钮', label: '' }]
+  })
+}
+
+function removePath(index) {
+  interactionPaths.value.splice(index, 1)
+}
+
+function addStep(pi) {
+  interactionPaths.value[pi].steps.push({ type: '按钮', label: '' })
+}
+
+function removeStep(pi, si) {
+  interactionPaths.value[pi].steps.splice(si, 1)
+}
+
+function formatInteractionPaths(paths) {
+  if (!paths || paths.length === 0) return ''
+  let text = '\n\n## 用户标注的交互路径\n\n'
+  paths.forEach((p, i) => {
+    const validSteps = p.steps.filter(s => s.label && s.label.trim())
+    if (validSteps.length === 0) return
+    text += `路径${i + 1}：${p.name || `路径${i + 1}`}\n`
+    text += `操作顺序：${validSteps.map(s => `${s.type}"${s.label}"`).join(' → ')}\n`
+    if (p.hint && p.hint.trim()) text += `位置提示：${p.hint}\n`
+    text += '\n'
+  })
+  return text.trim() ? text : ''
+}
+
 async function openDescDialog() {
   if (fileList.value.length === 0) return
   currentFileIndex.value = 0
@@ -1121,9 +1233,12 @@ async function generateCases() {
     generateStep.value = 'analyzing'
     analyzing.value = true
     try {
+      const interactionText = formatInteractionPaths(interactionPaths.value)
+      const baseDesc = imageDescriptions.value[0] || ''
+      const fullDescription = interactionText + (baseDesc ? '\n\n## 功能介绍\n' + baseDesc : '')
       const payload = {
         config_id: form.value.analyzeConfigId,
-        description: imageDescriptions.value[0] || ''
+        description: fullDescription
       }
       if (form.value.linkedAnalysis && uploadedImageIds.value.length > 1) {
         payload.image_ids = uploadedImageIds.value
@@ -1207,13 +1322,15 @@ async function confirmModules() {
     for (let i = 0; i < uploadedImageIds.value.length; i++) {
       for (let j = 0; j < moduleForms.value.length; j++) {
         const mod = moduleForms.value[j]
+        const genInteractionText = formatInteractionPaths(interactionPaths.value)
+        const genBaseDesc = imageDescriptions.value[i] || ''
         await api.generateTestcases({
           image_id: (mod.use_vision && genModelSupportsVision.value) ? uploadedImageIds.value[i] : undefined,
           project_id: form.value.projectId,
           config_id: form.value.genConfigId,
           case_types: mod.case_types || [],
           case_count: mod.case_count || 10,
-          description: imageDescriptions.value[i] || '',
+          description: genInteractionText + (genBaseDesc ? '\n\n## 功能介绍\n' + genBaseDesc : ''),
           sprint_id: form.value.sprintId || '',
           modules: [{
             module: mod.module,
@@ -1689,6 +1806,11 @@ function goToModules() {
   width: 100%;
 }
 
+.desc-footer-left {
+  display: flex;
+  gap: 8px;
+}
+
 .crop-fullscreen {
   position: fixed;
   inset: 0;
@@ -1735,6 +1857,40 @@ function goToModules() {
   justify-content: center;
   gap: 16px;
   padding: 16px 0 24px;
+}
+
+.annotation-layout {
+  display: flex;
+  gap: 20px;
+  flex: 1;
+  padding: 20px;
+  overflow: hidden;
+}
+
+.annotation-paths {
+  width: 40%;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 10px;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.annotation-paths-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1d1d1f;
+  margin-bottom: 12px;
+}
+
+.annotation-image {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #f5f7fa;
+  border-radius: 10px;
+  padding: 12px;
 }
 
 .desc-doc-viewer {
@@ -1879,6 +2035,35 @@ function goToModules() {
   background: #fff;
   border-color: #0071e3;
   box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.1);
+}
+
+.paths-panel {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.path-item {
+  background: #f5f7fa;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+
+.path-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.path-steps {
+  margin-top: 6px;
+}
+
+.step-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
 }
 
 .module-review-layout {
