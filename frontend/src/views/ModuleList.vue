@@ -17,7 +17,7 @@
                 :value="project.id"
               />
             </el-select>
-            <el-select v-model="selectedSprint" placeholder="选择迭代" class="sprint-select" @change="loadModules" clearable>
+            <el-select v-model="selectedSprint" placeholder="选择迭代" class="sprint-select" @change="loadModules">
               <el-option
                 v-for="sprint in sprints"
                 :key="sprint.id"
@@ -198,12 +198,19 @@
               <el-input v-model="generatingModules[genIndex].test_focus" type="textarea" :rows="3" placeholder="用逗号分隔" />
             </el-form-item>
             <el-form-item label="用例类型">
-              <el-checkbox-group v-model="generatingModules[genIndex].case_types">
-                <el-checkbox label="functional">功能测试</el-checkbox>
-                <el-checkbox label="ui">UI交互测试</el-checkbox>
-                <el-checkbox label="boundary">边界值测试</el-checkbox>
-                <el-checkbox label="exception">异常场景测试</el-checkbox>
-              </el-checkbox-group>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <el-checkbox-group v-model="generatingModules[genIndex].case_types" :disabled="generatingModules[genIndex].smart_case_type">
+                  <el-checkbox label="functional">功能测试</el-checkbox>
+                  <el-checkbox label="ui">UI交互测试</el-checkbox>
+                  <el-checkbox label="boundary">边界值测试</el-checkbox>
+                  <el-checkbox label="exception">异常场景测试</el-checkbox>
+                </el-checkbox-group>
+                <el-switch
+                  v-model="generatingModules[genIndex].smart_case_type"
+                  active-text="智能"
+                  style="margin-left: 12px"
+                />
+              </div>
             </el-form-item>
             <el-form-item label="生成数量">
               <el-input-number
@@ -250,7 +257,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '../api'
@@ -322,6 +329,12 @@ onMounted(() => {
   loadAIConfigs()
 })
 
+watch(() => route.path, () => {
+  if (route.path === '/modules') {
+    loadProjects()
+  }
+})
+
 async function loadProjects() {
   try {
     const res = await api.getProjects()
@@ -333,6 +346,9 @@ async function loadProjects() {
     }
     if (selectedProject.value) {
       await loadSprints()
+      if (route.query.sprint_id) {
+        selectedSprint.value = route.query.sprint_id
+      }
       await loadModules()
     }
   } catch (error) {
@@ -519,7 +535,8 @@ function openGenerateDialog() {
     case_types: typeof m.case_types === 'string' ? m.case_types.split(',').filter(Boolean) : (m.case_types || ['functional', 'ui', 'boundary', 'exception']),
     case_count: m.case_count || 10,
     smart_mode: m.smart_mode || false,
-    use_vision: false
+    use_vision: false,
+    smart_case_type: false
   }))
   genIndex.value = 0
   genImageScale.value = 1
@@ -544,11 +561,11 @@ function nextGenModule() {
 async function confirmGenerate() {
   generating.value = true
   try {
-    for (const mod of generatingModules.value) {
-      await api.generateTestcases({
+    const promises = generatingModules.value.map(mod =>
+      api.generateTestcases({
         image_id: (mod.use_vision && moduleGenModelSupportsVision.value) ? (mod.image_id || undefined) : undefined,
         project_id: selectedProject.value,
-        case_types: mod.case_types,
+        case_types: mod.smart_case_type ? [] : mod.case_types,
         case_count: mod.case_count,
         smart_mode: mod.smart_mode,
         sprint_id: selectedSprint.value || '',
@@ -560,7 +577,8 @@ async function confirmGenerate() {
           test_focus: mod.test_focus.split(',').map(s => s.trim()).filter(Boolean)
         }]
       })
-    }
+    )
+    await Promise.all(promises)
     ElMessage.success('用例生成完成')
     showGenerate.value = false
     selection.value = []

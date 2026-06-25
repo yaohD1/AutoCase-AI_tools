@@ -17,7 +17,7 @@
                 :value="project.id"
               />
             </el-select>
-            <el-select v-model="selectedSprint" placeholder="选择迭代" class="sprint-select" @change="loadTestcases" clearable>
+            <el-select v-model="selectedSprint" placeholder="选择迭代" class="sprint-select" @change="loadTestcases">
               <el-option
                 v-for="sprint in sprints"
                 :key="sprint.id"
@@ -315,7 +315,10 @@ async function loadProjects() {
     }
 
     if (selectedProject.value) {
-      loadSprints()
+      await loadSprints()
+      if (route.query.sprint_id) {
+        selectedSprint.value = route.query.sprint_id
+      }
       loadTestcases()
       loadPendingCount()
     }
@@ -485,7 +488,9 @@ async function openReviewDialog() {
 
   loading.value = true
   try {
-    const res = await api.getPendingTestcases({ project_id: selectedProject.value })
+    const params = { project_id: selectedProject.value }
+    if (selectedSprint.value) params.sprint_id = selectedSprint.value
+    const res = await api.getPendingTestcases(params)
     allPendingTestcases.value = res.data.testcases
     allPendingCount.value = allPendingTestcases.value.length
     projectImages.value = res.data.images || []

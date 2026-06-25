@@ -27,6 +27,12 @@ export default {
   getProject(id) {
     return api.get(`/projects/${id}`)
   },
+  updateProject(id, data) {
+    return api.put(`/projects/${id}`, data)
+  },
+  deleteProject(id) {
+    return api.delete(`/projects/${id}`)
+  },
   
   // 迭代
   getSprints(params) {
@@ -34,6 +40,12 @@ export default {
   },
   createSprint(data) {
     return api.post('/sprints', data)
+  },
+  updateSprint(id, data) {
+    return api.put(`/sprints/${id}`, data)
+  },
+  deleteSprint(id) {
+    return api.delete(`/sprints/${id}`)
   },
   
   // 文件上传

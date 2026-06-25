@@ -39,6 +39,44 @@ def get_project(project_id):
     
     return jsonify({'project': project.to_dict()}), 200
 
+@testcase_bp.route('/projects/<project_id>', methods=['PUT'])
+def update_project(project_id):
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    data = request.get_json()
+    name = data.get('name', '').strip()
+    if name and name != project.name:
+        existing = Project.query.filter_by(name=name).first()
+        if existing:
+            return jsonify({'error': 'Project name already exists'}), 409
+        project.name = name
+    if 'description' in data:
+        project.description = data.get('description', '')
+    db.session.commit()
+    return jsonify({'project': project.to_dict()}), 200
+
+@testcase_bp.route('/projects/<project_id>', methods=['DELETE'])
+def delete_project(project_id):
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    try:
+        sprints = Sprint.query.filter_by(project_id=project_id).all()
+        for sprint in sprints:
+            TestCase.query.filter_by(sprint_id=sprint.id).delete()
+            Image.query.filter_by(sprint_id=sprint.id).delete()
+            db.session.delete(sprint)
+        TestCase.query.filter_by(project_id=project_id).delete()
+        Image.query.filter_by(project_id=project_id).delete()
+        PendingModule.query.filter_by(project_id=project_id).delete()
+        db.session.delete(project)
+        db.session.commit()
+        return jsonify({'success': True}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
 @testcase_bp.route('/analyze-image', methods=['POST'])
 def analyze_image():
     data = request.get_json()
@@ -116,9 +154,10 @@ def generate_testcases():
     
     try:
         generator = CaseGenerator(ai_config)
+        is_smart = smart_mode or not case_types or len(case_types) == 0
         if modules:
             image_path = image.file_path if image else None
-            testcases = generator.generate_from_modules(modules, case_types, case_count, description, smart_mode, image_path)
+            testcases = generator.generate_from_modules(modules, case_types, case_count, description, is_smart, image_path)
         else:
             testcases = generator.generate(image.file_path, case_types, case_count, description)
         
@@ -172,10 +211,10 @@ def get_testcases():
     
     pending_count = 0
     if project_id:
-        pending_count = TestCase.query.filter_by(
-            project_id=project_id, 
-            status='pending'
-        ).count()
+        pq = TestCase.query.filter_by(project_id=project_id, status='pending')
+        if sprint_id:
+            pq = pq.filter_by(sprint_id=sprint_id)
+        pending_count = pq.count()
     
     return jsonify({
         'testcases': [tc.to_dict() for tc in testcases],
@@ -377,11 +416,14 @@ def batch_delete_pending_modules():
 @testcase_bp.route('/cases/pending', methods=['GET'])
 def get_pending_testcases():
     project_id = request.args.get('project_id')
+    sprint_id = request.args.get('sprint_id')
 
     query = TestCase.query.filter_by(status='pending')
 
     if project_id:
         query = query.filter_by(project_id=project_id)
+    if sprint_id:
+        query = query.filter_by(sprint_id=sprint_id)
 
     testcases = query.order_by(TestCase.created_at.desc()).all()
 
@@ -395,9 +437,15 @@ def get_pending_testcases():
             ).all()
             images = [img.to_dict() for img in project_images]
 
-    pending_count = TestCase.query.filter_by(project_id=project_id, status='pending').count() if project_id else 0
-    failed_count = TestCase.query.filter_by(project_id=project_id, status='failed').count() if project_id else 0
-    total_gen_count = TestCase.query.filter_by(project_id=project_id).filter(TestCase.ai_provider.isnot(None)).count() if project_id else 0
+    stats_query = TestCase.query
+    if project_id:
+        stats_query = stats_query.filter_by(project_id=project_id)
+    if sprint_id:
+        stats_query = stats_query.filter_by(sprint_id=sprint_id)
+
+    pending_count = stats_query.filter_by(status='pending').count() if project_id else 0
+    failed_count = stats_query.filter_by(status='failed').count() if project_id else 0
+    total_gen_count = stats_query.filter(TestCase.ai_provider.isnot(None)).count() if project_id else 0
 
     return jsonify({
         'testcases': [tc.to_dict() for tc in testcases],

@@ -47,7 +47,7 @@
           <el-form :model="form" label-width="100px" class="upload-form">
             <el-form-item label="项目">
               <div class="project-select-row">
-                <el-select v-model="form.projectId" placeholder="选择项目" style="flex: 1" @change="loadStatusCount">
+                <el-select v-model="form.projectId" placeholder="选择项目" style="flex: 1" @change="onProjectChange">
                   <el-option
                     v-for="project in projects"
                     :key="project.id"
@@ -390,35 +390,33 @@
       <div v-if="isAnnotating" class="crop-fullscreen annotation-mode">
         <div class="annotation-layout">
           <div class="annotation-paths">
-            <div class="annotation-paths-title">交互路径标注</div>
-            <div class="paths-panel">
-              <div v-for="(path, pi) in interactionPaths" :key="pi" class="path-item">
-                <div class="path-header">
-                  <el-input v-model="path.name" placeholder="路径名称" size="small" style="flex:1" />
-                  <el-button size="small" type="danger" text @click="removePath(pi)">
-                    <el-icon><Delete /></el-icon>
+            <div v-for="(path, pi) in interactionPaths" :key="pi" class="path-section">
+              <div class="path-header">
+                <span class="path-label">{{ path.name || '路径'+(pi+1) }}</span>
+                <el-button size="small" type="danger" text @click="removePath(pi)" :disabled="interactionPaths.length<=1">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </div>
+              <el-input v-model="path.name" placeholder="路径名称" size="small" style="margin-bottom:6px" />
+              <el-input v-model="path.hint" placeholder="定位提示（可选）" size="small" style="margin-bottom:8px" />
+              <div class="path-desc-label">操作描述（用大白话描述你想测试什么）</div>
+              <el-input v-model="path.description" type="textarea" :rows="3" placeholder="例如：我要测试登录功能" size="small" style="margin-bottom:8px" />
+              <div class="path-steps-section">
+                <div class="path-desc-label">步骤列表</div>
+                <div v-for="(step, si) in path.steps" :key="si" class="step-row">
+                  <span class="step-num">{{ si + 1 }}.</span>
+                  <el-input v-model="path.steps[si]" :placeholder="'第'+(si+1)+'步'" size="small" style="flex:1" />
+                  <el-button size="small" type="danger" text @click="removeStep(pi, si)" :disabled="path.steps.length<=1">
+                    <el-icon><Close /></el-icon>
                   </el-button>
-                </div>
-                <el-input v-model="path.hint" placeholder="定位提示（可选）" size="small" style="margin-top:4px" />
-                <div class="path-steps">
-                  <div v-for="(step, si) in path.steps" :key="si" class="step-item">
-                    <el-select v-model="step.type" size="small" style="width:80px">
-                      <el-option label="按钮" value="按钮" />
-                      <el-option label="输入框" value="输入框" />
-                      <el-option label="下拉菜单" value="下拉菜单" />
-                      <el-option label="文本" value="文本" />
-                      <el-option label="图片" value="图片" />
-                    </el-select>
-                    <el-input v-model="step.label" placeholder="名称" size="small" style="flex:1" />
-                    <el-button size="small" type="danger" text @click="removeStep(pi, si)">
-                      <el-icon><Close /></el-icon>
-                    </el-button>
-                  </div>
                 </div>
                 <el-button size="small" @click="addStep(pi)" style="margin-top:4px">+ 添加步骤</el-button>
               </div>
-              <el-button size="small" type="warning" @click="addPath" style="width:100%;margin-top:8px">+ 添加路径</el-button>
+              <div class="path-actions">
+                <el-button size="small" type="primary" @click="runAIAnnotation(pi)" :loading="annotating">AI 识别</el-button>
+              </div>
             </div>
+            <el-button size="small" type="warning" @click="addPath" style="width:100%;margin-top:8px">+ 添加路径</el-button>
           </div>
           <div class="annotation-image">
             <div class="desc-image-viewer" style="flex:1;border-radius:10px;background:#fff"
@@ -450,6 +448,7 @@
           </div>
         </div>
         <div class="crop-fullscreen-bar">
+          <el-button @click="clearAllAnnotations" :disabled="isAnnotateEmpty">清空</el-button>
           <el-button @click="isAnnotating = false">完成</el-button>
         </div>
       </div>
@@ -508,12 +507,19 @@
               <el-input v-model="moduleForms[currentModuleIndex].test_focus" type="textarea" :rows="3" placeholder="用逗号分隔" />
             </el-form-item>
             <el-form-item label="用例类型">
-              <el-checkbox-group v-model="moduleForms[currentModuleIndex].case_types">
-                <el-checkbox label="functional">功能测试</el-checkbox>
-                <el-checkbox label="ui">UI交互测试</el-checkbox>
-                <el-checkbox label="boundary">边界值测试</el-checkbox>
-                <el-checkbox label="exception">异常场景测试</el-checkbox>
-              </el-checkbox-group>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <el-checkbox-group v-model="moduleForms[currentModuleIndex].case_types" :disabled="moduleForms[currentModuleIndex].smart_case_type">
+                  <el-checkbox label="functional">功能测试</el-checkbox>
+                  <el-checkbox label="ui">UI交互测试</el-checkbox>
+                  <el-checkbox label="boundary">边界值测试</el-checkbox>
+                  <el-checkbox label="exception">异常场景测试</el-checkbox>
+                </el-checkbox-group>
+                <el-switch
+                  v-model="moduleForms[currentModuleIndex].smart_case_type"
+                  active-text="智能"
+                  style="margin-left: 12px"
+                />
+              </div>
             </el-form-item>
             <el-form-item label="生成数量">
               <el-input-number
@@ -601,7 +607,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading, Delete, Close } from '@element-plus/icons-vue'
@@ -621,7 +627,7 @@ const showCreateProject = ref(false)
 const showDescDialog = ref(false)
 const currentFileIndex = ref(0)
 const imageDescriptions = ref([])
-const interactionPaths = ref([])
+const interactionPaths = ref([{ name: '', hint: '', description: '', steps: [''] }])
 const uploadMode = ref('image')
 const currentDocContent = ref('')
 const descImageScale = ref(1)
@@ -732,6 +738,11 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('paste', handlePaste)
 })
+
+function onProjectChange() {
+  form.value.sprintId = ''
+  loadStatusCount()
+}
 
 async function loadStatusCount() {
   loadSprints()
@@ -969,7 +980,7 @@ function handleFileChange(file, newFileList) {
   fileList.value = newFileList
   if (newFileList.length > oldLen) {
     imageDescriptions.value.push('')
-    interactionPaths.value = []
+    interactionPaths.value = [{ name: '', hint: '', description: '', steps: [''] }]
     currentFileIndex.value = newFileList.length - 1
     showDescDialog.value = true
     if (uploadMode.value === 'doc') {
@@ -1059,6 +1070,13 @@ function startAnnotation() {
   descImageScale.value = 1
   descDragOffset.value = { x: 0, y: 0 }
 }
+
+const isAnnotateEmpty = computed(() => {
+  const path = interactionPaths.value[0]
+  if (!path) return true
+  const hasSteps = path.steps && path.steps.some(s => s.trim())
+  return (!path.description || !path.description.trim()) && !hasSteps
+})
 
 function startCrop() {
   isCropping.value = true
@@ -1155,7 +1173,8 @@ function addPath() {
   interactionPaths.value.push({
     name: '',
     hint: '',
-    steps: [{ type: '按钮', label: '' }]
+    description: '',
+    steps: ['']
   })
 }
 
@@ -1164,25 +1183,81 @@ function removePath(index) {
 }
 
 function addStep(pi) {
-  interactionPaths.value[pi].steps.push({ type: '按钮', label: '' })
+  interactionPaths.value[pi].steps.push('')
 }
 
 function removeStep(pi, si) {
   interactionPaths.value[pi].steps.splice(si, 1)
 }
 
+const annotating = ref(false)
+async function runAIAnnotation(pi) {
+  const path = interactionPaths.value[pi]
+  if (!path || !path.description || !path.description.trim()) {
+    ElMessage.warning('请先填写操作描述（大白话）')
+    return
+  }
+  if (!form.value.projectId) {
+    ElMessage.warning('请先选择项目')
+    return
+  }
+  annotating.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', fileList.value[currentFileIndex.value].raw)
+    formData.append('project_id', form.value.projectId)
+    const uploadRes = await api.uploadFile(formData)
+    const imageId = uploadRes.data.image.id
+    const prompt = `用户想要：${path.description}\n\n请根据UI设计图，将用户的意图拆解为详细的操作步骤，每条步骤用简短中文描述。只输出JSON格式：{"steps": ["步骤1", "步骤2", ...]}`
+    const res = await api.analyzeImage({ image_id: imageId, description: prompt })
+    let steps = []
+    try {
+      const modules = res.data.modules || []
+      if (modules.length > 0) {
+        const content = modules[0].module || modules[0].function_description || ''
+        const braceIdx = content.indexOf('{')
+        if (braceIdx >= 0) {
+          const parsed = JSON.parse(content.slice(braceIdx))
+          steps = parsed.steps || []
+        }
+      }
+      if (steps.length === 0 && typeof res.data.modules === 'string') {
+        const braceIdx = res.data.modules.indexOf('{')
+        if (braceIdx >= 0) {
+          const parsed = JSON.parse(res.data.modules.slice(braceIdx))
+          steps = parsed.steps || []
+        }
+      }
+    } catch {}
+    
+    if (steps.length > 0) {
+      path.steps = steps
+      ElMessage.success(`AI 识别了 ${steps.length} 个步骤`)
+    } else {
+      ElMessage.warning('AI 未能识别到步骤，请手动填写')
+    }
+  } catch (error) {
+    ElMessage.error('AI 识别失败: ' + (error.response?.data?.error || error.message))
+  } finally {
+    annotating.value = false
+  }
+}
+
 function formatInteractionPaths(paths) {
   if (!paths || paths.length === 0) return ''
   let text = '\n\n## 用户标注的交互路径\n\n'
   paths.forEach((p, i) => {
-    const validSteps = p.steps.filter(s => s.label && s.label.trim())
-    if (validSteps.length === 0) return
+    const validSteps = p.steps.filter(s => s.trim())
+    if (validSteps.length === 0 && !p.description.trim()) return
     text += `路径${i + 1}：${p.name || `路径${i + 1}`}\n`
-    text += `操作顺序：${validSteps.map(s => `${s.type}"${s.label}"`).join(' → ')}\n`
+    if (p.description && p.description.trim()) text += `用户意图：${p.description}\n`
+    if (validSteps.length > 0) {
+      text += `操作步骤：${validSteps.join(' → ')}\n`
+    }
     if (p.hint && p.hint.trim()) text += `位置提示：${p.hint}\n`
     text += '\n'
   })
-  return text.trim() ? text : ''
+  return text
 }
 
 async function openDescDialog() {
@@ -1212,6 +1287,10 @@ function removeThumb(index) {
   if (currentFileIndex.value >= fileList.value.length) {
     currentFileIndex.value = fileList.value.length - 1
   }
+}
+
+function clearAllAnnotations() {
+  interactionPaths.value = [{ name: '', hint: '', description: '', steps: [''] }]
 }
 
 async function generateCases() {
@@ -1256,7 +1335,8 @@ async function generateCases() {
         case_types: [...form.value.caseTypes],
         case_count: form.value.caseCount,
         smart_mode: form.value.smartMode,
-        use_vision: false
+        use_vision: false,
+        smart_case_type: false
       }))
       currentModuleIndex.value = 0
       generateStep.value = ''
@@ -1319,16 +1399,17 @@ async function confirmModules() {
       }
     }
 
+    const promises = []
     for (let i = 0; i < uploadedImageIds.value.length; i++) {
       for (let j = 0; j < moduleForms.value.length; j++) {
         const mod = moduleForms.value[j]
         const genInteractionText = formatInteractionPaths(interactionPaths.value)
         const genBaseDesc = imageDescriptions.value[i] || ''
-        await api.generateTestcases({
+        promises.push(api.generateTestcases({
           image_id: (mod.use_vision && genModelSupportsVision.value) ? uploadedImageIds.value[i] : undefined,
           project_id: form.value.projectId,
           config_id: form.value.genConfigId,
-          case_types: mod.case_types || [],
+          case_types: mod.smart_case_type ? [] : (mod.case_types || []),
           case_count: mod.case_count || 10,
           description: genInteractionText + (genBaseDesc ? '\n\n## 功能介绍\n' + genBaseDesc : ''),
           sprint_id: form.value.sprintId || '',
@@ -1340,16 +1421,17 @@ async function confirmModules() {
             test_focus: mod.test_focus.split(',').map(s => s.trim()).filter(Boolean)
           }],
           smart_mode: mod.smart_mode || false
-        })
+        }))
       }
     }
+    await Promise.all(promises)
     showModuleReview.value = false
     generateStep.value = ''
 
     ElMessageBox.alert('生成完成，请到用例列表进行审批', '成功', {
       confirmButtonText: '前往查看',
       callback: () => {
-        router.push({ path: '/cases', query: { project_id: form.value.projectId, tab: 'pending' } })
+        router.push({ path: '/cases', query: { project_id: form.value.projectId, sprint_id: form.value.sprintId, tab: 'pending' } })
       }
     })
   } catch (error) {
@@ -1431,11 +1513,11 @@ function onModuleDrag(e) {
 function endModuleDrag() { moduleIsDragging.value = false }
 
 function goToCases() {
-  router.push({ path: '/cases', query: { project_id: form.value.projectId } })
+  router.push({ path: '/cases', query: { project_id: form.value.projectId, sprint_id: form.value.sprintId } })
 }
 
 function goToModules() {
-  router.push({ path: '/modules', query: { project_id: form.value.projectId } })
+  router.push({ path: '/modules', query: { project_id: form.value.projectId, sprint_id: form.value.sprintId } })
 }
 </script>
 
@@ -1873,15 +1955,51 @@ function goToModules() {
   flex-direction: column;
   background: #fff;
   border-radius: 10px;
-  padding: 16px;
+  padding: 12px;
   overflow-y: auto;
+  gap: 8px;
 }
 
-.annotation-paths-title {
-  font-size: 16px;
+.path-section {
+  background: #fafafa;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.path-label {
   font-weight: 600;
-  color: #1d1d1f;
-  margin-bottom: 12px;
+  font-size: 13px;
+  color: #333;
+}
+
+.path-desc-label {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 4px;
+}
+
+.path-steps-section {
+  margin-bottom: 8px;
+}
+
+.step-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.step-num {
+  font-size: 12px;
+  color: #909399;
+  flex-shrink: 0;
+  width: 20px;
+}
+
+.path-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .annotation-image {
@@ -2035,35 +2153,6 @@ function goToModules() {
   background: #fff;
   border-color: #0071e3;
   box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.1);
-}
-
-.paths-panel {
-  max-height: 260px;
-  overflow-y: auto;
-}
-
-.path-item {
-  background: #f5f7fa;
-  border-radius: 8px;
-  padding: 10px;
-  margin-bottom: 8px;
-}
-
-.path-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.path-steps {
-  margin-top: 6px;
-}
-
-.step-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 4px;
 }
 
 .module-review-layout {
