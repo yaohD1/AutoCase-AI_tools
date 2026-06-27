@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, send_file, current_app
 import os
-import uuid
+from datetime import datetime
 from app.models import db, TestCase, Project
 from app.services.xmind_builder import XMindBuilder
 
@@ -31,7 +31,7 @@ def export_xmind():
     if not os.path.exists(export_folder):
         os.makedirs(export_folder)
     
-    filename = f"{project.name}_{uuid.uuid4().hex[:8]}.xmind"
+    filename = f"{project.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xmind"
     filepath = os.path.join(export_folder, filename)
     
     builder = XMindBuilder(project.name)
