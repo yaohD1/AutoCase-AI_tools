@@ -10,7 +10,7 @@ def test_kimi_vision():
     url = "https://api.yygu.cn/v3/llm.chat/chat/completions"
     
     headers = {
-        "Authorization": f"Bearer yg-85fb8bbbc7914cb4708b427a0374adae",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
