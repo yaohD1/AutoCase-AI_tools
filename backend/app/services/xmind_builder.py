@@ -59,6 +59,7 @@ class XMindBuilder:
         return modules_list
     
     def save(self, filepath: str):
+        import tempfile
         data = {
             'project_name': self.project_name,
             'testcases': self.testcases_data
@@ -69,15 +70,25 @@ class XMindBuilder:
         script_abs_path = os.path.abspath(script_path)
         filepath_abs = os.path.abspath(filepath)
         
-        result = subprocess.run(
-            ['node', script_abs_path, json_data, filepath_abs],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as tmp:
+            tmp.write(json_data)
+            tmp_path = tmp.name
         
-        if result.returncode != 0:
-            raise Exception(f"XMind generation failed: {result.stderr}")
-        
-        if 'Failed' in result.stdout or 'Error' in result.stdout:
-            raise Exception(f"XMind generation failed: {result.stdout}")
+        try:
+            result = subprocess.run(
+                ['node', script_abs_path, '--input', tmp_path, '--output', filepath_abs],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                raise Exception(f"XMind generation failed: {result.stderr}")
+            
+            if 'Failed' in result.stdout or 'Error' in result.stdout:
+                raise Exception(f"XMind generation failed: {result.stdout}")
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass

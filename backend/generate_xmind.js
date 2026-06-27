@@ -1,18 +1,38 @@
 #!/usr/bin/env node
 
+const fs = require('fs');
 const { Workbook, Topic, Zipper } = require('xmind');
 
-// 从命令行参数获取数据
-const testcasesJson = process.argv[2];
-const outputPath = process.argv[3];
+function parseArgs() {
+    const args = {};
+    const argv = process.argv.slice(2);
+    for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === '--input' && argv[i + 1]) {
+            args.input = argv[i + 1];
+            i++;
+        } else if (argv[i] === '--output' && argv[i + 1]) {
+            args.output = argv[i + 1];
+            i++;
+        } else {
+            args.input = argv[i];
+            args.output = argv[i + 1];
+            i++;
+        }
+    }
+    return args;
+}
 
-if (!testcasesJson || !outputPath) {
-    console.error('Usage: node generate_xmind.js <testcases_json> <output_path>');
+const { input, output } = parseArgs();
+
+if (!input || !output) {
+    console.error('Usage: node generate_xmind.js --input <json_path> --output <xmind_path>');
     process.exit(1);
 }
 
 try {
+    const testcasesJson = fs.readFileSync(input, 'utf-8');
     const data = JSON.parse(testcasesJson);
+    const outputPath = output;
     const { project_name, testcases } = data;
     
     // 创建Workbook
