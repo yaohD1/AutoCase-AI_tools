@@ -4,6 +4,17 @@
 
 AutoCase 是一个基于多 AI 模型的自动化测试用例生成平台，支持从 UI 设计图/文档自动识别功能模块、智能生成测试用例，并提供审批流程和 XMind 思维导图导出。
 
+## 项目截图
+
+### 首页 — 图片上传 & AI 分析
+![首页](./screenshots/home.png)
+
+### 用例列表 & 审批
+![用例列表](./screenshots/cases.png)
+
+### XMind 思维导图导出
+![导出](./screenshots/export.png)
+
 ## 核心功能
 
 - **图片/文档上传**：支持拖拽上传 Figma 设计图、截图、需求文档
