@@ -123,6 +123,7 @@ def analyze_image():
 def generate_testcases():
     data = request.get_json()
     image_id = data.get('image_id')
+    image_ids = data.get('image_ids')
     project_id = data.get('project_id')
     provider = data.get('provider', 'deepseek')
     config_id = data.get('config_id')
@@ -135,14 +136,22 @@ def generate_testcases():
     
     if not project_id:
         return jsonify({'error': 'project_id required'}), 400
-    if not image_id and not modules:
-        return jsonify({'error': 'image_id or modules required'}), 400
+    if not image_id and not modules and not image_ids:
+        return jsonify({'error': 'image_id, image_ids or modules required'}), 400
     
-    image = None
+    image_paths = []
+    first_image = None
     if image_id:
-        image = Image.query.get(image_id)
-        if not image:
-            return jsonify({'error': 'Image not found'}), 404
+        first_image = Image.query.get(image_id)
+        if first_image:
+            image_paths.append(first_image.file_path)
+    if image_ids:
+        for iid in image_ids:
+            img = Image.query.get(iid)
+            if img:
+                image_paths.append(img.file_path)
+                if not first_image:
+                    first_image = img
     
     ai_config = None
     if config_id:
@@ -156,10 +165,23 @@ def generate_testcases():
         generator = CaseGenerator(ai_config)
         is_smart = smart_mode or not case_types or len(case_types) == 0
         if modules:
-            image_path = image.file_path if image else None
-            testcases = generator.generate_from_modules(modules, case_types, case_count, description, is_smart, image_path)
+            testcases = generator.generate_from_modules(modules, case_types, case_count, description, is_smart, image_paths if image_paths else None)
         else:
-            testcases = generator.generate(image.file_path, case_types, case_count, description)
+            if not image_paths:
+                return jsonify({'error': 'No valid image found'}), 400
+            testcases = generator.generate(image_paths[0], case_types, case_count, description)
+        
+        image_source_val = ''
+        if modules and len(modules) > 0:
+            mid = modules[0].get('image_id')
+            if mid:
+                img = Image.query.get(mid)
+                if img:
+                    image_source_val = img.filename
+        if not image_source_val and image_paths:
+            img = Image.query.filter_by(file_path=image_paths[0]).first()
+            if img:
+                image_source_val = img.filename
         
         for case_data in testcases:
             testcase = TestCase(
@@ -172,7 +194,7 @@ def generate_testcases():
                 steps=json.dumps(case_data.get('steps', []), ensure_ascii=False),
                 expected=case_data.get('expected', ''),
                 case_type=case_data.get('case_type', 'functional'),
-                image_source=image.filename if image else '',
+                image_source=image_source_val,
                 ai_provider=provider,
                 status='pending',
                 sprint_id=sprint_id
@@ -436,6 +458,8 @@ def get_pending_testcases():
                 Image.filename.in_(filenames)
             ).all()
             images = [img.to_dict() for img in project_images]
+        if not images:
+            images = [img.to_dict() for img in Image.query.filter_by(project_id=project_id).all()]
 
     stats_query = TestCase.query
     if project_id:

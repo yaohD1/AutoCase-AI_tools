@@ -128,6 +128,9 @@
               draggable="false"
             />
           </div>
+          <div v-else-if="!currentImageFile && projectImages.length === 0" class="no-image">
+            <span>未关联原型图</span>
+          </div>
           <div v-else class="doc-viewer">
             <pre>{{ reviewDocContent }}</pre>
           </div>
@@ -530,6 +533,9 @@ function loadTestCaseToForm(testcase) {
   } else if (projectImages.value.length > 0) {
     currentImageFile.value = projectImages.value[0].filename
     isCurrentFileImage.value = /[\._](jpg|jpeg|png|webp)$/i.test(projectImages.value[0].filename)
+  } else {
+    currentImageFile.value = ''
+    isCurrentFileImage.value = false
   }
   imageScale.value = 1
 
@@ -830,6 +836,18 @@ function getPriorityTag(priority) {
   background: #fff;
   border-radius: 4px;
   border: 0.5px solid rgba(0, 0, 0, 0.04);
+}
+
+.no-image {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f0f2f5;
+  border-radius: 4px;
+  color: #909399;
+  font-size: 14px;
+  user-select: none;
 }
 
 .doc-viewer pre {

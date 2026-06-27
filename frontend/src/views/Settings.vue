@@ -105,11 +105,34 @@
           </template>
           
           <el-table :data="projectList" style="width: 100%" row-key="id">
-            <el-table-column width="40">
+            <el-table-column type="expand">
               <template #default="{ row }">
-                <el-button text size="small" @click="toggleExpand(row)" class="expand-toggle">
-                  <el-icon><ArrowRight v-if="!isExpanded(row.id)" /><ArrowDown v-else /></el-icon>
-                </el-button>
+                <div class="sprint-sub-table">
+                  <div class="sprint-sub-header">
+                    <span class="sprint-sub-title">迭代</span>
+                    <el-button text size="small" class="sprint-add-link" @click="showAddSprint(row)">
+                      <el-icon><Plus /></el-icon> 新建
+                    </el-button>
+                  </div>
+                  <div v-if="getProjectSprints(row.id).length === 0" class="sprint-empty">暂无迭代</div>
+                  <div v-for="(s, si) in getProjectSprints(row.id)" :key="s.id" class="sprint-item">
+                    <span class="sprint-dot">{{ si + 1 }}</span>
+                    <template v-if="editingSprintId === s.id">
+                      <el-input v-model="editSprintName" size="small" style="width:160px" @blur="saveSprintName" @keyup.enter="saveSprintName" />
+                      <el-button size="small" text type="primary" @click="saveSprintName" style="margin-right:auto">确定</el-button>
+                    </template>
+                    <template v-else>
+                      <span class="sprint-name">{{ s.name }}</span>
+                      <span class="sprint-stat-divider"></span>
+                      <span class="sprint-stat">{{ getSprintStat(s.id).approved }} 已审批</span>
+                      <span class="sprint-stat">{{ getSprintStat(s.id).pending }} 待审</span>
+                    </template>
+                    <div class="sprint-actions">
+                      <el-button text size="small" @click="startEditSprint(s)"><el-icon><Edit /></el-icon></el-button>
+                      <el-button text size="small" type="danger" @click="confirmDeleteSprint(s)"><el-icon><Close /></el-icon></el-button>
+                    </div>
+                  </div>
+                </div>
               </template>
             </el-table-column>
             <el-table-column prop="name" label="项目名称" min-width="150">
@@ -119,7 +142,7 @@
                   <el-button size="small" @click="saveProjectName" style="margin-left:8px">保存</el-button>
                 </template>
                 <template v-else>
-                  <span @dblclick="startEditProject(row)" style="cursor:pointer">{{ row.name }}</span>
+                  <span>{{ row.name }}</span>
                 </template>
               </template>
             </el-table-column>
@@ -133,43 +156,12 @@
                 </template>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="100" align="center">
+            <el-table-column label="操作" width="140" align="center">
               <template #default="{ row }">
+                <el-button text size="small" @click="startEditProject(row)"><el-icon><Edit /></el-icon></el-button>
                 <el-button text type="danger" @click="confirmDeleteProject(row)">删除</el-button>
               </template>
             </el-table-column>
-            <template #append>
-              <div v-for="row in projectList" :key="'expand_'+row.id">
-                <div v-if="isExpanded(row.id)" class="sprint-expand-row">
-                  <div class="sprint-sub-table">
-                    <div class="sprint-sub-header">
-                      <span class="sprint-sub-title">迭代</span>
-                      <el-button text size="small" class="sprint-add-link" @click="showAddSprint(row)">
-                        <el-icon><Plus /></el-icon> 新建
-                      </el-button>
-                    </div>
-                    <div v-if="getProjectSprints(row.id).length === 0" class="sprint-empty">暂无迭代</div>
-                    <div v-for="(s, si) in getProjectSprints(row.id)" :key="s.id" class="sprint-item">
-                      <span class="sprint-dot">{{ si + 1 }}</span>
-                      <template v-if="editingSprintId === s.id">
-                        <el-input v-model="editSprintName" size="small" style="width:160px" @blur="saveSprintName" @keyup.enter="saveSprintName" />
-                        <el-button size="small" text type="primary" @click="saveSprintName" style="margin-right:auto">确定</el-button>
-                      </template>
-                      <template v-else>
-                        <span class="sprint-name" @click="startEditSprint(s)">{{ s.name }}</span>
-                        <span class="sprint-stat-divider"></span>
-                        <span class="sprint-stat">{{ getSprintStat(s.id).approved }} 已审批</span>
-                        <span class="sprint-stat">{{ getSprintStat(s.id).pending }} 待审</span>
-                      </template>
-                      <div class="sprint-actions">
-                        <el-button text size="small" @click="startEditSprint(s)"><el-icon><Edit /></el-icon></el-button>
-                        <el-button text size="small" type="danger" @click="confirmDeleteSprint(s)"><el-icon><Close /></el-icon></el-button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </template>
           </el-table>
         </el-card>
 
@@ -210,7 +202,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Edit, Close, Plus, ArrowRight, ArrowDown } from '@element-plus/icons-vue'
+import { Delete, Edit, Close, Plus } from '@element-plus/icons-vue'
 import api from '../api'
 
 const activeTab = ref('ai')
@@ -234,7 +226,6 @@ const configForm = ref({
 const projectList = ref([])
 const allSprints = ref([])
 const sprintStats = ref({})
-const expandedProjects = ref(new Set())
 const showAddProject = ref(false)
 const showAddSprintDialog = ref(false)
 const createSprintProjectId = ref('')
@@ -294,15 +285,6 @@ function getProjectSprints(projectId) {
 
 function getSprintStat(sprintId) {
   return sprintStats.value[sprintId] || { approved: 0, pending: 0 }
-}
-
-function toggleExpand(row) {
-  const s = expandedProjects.value
-  if (s.has(row.id)) s.delete(row.id); else s.add(row.id)
-}
-
-function isExpanded(id) {
-  return expandedProjects.value.has(id)
 }
 
 function startEditProject(row) {
@@ -580,7 +562,6 @@ async function deleteConfig(id) {
 .sprint-name {
   font-size: 14px;
   color: #1d1d1f;
-  cursor: pointer;
   flex: 1;
 }
 
@@ -623,23 +604,5 @@ async function deleteConfig(id) {
   font-size: 12px;
   color: #aeaeb2;
   padding: 8px 0;
-}
-
-.sprint-expand-row {
-  background: #fafafa;
-  border-bottom: 1px solid #ebeef5;
-}
-
-.sprint-expand-row .sprint-sub-table {
-  padding: 12px 40px 16px;
-}
-
-.expand-toggle {
-  color: #86868b !important;
-  font-size: 14px;
-}
-
-.expand-toggle:hover {
-  color: #0071e3 !important;
 }
 </style>

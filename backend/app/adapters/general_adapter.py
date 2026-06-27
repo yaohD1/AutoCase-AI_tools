@@ -95,10 +95,16 @@ class GeneralAdapter(BaseAIAdapter):
             if os.path.exists(optimized_path):
                 os.remove(optimized_path)
     
-    def generate_with_image(self, image_path: str, prompt: str) -> List[Dict]:
-        optimized_path = self.optimize_image(image_path)
+    def generate_with_image(self, image_paths: list, prompt: str) -> List[Dict]:
+        optimized_paths = [self.optimize_image(p) for p in image_paths if p]
         try:
-            base64_image = self.image_to_base64(optimized_path)
+            content_parts = [{"type": "text", "text": prompt}]
+            for path in optimized_paths:
+                base64_image = self.image_to_base64(path)
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                })
             headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
             payload = {
                 "model": self.model,
@@ -130,10 +136,7 @@ class GeneralAdapter(BaseAIAdapter):
                     },
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                        ]
+                        "content": content_parts
                     }
                 ],
                 "temperature": self.temperature,
@@ -152,8 +155,9 @@ class GeneralAdapter(BaseAIAdapter):
         except Exception as e:
             raise Exception(f"API error: {str(e)}")
         finally:
-            if os.path.exists(optimized_path):
-                os.remove(optimized_path)
+            for path in optimized_paths:
+                if os.path.exists(path):
+                    os.remove(path)
     
     def generate_from_text(self, prompt: str) -> List[Dict]:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}

@@ -1400,29 +1400,36 @@ async function confirmModules() {
     }
 
     const promises = []
-    for (let i = 0; i < uploadedImageIds.value.length; i++) {
-      for (let j = 0; j < moduleForms.value.length; j++) {
-        const mod = moduleForms.value[j]
-        const genInteractionText = formatInteractionPaths(interactionPaths.value)
-        const genBaseDesc = imageDescriptions.value[i] || ''
-        promises.push(api.generateTestcases({
-          image_id: (mod.use_vision && genModelSupportsVision.value) ? uploadedImageIds.value[i] : undefined,
-          project_id: form.value.projectId,
-          config_id: form.value.genConfigId,
-          case_types: mod.smart_case_type ? [] : (mod.case_types || []),
-          case_count: mod.case_count || 10,
-          description: genInteractionText + (genBaseDesc ? '\n\n## 功能介绍\n' + genBaseDesc : ''),
-          sprint_id: form.value.sprintId || '',
-          modules: [{
-            module: mod.module,
-            ui_elements: mod.ui_elements.split(',').map(s => s.trim()).filter(Boolean),
-            function_description: mod.function_description,
-            interaction_flow: mod.interaction_flow,
-            test_focus: mod.test_focus.split(',').map(s => s.trim()).filter(Boolean)
-          }],
-          smart_mode: mod.smart_mode || false
-        }))
+    const useVision = genModelSupportsVision.value
+    const hasMultipleImages = uploadedImageIds.value.length > 1
+    for (let j = 0; j < moduleForms.value.length; j++) {
+      const mod = moduleForms.value[j]
+      const genInteractionText = formatInteractionPaths(interactionPaths.value)
+      const genBaseDesc = imageDescriptions.value[0] || ''
+      const payload = {
+        project_id: form.value.projectId,
+        config_id: form.value.genConfigId,
+        case_types: mod.smart_case_type ? [] : (mod.case_types || []),
+        case_count: mod.case_count || 10,
+        description: genInteractionText + (genBaseDesc ? '\n\n## 功能介绍\n' + genBaseDesc : ''),
+        sprint_id: form.value.sprintId || '',
+        modules: [{
+          module: mod.module,
+          ui_elements: mod.ui_elements.split(',').map(s => s.trim()).filter(Boolean),
+          function_description: mod.function_description,
+          interaction_flow: mod.interaction_flow,
+          test_focus: mod.test_focus.split(',').map(s => s.trim()).filter(Boolean)
+        }],
+        smart_mode: mod.smart_mode || false
       }
+      if (mod.use_vision && useVision) {
+        if (hasMultipleImages) {
+          payload.image_ids = uploadedImageIds.value
+        } else {
+          payload.image_id = uploadedImageIds.value[0]
+        }
+      }
+      promises.push(api.generateTestcases(payload))
     }
     await Promise.all(promises)
     showModuleReview.value = false
