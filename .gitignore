@@ -34,7 +34,7 @@ storage/exports/*
 .vscode/
 *.swp
 *.swo
-
+nul
 node_modules/
 npm-debug.log*
 yarn-debug.log*
