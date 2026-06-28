@@ -532,7 +532,7 @@ function reviewZoomOut() {
 function openGenerateDialog() {
   generatingModules.value = selection.value.map(m => ({
     ...m,
-    case_types: typeof m.case_types === 'string' ? m.case_types.split(',').filter(Boolean) : (m.case_types || ['functional', 'ui', 'boundary', 'exception']),
+    case_types: typeof m.case_types === 'string' ? m.case_types.split(',').filter(Boolean) : (m.case_types || []),
     case_count: m.case_count || 10,
     smart_mode: m.smart_mode || false,
     use_vision: false,
@@ -559,6 +559,11 @@ function nextGenModule() {
 }
 
 async function confirmGenerate() {
+  const hasEmptyTypes = generatingModules.value.some(m => !m.smart_case_type && (!m.case_types || m.case_types.length === 0))
+  if (hasEmptyTypes) {
+    ElMessage.warning('请为每个模块至少选择一种用例类型')
+    return
+  }
   generating.value = true
   try {
     const promises = generatingModules.value.map(mod =>
@@ -570,6 +575,7 @@ async function confirmGenerate() {
         smart_mode: mod.smart_mode,
         sprint_id: selectedSprint.value || '',
         modules: [{
+          image_id: mod.image_id || '',
           module: mod.module,
           ui_elements: mod.ui_elements.split(',').map(s => s.trim()).filter(Boolean),
           function_description: mod.function_description,

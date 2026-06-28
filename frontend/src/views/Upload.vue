@@ -671,7 +671,7 @@ const form = ref({
   analyzeConfigId: '',
   genConfigId: '',
   linkedAnalysis: true,
-  caseTypes: ['functional', 'ui', 'boundary', 'exception'],
+  caseTypes: [],
   caseCount: 10,
   smartMode: false
 })
@@ -1332,7 +1332,7 @@ async function generateCases() {
         function_description: m.function_description || '',
         interaction_flow: m.interaction_flow || '',
         test_focus: (m.test_focus || []).join(', '),
-        case_types: [...form.value.caseTypes],
+        case_types: [],
         case_count: form.value.caseCount,
         smart_mode: form.value.smartMode,
         use_vision: false,
@@ -1359,6 +1359,11 @@ async function generateCases() {
 }
 
 async function confirmModules() {
+  const hasEmptyTypes = moduleForms.value.some(m => !m.smart_case_type && (!m.case_types || m.case_types.length === 0))
+  if (hasEmptyTypes) {
+    ElMessage.warning('请为每个模块至少选择一种用例类型')
+    return
+  }
   confirming.value = true
   try {
     generating.value = true
@@ -1414,6 +1419,7 @@ async function confirmModules() {
         description: genInteractionText + (genBaseDesc ? '\n\n## 功能介绍\n' + genBaseDesc : ''),
         sprint_id: form.value.sprintId || '',
         modules: [{
+          image_id: uploadedImageIds.value[0] || '',
           module: mod.module,
           ui_elements: mod.ui_elements.split(',').map(s => s.trim()).filter(Boolean),
           function_description: mod.function_description,

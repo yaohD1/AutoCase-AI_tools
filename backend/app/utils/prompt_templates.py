@@ -53,7 +53,7 @@ class PromptTemplates:
 3. 数据输入输出的验证
 4. 各功能按钮/链接的正确性
 
-请生成{count}个功能测试用例。"""
+请生成 {count}±3 个功能测试用例。"""
 
     UI_TEST_TEMPLATE = """请分析这张UI设计图，生成UI交互测试用例。
 
@@ -63,7 +63,7 @@ class PromptTemplates:
 3. 界面响应是否符合预期
 4. 不同状态下的UI表现
 
-请生成{count}个UI交互测试用例。"""
+请生成 {count}±3 个UI交互测试用例。"""
 
     BOUNDARY_TEST_TEMPLATE = """请分析这张UI设计图，生成边界值测试用例。
 
@@ -73,7 +73,7 @@ class PromptTemplates:
 3. 数值范围的边界
 4. 特殊字符的处理
 
-请生成{count}个边界值测试用例。"""
+请生成 {count}±3 个边界值测试用例。"""
 
     EXCEPTION_TEST_TEMPLATE = """请分析这张UI设计图，生成异常场景测试用例。
 
@@ -84,7 +84,7 @@ class PromptTemplates:
 4. 数据错误的情况
 5. 并发操作
 
-请生成{count}个异常场景测试用例。"""
+请生成 {count}±3 个异常场景测试用例。"""
     
     SMART_TEST_TEMPLATE = """请根据模块描述，全面分析后生成完整的测试用例。
 
@@ -109,10 +109,12 @@ class PromptTemplates:
     
     @classmethod
     def get_combined_prompt(cls, case_types: list, count: int = 10) -> str:
-        prompt_parts = [f"请基于这张UI设计图，生成以下类型的测试用例，总共约{count}个：\n"]
+        prompt_parts = [f"请基于这张UI设计图，生成以下类型的测试用例，总数 {count}±3 个（最多不超过{count+3}个）：\n"]
         
         total_cases = count
         cases_per_type = max(1, count // len(case_types))
+        low = max(1, cases_per_type - 2)
+        high = cases_per_type + 2
         
         for i, case_type in enumerate(case_types, 1):
             prompt_name = {
@@ -121,7 +123,7 @@ class PromptTemplates:
                 'boundary': '边界值测试',
                 'exception': '异常场景测试'
             }.get(case_type, case_type)
-            prompt_parts.append(f"{i}. {prompt_name}（约{cases_per_type}个）")
+            prompt_parts.append(f"{i}. {prompt_name}（{low}~{high}个）")
         
         prompt_parts.append("\n\n详细要求：")
         

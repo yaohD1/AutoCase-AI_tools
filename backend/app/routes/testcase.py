@@ -98,7 +98,7 @@ def analyze_image():
         return jsonify({'error': 'AI config not found'}), 404
     
     try:
-        generator = CaseGenerator(ai_config)
+        generator = CaseGenerator(ai_config, project_id=data.get('project_id'))
         if image_ids and len(image_ids) > 1:
             paths = []
             for iid in image_ids:
@@ -162,7 +162,7 @@ def generate_testcases():
         return jsonify({'error': 'AI config not found'}), 404
     
     try:
-        generator = CaseGenerator(ai_config)
+        generator = CaseGenerator(ai_config, project_id=project_id)
         is_smart = smart_mode or not case_types or len(case_types) == 0
         if modules:
             testcases = generator.generate_from_modules(modules, case_types, case_count, description, is_smart, image_paths if image_paths else None)
@@ -458,8 +458,6 @@ def get_pending_testcases():
                 Image.filename.in_(filenames)
             ).all()
             images = [img.to_dict() for img in project_images]
-        if not images:
-            images = [img.to_dict() for img in Image.query.filter_by(project_id=project_id).all()]
 
     stats_query = TestCase.query
     if project_id:

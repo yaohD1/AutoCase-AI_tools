@@ -4,11 +4,26 @@ from app.models import AIConfig
 from app.adapters import GeneralAdapter
 from app.utils import PromptTemplates
 from app.utils.file_utils import is_document, read_document_content
+from app.utils.retriever import ReferenceRetriever
 
 class CaseGenerator:
-    def __init__(self, ai_config: AIConfig):
+    def __init__(self, ai_config: AIConfig, project_id: str = None):
         self.ai_config = ai_config
         self.adapter = GeneralAdapter(ai_config)
+        self.project_id = project_id
+        self.retriever = ReferenceRetriever(project_id) if project_id else None
+
+    def _inject_reference_cases(self, prompt: str, modules: List[Dict] = None) -> str:
+        if not self.retriever or not modules:
+            return prompt
+        try:
+            references = self.retriever.retrieve_for_modules(modules)
+            ref_text = self.retriever.format_for_prompt(references)
+            if ref_text:
+                return f"{prompt}\n\n## 参考用例（同项目已审批通过的历史用例）\n{ref_text}"
+        except Exception:
+            pass
+        return prompt
 
     def generate(self, image_path: str, case_types: List[str], case_count: int = 10, description: str = '') -> List[Dict]:
         all_testcases = []
@@ -66,6 +81,7 @@ class CaseGenerator:
         
         modules_text = json.dumps(modules, ensure_ascii=False, indent=2)
         full_prompt = f"{prompt}\n\n## 模块描述（基于设计图分析）\n```json\n{modules_text}\n```"
+        full_prompt = self._inject_reference_cases(full_prompt, modules)
         
         try:
             if image_paths and len(image_paths) > 0 and self.adapter.supports_vision:
