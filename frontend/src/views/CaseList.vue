@@ -82,24 +82,90 @@
       </div>
     </el-card>
 
-    <el-dialog v-model="showDetail" title="用例详情" width="600px">
-      <el-descriptions :column="1" border>
-        <el-descriptions-item label="模块">{{ currentTestcase.module }}</el-descriptions-item>
-        <el-descriptions-item label="测试点">{{ currentTestcase.test_point }}</el-descriptions-item>
-        <el-descriptions-item label="用例标题">{{ currentTestcase.title }}</el-descriptions-item>
-        <el-descriptions-item label="优先级">{{ currentTestcase.priority }}</el-descriptions-item>
-        <el-descriptions-item label="前置条件">{{ currentTestcase.preconditions }}</el-descriptions-item>
-        <el-descriptions-item label="测试步骤">
-          <div v-if="currentTestcase.steps">
-            <div v-for="(step, index) in parseSteps(currentTestcase.steps)" :key="index">
-              {{ step }}
-            </div>
+    <el-dialog v-model="showDetail" title="用例详情" width="1200px" top="2vh" @closed="showDetail = false">
+      <div v-if="currentTestcase.id" class="detail-layout">
+        <div class="detail-image-panel">
+          <div v-if="currentTestcase.image_source && /[\._](jpg|jpeg|png|webp)$/i.test(currentTestcase.image_source)" class="detail-image-viewer"
+               @wheel="handleDetailZoom"
+               @mousedown="startDetailDrag"
+               @mousemove="onDetailDrag"
+               @mouseup="endDetailDrag"
+               @mouseleave="endDetailDrag"
+          >
+            <img
+              :src="`/api/images/${currentTestcase.image_source}`"
+              :style="{
+                transform: `scale(${detailImageScale}) translate(${detailDragOffset.x}px, ${detailDragOffset.y}px)`,
+                cursor: detailIsDragging ? 'grabbing' : detailImageScale > 1 ? 'grab' : 'default'
+              }"
+              draggable="false"
+            />
           </div>
-        </el-descriptions-item>
-        <el-descriptions-item label="预期结果">{{ currentTestcase.expected }}</el-descriptions-item>
-        <el-descriptions-item label="AI服务">{{ currentTestcase.ai_provider }}</el-descriptions-item>
-        <el-descriptions-item label="创建时间">{{ currentTestcase.created_at }}</el-descriptions-item>
-      </el-descriptions>
+          <div v-else class="detail-no-image">
+            <span>未关联原型图</span>
+          </div>
+          <div class="zoom-controls" v-if="currentTestcase.image_source && /[\._](jpg|jpeg|png|webp)$/i.test(currentTestcase.image_source)">
+            <el-button circle size="small" @click="detailImageScale = Math.max(0.2, detailImageScale - 0.2)">-</el-button>
+            <span>{{ Math.round(detailImageScale * 100) }}%</span>
+            <el-button circle size="small" @click="detailImageScale = Math.min(3, detailImageScale + 0.2)">+</el-button>
+            <el-button size="small" @click="detailImageScale = 1; detailDragOffset = { x: 0, y: 0 }">重置</el-button>
+          </div>
+        </div>
+        <div class="detail-form-panel">
+          <el-form :model="detailForm" label-width="100px">
+            <el-form-item label="模块">
+              <el-input v-model="detailForm.module" />
+            </el-form-item>
+            <el-form-item label="测试点">
+              <el-input v-model="detailForm.test_point" />
+            </el-form-item>
+            <el-form-item label="用例标题">
+              <el-input v-model="detailForm.title" />
+            </el-form-item>
+            <el-form-item label="优先级">
+              <el-select v-model="detailForm.priority">
+                <el-option label="P0" value="P0" />
+                <el-option label="P1" value="P1" />
+                <el-option label="P2" value="P2" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="前置条件">
+              <el-input v-model="detailForm.preconditions" type="textarea" :rows="2" />
+            </el-form-item>
+            <el-form-item label="测试步骤">
+              <div style="width:100%">
+                <div v-for="(step, index) in detailForm.stepsList" :key="index" class="step-row">
+                  <span class="step-index">{{ index + 1 }}.</span>
+                  <el-input v-model="detailForm.stepsList[index]" type="textarea" :rows="2" style="flex:1" />
+                  <el-button text type="danger" @click="removeDetailStep(index)" :disabled="detailForm.stepsList.length <= 1" style="align-self:flex-start;margin-top:6px">×</el-button>
+                </div>
+                <el-button size="small" @click="addDetailStep" style="margin-top:8px">+ 添加步骤</el-button>
+              </div>
+            </el-form-item>
+            <el-form-item label="预期结果">
+              <el-input v-model="detailForm.expected" type="textarea" :rows="2" />
+            </el-form-item>
+            <el-form-item label="用例类型">
+              <el-select v-model="detailForm.case_type">
+                <el-option label="功能测试" value="functional" />
+                <el-option label="UI交互测试" value="ui" />
+                <el-option label="边界值测试" value="boundary" />
+                <el-option label="异常场景测试" value="exception" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="AI服务">
+              <span class="detail-readonly">{{ currentTestcase.ai_provider || '-' }}</span>
+            </el-form-item>
+            <el-form-item label="创建时间">
+              <span class="detail-readonly">{{ currentTestcase.created_at || '-' }}</span>
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="showDetail = false">取消</el-button>
+        <el-button type="primary" @click="saveDetailTestcase" :loading="savingDetail">保存</el-button>
+      </template>
     </el-dialog>
 
     <el-dialog
@@ -253,6 +319,17 @@ const selectedSprint = ref('')
 const sprints = ref([])
 const showDetail = ref(false)
 const currentTestcase = ref({})
+const savingDetail = ref(false)
+const detailForm = reactive({
+  module: '',
+  test_point: '',
+  title: '',
+  priority: 'P2',
+  preconditions: '',
+  stepsList: [''],
+  expected: '',
+  case_type: 'functional'
+})
 const currentPage = ref(1)
 const pageSize = ref(10)
 const total = ref(0)
@@ -274,6 +351,11 @@ const dragStart = ref({ x: 0, y: 0 })
 const dragOffset = ref({ x: 0, y: 0 })
 const reviewDocContent = ref('')
 const isCurrentFileImage = ref(true)
+
+const detailImageScale = ref(1)
+const detailIsDragging = ref(false)
+const detailDragStart = ref({ x: 0, y: 0 })
+const detailDragOffset = ref({ x: 0, y: 0 })
 
 const reviewForm = reactive({
   id: '',
@@ -389,7 +471,50 @@ async function loadPendingCount() {
 
 function viewTestcase(testcase) {
   currentTestcase.value = testcase
+  const steps = parseSteps(testcase.steps || '[]')
+  detailForm.module = testcase.module || ''
+  detailForm.test_point = testcase.test_point || ''
+  detailForm.title = testcase.title || ''
+  detailForm.priority = testcase.priority || 'P2'
+  detailForm.preconditions = testcase.preconditions || ''
+  detailForm.stepsList = steps.length > 0 ? steps : ['']
+  detailForm.expected = testcase.expected || ''
+  detailForm.case_type = testcase.case_type || 'functional'
+  detailImageScale.value = 1
+  detailDragOffset.value = { x: 0, y: 0 }
   showDetail.value = true
+}
+
+function addDetailStep() {
+  detailForm.stepsList.push('')
+}
+
+function removeDetailStep(index) {
+  detailForm.stepsList.splice(index, 1)
+}
+
+async function saveDetailTestcase() {
+  savingDetail.value = true
+  try {
+    const data = {
+      module: detailForm.module,
+      test_point: detailForm.test_point,
+      title: detailForm.title,
+      priority: detailForm.priority,
+      preconditions: detailForm.preconditions,
+      steps: JSON.stringify(detailForm.stepsList.filter(s => s.trim())),
+      expected: detailForm.expected,
+      case_type: detailForm.case_type
+    }
+    await api.updateTestcase(currentTestcase.value.id, data)
+    ElMessage.success('保存成功')
+    showDetail.value = false
+    loadTestcases()
+  } catch (error) {
+    ElMessage.error('保存失败')
+  } finally {
+    savingDetail.value = false
+  }
 }
 
 async function deleteTestcase(id) {
@@ -593,6 +718,30 @@ function endDrag() {
   isDragging.value = false
 }
 
+function handleDetailZoom(e) {
+  e.preventDefault()
+  e.deltaY < 0 ? detailImageScale.value = Math.min(detailImageScale.value + 0.25, 3) : detailImageScale.value = Math.max(detailImageScale.value - 0.25, 0.25)
+}
+
+function startDetailDrag(e) {
+  if (detailImageScale.value <= 1) return
+  detailIsDragging.value = true
+  detailDragStart.value = { x: e.clientX, y: e.clientY }
+}
+
+function onDetailDrag(e) {
+  if (!detailIsDragging.value) return
+  detailDragOffset.value = {
+    x: detailDragOffset.value.x + (e.clientX - detailDragStart.value.x) / detailImageScale.value,
+    y: detailDragOffset.value.y + (e.clientY - detailDragStart.value.y) / detailImageScale.value
+  }
+  detailDragStart.value = { x: e.clientX, y: e.clientY }
+}
+
+function endDetailDrag() {
+  detailIsDragging.value = false
+}
+
 function addStep() {
   reviewForm.stepsList.push('')
 }
@@ -764,7 +913,8 @@ function getPriorityTag(priority) {
   width: 100%;
 }
 
-.step-item {
+.step-item,
+.step-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -892,6 +1042,58 @@ function getPriorityTag(priority) {
 }
 
 .review-form-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.detail-layout {
+  display: flex;
+  gap: 20px;
+  height: 70vh;
+}
+
+.detail-image-panel {
+  width: 50%;
+  display: flex;
+  flex-direction: column;
+  background: #f5f7fa;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.detail-image-viewer {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e8e8e8;
+  border-radius: 4px;
+  min-height: 0;
+  user-select: none;
+}
+
+.detail-image-viewer img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transition: transform 0.2s ease;
+}
+
+.detail-no-image {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f0f2f5;
+  border-radius: 4px;
+  color: #909399;
+  font-size: 14px;
+  user-select: none;
+}
+
+.detail-form-panel {
   flex: 1;
   overflow-y: auto;
   padding-right: 4px;
