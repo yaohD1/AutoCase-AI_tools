@@ -11,6 +11,8 @@ def export_xmind():
     data = request.get_json()
     project_id = data.get('project_id')
     case_ids = data.get('case_ids', [])
+    sprint_id = data.get('sprint_id', '')
+    image_id = data.get('image_id', '')
     
     if not project_id:
         return jsonify({'error': 'project_id required'}), 400
@@ -22,7 +24,12 @@ def export_xmind():
     if case_ids:
         testcases = TestCase.query.filter(TestCase.id.in_(case_ids)).all()
     else:
-        testcases = TestCase.query.filter_by(project_id=project_id).all()
+        query = TestCase.query.filter_by(project_id=project_id)
+        if sprint_id:
+            query = query.filter_by(sprint_id=sprint_id)
+        if image_id:
+            query = query.filter_by(image_id=image_id)
+        testcases = query.all()
     
     if not testcases:
         return jsonify({'error': 'No testcases to export'}), 400

@@ -581,7 +581,9 @@ async function exportXmind() {
 
   try {
     const res = await api.exportXmind({
-      project_id: selectedProject.value
+      project_id: selectedProject.value,
+      sprint_id: selectedSprint.value || '',
+      image_id: selectedImage.value || ''
     })
 
     const downloadRes = await api.downloadFile(res.data.filename)

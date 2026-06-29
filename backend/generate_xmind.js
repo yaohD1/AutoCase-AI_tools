@@ -41,27 +41,28 @@ try {
     const topic = new Topic({sheet});
     
     // 构建思维导图结构
-    for (const module of testcases) {
-        // 添加模块节点
-        topic.add({title: `模块：${module.name}`});
-        topic.on(topic.cid(`模块：${module.name}`));
+    const rootId = topic.cid();
+    
+    for (let mi = 0; mi < testcases.length; mi++) {
+        const module = testcases[mi];
+        const modTitle = `模块：${module.name}`;
+        topic.add({title: modTitle});
+        topic.on(topic.cid(modTitle));
         
-        for (const testpoint of module.testpoints) {
-            // 添加测试点节点
-            topic.add({title: `测试点：${testpoint.name}`});
-            topic.on(topic.cid(`测试点：${testpoint.name}`));
+        for (let ti = 0; ti < module.testpoints.length; ti++) {
+            const testpoint = module.testpoints[ti];
+            const tpTitle = `测试点：${testpoint.name}`;
+            topic.add({title: tpTitle});
+            topic.on(topic.cid(tpTitle));
             
             for (const testcase of testpoint.cases) {
-                // 添加用例节点
                 topic.add({title: `用例：${testcase.title} #${testcase.priority}`});
                 topic.on(topic.cid(`用例：${testcase.title} #${testcase.priority}`));
                 
-                // 添加前置条件
                 if (testcase.preconditions && testcase.preconditions.trim()) {
                     topic.add({title: `前置条件：${testcase.preconditions}`});
                 }
                 
-                // 添加步骤
                 if (testcase.steps && testcase.steps.length > 0) {
                     for (let i = 0; i < testcase.steps.length; i++) {
                         const stepText = testcase.steps[i].replace(/步骤\d+：/, '').trim();
@@ -69,18 +70,17 @@ try {
                     }
                 }
                 
-                // 添加预期结果
                 if (testcase.expected && testcase.expected.trim()) {
                     topic.add({title: `预期：${testcase.expected}`});
                 }
                 
-                // 回到测试点层级继续添加下一个用例
-                topic.on(topic.cid(`测试点：${testpoint.name}`));
+                topic.on(topic.cid(tpTitle));
             }
             
-            // 回到模块层级继续添加下一个测试点
-            topic.on(topic.cid(`模块：${module.name}`));
+            topic.on(topic.cid(modTitle));
         }
+        
+        topic.on(rootId);
     }
     
     // 解析文件路径

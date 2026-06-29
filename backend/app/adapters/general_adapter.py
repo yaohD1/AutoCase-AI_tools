@@ -174,7 +174,7 @@ class GeneralAdapter(BaseAIAdapter):
     "module": "模块名",
     "test_point": "测试点",
     "title": "用例:用例名 #优先级",
-    "priority": "0/1/2",
+    "priority": "P0/P1/P2",
     "preconditions": "前置条件:...",
     "steps": ["步骤:步骤1", "步骤:步骤2", "..."],
     "expected": "预期:预期结果",
@@ -184,10 +184,9 @@ class GeneralAdapter(BaseAIAdapter):
 
 注意：
 1. 基于提供的文档内容分析测试点
-2. 模块、测试点默认以"模块："、"测试点："开头
-3. 用例格式为："用例：用例名 #优先级"，优先级为0/1/2
-4. 前置条件、步骤、预期都需带前缀（前置步骤:/步骤:/预期:）
-5. 返回有效的JSON数组"""
+2. 用例格式为："用例：用例名 #优先级"，优先级为P0/P1/P2
+3. 前置条件、步骤、预期都需带前缀（前置步骤:/步骤:/预期:）
+4. 返回有效的JSON数组"""
                 },
                 {"role": "user", "content": prompt}
             ],
