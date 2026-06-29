@@ -20,6 +20,18 @@ def migrate_db(app: Flask):
         cols = [r[1] for r in cur.fetchall()]
         if 'image_id' not in cols:
             cur.execute("ALTER TABLE testcases ADD COLUMN image_id VARCHAR(36)")
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_files'")
+        if not cur.fetchone():
+            cur.execute("""CREATE TABLE knowledge_files (
+                id VARCHAR(36) PRIMARY KEY,
+                project_id VARCHAR(36) NOT NULL,
+                filename VARCHAR(255) NOT NULL,
+                original_name VARCHAR(255),
+                file_path VARCHAR(500) NOT NULL,
+                content TEXT,
+                file_size INTEGER,
+                created_at TIMESTAMP
+            )""")
         conn.commit()
         conn.close()
     except Exception:

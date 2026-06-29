@@ -32,9 +32,13 @@
         <el-icon><Document /></el-icon>
         <span>文档模式</span>
       </div>
+      <div :class="['mode-tab', { active: uploadMode === 'knowledge' }]" @click="switchMode('knowledge')">
+        <el-icon><Collection /></el-icon>
+        <span>知识库</span>
+      </div>
     </div>
 
-    <el-card class="upload-card">
+    <el-card v-if="uploadMode !== 'knowledge'" class="upload-card">
       <template #header>
         <div class="card-header">
           <span>{{ uploadMode === 'image' ? '上传Figma设计图' : '上传接口文档' }}</span>
@@ -237,6 +241,56 @@
         </el-button>
       </div>
     </el-card>
+
+    <el-card v-if="uploadMode === 'knowledge'" class="knowledge-card">
+      <template #header>
+        <div class="card-header">
+          <span>测试知识库</span>
+          <div class="header-actions">
+            <el-select v-model="knowledgeProjectId" placeholder="选择项目" class="project-select" @change="loadKnowledgeFiles">
+              <el-option
+                v-for="p in projects"
+                :key="p.id"
+                :label="p.name"
+                :value="p.id"
+              />
+            </el-select>
+            <el-upload
+              :show-file-list="false"
+              :before-upload="handleKnowledgeUpload"
+              :disabled="!knowledgeProjectId"
+              accept=".md,.txt,.docx,.doc"
+            >
+              <el-button type="primary" :disabled="!knowledgeProjectId" :loading="knowledgeUploading">
+                上传知识文件
+              </el-button>
+            </el-upload>
+          </div>
+        </div>
+      </template>
+
+      <el-table :data="knowledgeFiles" v-loading="knowledgeLoading" style="width:100%">
+        <el-table-column prop="original_name" label="文件名" min-width="200" />
+        <el-table-column label="大小" width="120">
+          <template #default="{ row }">{{ formatSize(row.file_size) }}</template>
+        </el-table-column>
+        <el-table-column label="上传时间" width="180">
+          <template #default="{ row }">{{ row.created_at }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="200">
+          <template #default="{ row }">
+            <el-button text @click="viewKnowledgeFile(row)">查看</el-button>
+            <el-button text type="danger" @click="deleteKnowledgeFile(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-empty v-if="!knowledgeLoading && knowledgeFiles.length === 0" description="暂无知识文件，请上传" />
+    </el-card>
+
+    <el-dialog v-if="uploadMode === 'knowledge'" v-model="showKnowledgeViewer" title="文件内容" width="700px" top="2vh">
+      <el-input v-model="knowledgeViewContent" type="textarea" :rows="20" readonly />
+    </el-dialog>
 
     <el-dialog
       v-model="showProgressDialog"
@@ -610,7 +664,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading, Delete, Close } from '@element-plus/icons-vue'
+import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading, Delete, Close, Collection } from '@element-plus/icons-vue'
 import api from '../api'
 
 const router = useRouter()
@@ -630,6 +684,13 @@ const imageDescriptions = ref([])
 const interactionPaths = ref([{ name: '', hint: '', description: '', steps: [''] }])
 const uploadMode = ref('image')
 const currentDocContent = ref('')
+
+const knowledgeProjectId = ref('')
+const knowledgeFiles = ref([])
+const knowledgeLoading = ref(false)
+const knowledgeUploading = ref(false)
+const showKnowledgeViewer = ref(false)
+const knowledgeViewContent = ref('')
 const descImageScale = ref(1)
 const descIsDragging = ref(false)
 const descDragStart = ref({ x: 0, y: 0 })
@@ -944,8 +1005,12 @@ function handlePaste(e) {
 
 function switchMode(mode) {
   uploadMode.value = mode
+  if (mode === 'knowledge') {
+    loadKnowledgeFiles()
+    return
+  }
   fileList.value = []
-imageDescriptions.value = []
+  imageDescriptions.value = []
   currentDocContent.value = ''
   form.value.analyzeConfigId = ''
   form.value.genConfigId = ''
@@ -1534,6 +1599,70 @@ function goToCases() {
 function goToModules() {
   router.push({ path: '/modules', query: { project_id: form.value.projectId, sprint_id: form.value.sprintId } })
 }
+
+function formatSize(bytes) {
+  if (!bytes) return '0 B'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+async function loadKnowledgeFiles() {
+  if (!knowledgeProjectId.value) return
+  knowledgeLoading.value = true
+  try {
+    const res = await api.getKnowledgeFiles({ project_id: knowledgeProjectId.value })
+    knowledgeFiles.value = res.data.files || []
+  } catch {
+    ElMessage.error('加载知识文件失败')
+  } finally {
+    knowledgeLoading.value = false
+  }
+}
+
+async function handleKnowledgeUpload(file) {
+  if (!knowledgeProjectId.value) {
+    ElMessage.warning('请先选择项目')
+    return false
+  }
+  knowledgeUploading.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('project_id', knowledgeProjectId.value)
+    await api.uploadKnowledgeFile(formData)
+    ElMessage.success('上传成功')
+    await loadKnowledgeFiles()
+  } catch (error) {
+    ElMessage.error('上传失败：' + (error.response?.data?.error || error.message))
+  } finally {
+    knowledgeUploading.value = false
+  }
+  return false
+}
+
+async function viewKnowledgeFile(row) {
+  try {
+    const res = await api.getKnowledgeFile(row.id)
+    knowledgeViewContent.value = res.data.file.content || ''
+    showKnowledgeViewer.value = true
+  } catch {
+    ElMessage.error('获取文件内容失败')
+  }
+}
+
+async function deleteKnowledgeFile(row) {
+  try {
+    await ElMessageBox.confirm('确定删除该知识文件？', '提示', { type: 'warning' })
+    await api.deleteKnowledgeFile(row.id)
+    ElMessage.success('删除成功')
+    await loadKnowledgeFiles()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error('删除失败')
+    }
+  }
+}
 </script>
 
 <style scoped>
@@ -1625,13 +1754,31 @@ function goToModules() {
   background: #fff;
 }
 
-.upload-card :deep(.el-card__header) {
+.knowledge-card {
+  border-radius: 16px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04), 0 12px 32px rgba(0, 0, 0, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: #fff;
+}
+
+.upload-card :deep(.el-card__header),
+.knowledge-card :deep(.el-card__header) {
   border-bottom: 1px solid rgba(0, 0, 0, 0.05);
   padding: 20px 32px;
 }
 
 .upload-card :deep(.el-card__body) {
   padding: 0;
+}
+
+.knowledge-card :deep(.el-card__body) {
+  padding: 24px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
 }
 
 .card-header {

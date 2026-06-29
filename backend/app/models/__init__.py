@@ -5,5 +5,6 @@ from app.models.image import Image
 from app.models.ai_config import AIConfig
 from app.models.sprint import Sprint
 from app.models.pending_module import PendingModule
+from app.models.knowledge_file import KnowledgeFile
 
-__all__ = ['db', 'Project', 'TestCase', 'Image', 'AIConfig', 'Sprint', 'PendingModule']
+__all__ = ['db', 'Project', 'TestCase', 'Image', 'AIConfig', 'Sprint', 'PendingModule', 'KnowledgeFile']

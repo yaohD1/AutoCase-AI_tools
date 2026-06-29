@@ -144,5 +144,21 @@ batchDeleteTestcases(ids) {
   },
   deleteAIConfig(id) {
     return api.delete(`/ai-configs/${id}`)
+  },
+
+  // 知识库
+  uploadKnowledgeFile(formData) {
+    return api.post('/knowledge/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  getKnowledgeFiles(params) {
+    return api.get('/knowledge/files', { params })
+  },
+  getKnowledgeFile(id) {
+    return api.get(`/knowledge/files/${id}`)
+  },
+  deleteKnowledgeFile(id) {
+    return api.delete(`/knowledge/files/${id}`)
   }
 }

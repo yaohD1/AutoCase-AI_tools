@@ -57,3 +57,40 @@ class ReferenceRetriever:
                     else:
                         lines.append(f'   步骤：{str(steps)[:60]}')
         return '\n'.join(lines)
+
+
+import json
+
+class KnowledgeRetriever:
+    def __init__(self, project_id):
+        self.project_id = project_id
+    
+    def search(self, query_text, max_results=2):
+        from app.models import KnowledgeFile
+        if not query_text:
+            return []
+        
+        files = KnowledgeFile.query.filter_by(project_id=self.project_id).all()
+        lines = []
+        for kf in files:
+            content = kf.content or ''
+            for line in content.split('\n'):
+                line = line.strip()
+                if not line or len(line) < 10:
+                    continue
+                if query_text.lower() in line.lower():
+                    lines.append(line)
+                    if len(lines) >= max_results:
+                        break
+            if len(lines) >= max_results:
+                break
+        return lines[:max_results]
+    
+    @staticmethod
+    def format_for_prompt(snippets):
+        if not snippets:
+            return ''
+        lines = ['## 参考测试规范（知识库）']
+        for i, s in enumerate(snippets, 1):
+            lines.append(f'\n### 知识点 {i}\n{s}')
+        return '\n'.join(lines)
