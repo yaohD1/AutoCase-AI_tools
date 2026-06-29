@@ -269,7 +269,7 @@
         </div>
       </template>
 
-      <el-table :data="knowledgeFiles" v-loading="knowledgeLoading" style="width:100%">
+      <el-table :data="knowledgeFiles" v-loading="kbFilesLoading" style="width:100%">
         <el-table-column prop="original_name" label="文件名" min-width="200" />
         <el-table-column label="大小" width="120">
           <template #default="{ row }">{{ formatSize(row.file_size) }}</template>
@@ -285,7 +285,7 @@
         </el-table-column>
       </el-table>
 
-      <el-empty v-if="!knowledgeLoading && knowledgeFiles.length === 0" description="暂无知识文件，请上传" />
+      <el-empty v-if="!kbFilesLoading && knowledgeFiles.length === 0" description="暂无知识文件，请上传" />
     </el-card>
 
     <el-dialog v-if="uploadMode === 'knowledge'" v-model="showKnowledgeViewer" title="文件内容" width="700px" top="2vh">
@@ -687,7 +687,7 @@ const currentDocContent = ref('')
 
 const knowledgeProjectId = ref('')
 const knowledgeFiles = ref([])
-const knowledgeLoading = ref(false)
+const kbFilesLoading = ref(false)
 const knowledgeUploading = ref(false)
 const showKnowledgeViewer = ref(false)
 const knowledgeViewContent = ref('')
@@ -1609,14 +1609,14 @@ function formatSize(bytes) {
 
 async function loadKnowledgeFiles() {
   if (!knowledgeProjectId.value) return
-  knowledgeLoading.value = true
+  kbFilesLoading.value = true
   try {
     const res = await api.getKnowledgeFiles({ project_id: knowledgeProjectId.value })
     knowledgeFiles.value = res.data.files || []
   } catch {
     ElMessage.error('加载知识文件失败')
   } finally {
-    knowledgeLoading.value = false
+    kbFilesLoading.value = false
   }
 }
 

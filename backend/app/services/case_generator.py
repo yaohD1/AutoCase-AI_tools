@@ -4,7 +4,7 @@ from app.models import AIConfig
 from app.adapters import GeneralAdapter
 from app.utils import PromptTemplates
 from app.utils.file_utils import is_document, read_document_content
-from app.utils.retriever import ReferenceRetriever, KnowledgeRetriever
+from app.utils.retriever import ReferenceRetriever
 
 class CaseGenerator:
     def __init__(self, ai_config: AIConfig, project_id: str = None):
@@ -12,7 +12,6 @@ class CaseGenerator:
         self.adapter = GeneralAdapter(ai_config)
         self.project_id = project_id
         self.retriever = ReferenceRetriever(project_id) if project_id else None
-        self.knowledge_retriever = KnowledgeRetriever(project_id) if project_id else None
 
     def _inject_reference_cases(self, prompt: str, modules: List[Dict] = None) -> str:
         if not self.retriever or not modules:
@@ -22,21 +21,6 @@ class CaseGenerator:
             ref_text = self.retriever.format_for_prompt(references)
             if ref_text:
                 return f"{prompt}\n\n## 参考用例（同项目已审批通过的历史用例）\n{ref_text}"
-        except Exception:
-            pass
-        return prompt
-
-    def _inject_knowledge(self, prompt: str, modules: List[Dict] = None) -> str:
-        if not self.knowledge_retriever or not modules:
-            return prompt
-        try:
-            search_text = ' '.join(m.get('module', '') for m in modules if m.get('module'))
-            if not search_text:
-                return prompt
-            snippets = self.knowledge_retriever.search(search_text, max_results=2)
-            knowledge_text = self.knowledge_retriever.format_for_prompt(snippets)
-            if knowledge_text:
-                return f"{prompt}\n\n{knowledge_text}"
         except Exception:
             pass
         return prompt
@@ -98,7 +82,6 @@ class CaseGenerator:
         modules_text = json.dumps(modules, ensure_ascii=False, indent=2)
         full_prompt = f"{prompt}\n\n## 模块描述（基于设计图分析）\n```json\n{modules_text}\n```"
         full_prompt = self._inject_reference_cases(full_prompt, modules)
-        full_prompt = self._inject_knowledge(full_prompt, modules)
         
         try:
             if image_paths and len(image_paths) > 0 and self.adapter.supports_vision:
