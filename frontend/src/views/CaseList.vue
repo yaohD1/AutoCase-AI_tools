@@ -25,6 +25,14 @@
                 :value="sprint.id"
               />
             </el-select>
+            <el-select v-model="selectedImage" placeholder="原型图筛选" class="image-select" @change="loadTestcases" clearable>
+              <el-option
+                v-for="img in imageOptions"
+                :key="img.image_id"
+                :label="`${img.name}（${formatTime(img.time)}）`"
+                :value="img.image_id"
+              />
+            </el-select>
             <el-button type="danger" @click="batchDelete" :disabled="selectedCases.length === 0">
               批量删除 ({{ selectedCases.length }})
             </el-button>
@@ -316,7 +324,9 @@ const projects = ref([])
 const testcases = ref([])
 const selectedProject = ref('')
 const selectedSprint = ref('')
+const selectedImage = ref('')
 const sprints = ref([])
+const imageOptions = ref([])
 const showDetail = ref(false)
 const currentTestcase = ref({})
 const savingDetail = ref(false)
@@ -422,6 +432,7 @@ async function loadSprints() {
 
 function onProjectChange() {
   selectedSprint.value = ''
+  selectedImage.value = ''
   loadSprints()
   loadTestcases()
 }
@@ -443,12 +454,14 @@ async function loadTestcases() {
       status: 'approved'
     }
     if (selectedSprint.value) params.sprint_id = selectedSprint.value
+    if (selectedImage.value) params.image_id = selectedImage.value
     const res = await api.getTestcases(params)
     testcases.value = res.data.testcases
     total.value = testcases.value.length
     if (res.data.pending_count !== undefined) {
       pendingCount.value = res.data.pending_count
     }
+    imageOptions.value = res.data.image_options || []
   } catch (error) {
     testcases.value = []
     total.value = 0
@@ -596,6 +609,16 @@ function parseSteps(steps) {
   } catch {
     return steps.split('\n').filter(s => s.trim())
   }
+}
+
+function formatTime(isoString) {
+  if (!isoString) return ''
+  const d = new Date(isoString)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${mm}-${dd} ${hh}:${mi}`
 }
 
 function parseStepsForEdit(steps) {

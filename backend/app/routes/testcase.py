@@ -133,6 +133,8 @@ def generate_testcases():
     modules = data.get('modules', None)
     smart_mode = data.get('smart_mode', False)
     sprint_id = data.get('sprint_id', '')
+    use_vision = data.get('use_vision', False)
+    generated_at = data.get('generated_at')
     
     if not project_id:
         return jsonify({'error': 'project_id required'}), 400
@@ -164,24 +166,37 @@ def generate_testcases():
     try:
         generator = CaseGenerator(ai_config, project_id=project_id)
         is_smart = smart_mode or not case_types or len(case_types) == 0
+        actual_vision = use_vision and bool(image_paths) and generator.adapter.supports_vision
         if modules:
-            testcases = generator.generate_from_modules(modules, case_types, case_count, description, is_smart, image_paths if image_paths else None)
+            testcases = generator.generate_from_modules(modules, case_types, case_count, description, is_smart, image_paths if actual_vision else None)
         else:
             if not image_paths:
                 return jsonify({'error': 'No valid image found'}), 400
             testcases = generator.generate(image_paths[0], case_types, case_count, description)
         
         image_source_val = ''
+        image_id_val = ''
         if modules and len(modules) > 0:
             mid = modules[0].get('image_id')
             if mid:
                 img = Image.query.get(mid)
                 if img:
                     image_source_val = img.filename
+                    image_id_val = mid
         if not image_source_val and image_paths:
             img = Image.query.filter_by(file_path=image_paths[0]).first()
             if img:
                 image_source_val = img.filename
+                image_id_val = img.id
+        
+        ts = None
+        if generated_at:
+            try:
+                ts = datetime.fromisoformat(generated_at)
+            except Exception:
+                ts = datetime.utcnow()
+        else:
+            ts = datetime.utcnow()
         
         for case_data in testcases:
             testcase = TestCase(
@@ -195,9 +210,11 @@ def generate_testcases():
                 expected=case_data.get('expected', ''),
                 case_type=case_data.get('case_type', 'functional'),
                 image_source=image_source_val,
+                image_id=image_id_val,
                 ai_provider=provider,
                 status='pending',
-                sprint_id=sprint_id
+                sprint_id=sprint_id,
+                created_at=ts
             )
             db.session.add(testcase)
         
@@ -217,6 +234,7 @@ def get_testcases():
     case_type = request.args.get('case_type')
     status = request.args.get('status')
     sprint_id = request.args.get('sprint_id')
+    image_id = request.args.get('image_id')
 
     query = TestCase.query
 
@@ -228,6 +246,8 @@ def get_testcases():
         query = query.filter_by(status=status)
     if sprint_id:
         query = query.filter_by(sprint_id=sprint_id)
+    if image_id:
+        query = query.filter_by(image_id=image_id)
 
     testcases = query.order_by(TestCase.created_at.desc()).all()
     
@@ -238,9 +258,35 @@ def get_testcases():
             pq = pq.filter_by(sprint_id=sprint_id)
         pending_count = pq.count()
     
+    image_options = []
+    if project_id:
+        images_with_cases = db.session.query(TestCase.image_id).filter(
+            TestCase.project_id == project_id,
+            TestCase.image_id.isnot(None),
+            TestCase.image_id != ''
+        ).distinct().all()
+        image_ids = [r[0] for r in images_with_cases if r[0]]
+        if image_ids:
+            imgs = Image.query.filter(Image.id.in_(image_ids)).all()
+            for img in imgs:
+                first_case = TestCase.query.filter_by(image_id=img.id).order_by(TestCase.created_at.asc()).first()
+                tc_time = None
+                if first_case and first_case.created_at:
+                    from app.models.testcase import _beijing_time
+                    bt = _beijing_time(first_case.created_at)
+                    if bt:
+                        tc_time = bt.isoformat()
+                image_options.append({
+                    'image_id': img.id,
+                    'name': img.original_name or img.filename,
+                    'time': tc_time
+                })
+        image_options.sort(key=lambda x: x.get('time') or '', reverse=True)
+    
     return jsonify({
         'testcases': [tc.to_dict() for tc in testcases],
-        'pending_count': pending_count
+        'pending_count': pending_count,
+        'image_options': image_options
     }), 200
 
 @testcase_bp.route('/cases/<case_id>', methods=['GET'])
@@ -272,12 +318,15 @@ def update_testcase(case_id):
 def get_approved_modules():
     project_id = request.args.get('project_id')
     sprint_id = request.args.get('sprint_id')
+    image_id = request.args.get('image_id')
     
     query = PendingModule.query.filter_by(status='approved')
     if project_id:
         query = query.filter_by(project_id=project_id)
     if sprint_id:
         query = query.filter_by(sprint_id=sprint_id)
+    if image_id:
+        query = query.filter_by(image_id=image_id)
     
     modules = query.order_by(PendingModule.created_at.desc()).all()
     result = []
@@ -289,7 +338,34 @@ def get_approved_modules():
         else:
             d['image_filename'] = None
         result.append(d)
-    return jsonify({'modules': result}), 200
+    
+    image_options = []
+    if project_id:
+        from app.models.testcase import _beijing_time
+        id_rows = db.session.query(PendingModule.image_id).filter(
+            PendingModule.project_id == project_id,
+            PendingModule.status == 'approved',
+            PendingModule.image_id.isnot(None),
+            PendingModule.image_id != ''
+        ).distinct().all()
+        im_ids = [r[0] for r in id_rows if r[0]]
+        if im_ids:
+            imgs = Image.query.filter(Image.id.in_(im_ids)).all()
+            for img in imgs:
+                first_mod = PendingModule.query.filter_by(image_id=img.id, status='approved').order_by(PendingModule.created_at.asc()).first()
+                mod_time = None
+                if first_mod and first_mod.created_at:
+                    bt = _beijing_time(first_mod.created_at)
+                    if bt:
+                        mod_time = bt.isoformat()
+                image_options.append({
+                    'image_id': img.id,
+                    'name': img.original_name or img.filename,
+                    'time': mod_time
+                })
+            image_options.sort(key=lambda x: x.get('time') or '', reverse=True)
+    
+    return jsonify({'modules': result, 'image_options': image_options}), 200
 
 
 @testcase_bp.route('/pending-modules', methods=['GET'])

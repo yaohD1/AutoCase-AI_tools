@@ -1,6 +1,11 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.models.database import db
+
+def _beijing_time(dt):
+    if dt is None:
+        return None
+    return dt + timedelta(hours=8)
 
 class TestCase(db.Model):
     __tablename__ = 'testcases'
@@ -19,6 +24,7 @@ class TestCase(db.Model):
     
     case_type = db.Column(db.String(50), default='functional')
     image_source = db.Column(db.String(500))
+    image_id = db.Column(db.String(36))
     ai_provider = db.Column(db.String(50))
     status = db.Column(db.String(20), default='pending', nullable=False)
     sprint_id = db.Column(db.String(36), db.ForeignKey('sprints.id'), nullable=True)
@@ -39,9 +45,10 @@ class TestCase(db.Model):
             'expected': self.expected,
             'case_type': self.case_type,
             'image_source': self.image_source,
+            'image_id': self.image_id,
             'ai_provider': self.ai_provider,
             'status': self.status,
             'sprint_id': self.sprint_id,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+            'created_at': _beijing_time(self.created_at).isoformat() if self.created_at else None,
+            'updated_at': _beijing_time(self.updated_at).isoformat() if self.updated_at else None
         }

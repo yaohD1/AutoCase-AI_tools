@@ -25,6 +25,14 @@
                 :value="sprint.id"
               />
             </el-select>
+            <el-select v-model="selectedImage" placeholder="原型图筛选" class="image-select" @change="loadModules" clearable>
+              <el-option
+                v-for="img in imageOptions"
+                :key="img.image_id"
+                :label="`${img.name}（${formatTime(img.time)}）`"
+                :value="img.image_id"
+              />
+            </el-select>
             <el-button type="primary" @click="openGenerateDialog" :disabled="selection.length === 0">
               生成用例
             </el-button>
@@ -269,6 +277,8 @@ const sprints = ref([])
 const modules = ref([])
 const selectedProject = ref('')
 const selectedSprint = ref('')
+const selectedImage = ref('')
+const imageOptions = ref([])
 const currentPage = ref(1)
 const pageSize = ref(10)
 const total = ref(0)
@@ -377,6 +387,7 @@ async function loadSprints() {
 
 async function onProjectChange() {
   selectedSprint.value = ''
+  selectedImage.value = ''
   await loadSprints()
   await loadModules()
 }
@@ -387,9 +398,11 @@ async function loadModules() {
   try {
     const params = { project_id: selectedProject.value }
     if (selectedSprint.value) params.sprint_id = selectedSprint.value
+    if (selectedImage.value) params.image_id = selectedImage.value
     const res = await api.getApprovedModules(params)
     modules.value = res.data.modules || []
     total.value = modules.value.length
+    imageOptions.value = res.data.image_options || []
     await loadPendingCount()
   } catch (error) {
     console.error('加载模块失败:', error)
@@ -566,24 +579,30 @@ async function confirmGenerate() {
   }
   generating.value = true
   try {
-    const promises = generatingModules.value.map(mod =>
-      api.generateTestcases({
-        image_id: (mod.use_vision && moduleGenModelSupportsVision.value) ? (mod.image_id || undefined) : undefined,
+    const modelSupportsVision = moduleGenModelSupportsVision.value
+    const batchTime = new Date().toISOString()
+    const promises = generatingModules.value.map(mod => {
+      const payload = {
         project_id: selectedProject.value,
-        case_types: mod.smart_case_type ? [] : mod.case_types,
-        case_count: mod.case_count,
-        smart_mode: mod.smart_mode,
         sprint_id: selectedSprint.value || '',
+        generated_at: batchTime,
         modules: [{
           image_id: mod.image_id || '',
           module: mod.module,
+          case_types: mod.smart_case_type ? [] : mod.case_types,
+          case_count: mod.case_count,
+          smart_mode: mod.smart_mode,
           ui_elements: mod.ui_elements.split(',').map(s => s.trim()).filter(Boolean),
           function_description: mod.function_description,
           interaction_flow: mod.interaction_flow,
           test_focus: mod.test_focus.split(',').map(s => s.trim()).filter(Boolean)
         }]
-      })
-    )
+      }
+      if (mod.use_vision && modelSupportsVision && mod.image_id) {
+        payload.image_id = mod.image_id
+      }
+      return api.generateTestcases(payload)
+    })
     await Promise.all(promises)
     ElMessage.success('用例生成完成')
     showGenerate.value = false
@@ -623,6 +642,16 @@ function genZoomIn() {
 
 function genZoomOut() {
   genImageScale.value = Math.max(0.5, genImageScale.value - 0.1)
+}
+
+function formatTime(isoString) {
+  if (!isoString) return ''
+  const d = new Date(isoString)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${mm}-${dd} ${hh}:${mi}`
 }
 </script>
 

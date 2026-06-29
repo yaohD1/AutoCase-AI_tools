@@ -30,12 +30,13 @@ def upload_file():
     if not project:
         return jsonify({'error': 'Project not found'}), 404
     
-    filename = secure_filename(file.filename)
-    name, ext = os.path.splitext(filename)
+    original_name = file.filename
+    safe_name = secure_filename(file.filename)
+    name, ext = os.path.splitext(safe_name)
     if ext and ext.lower() in ('.jpg', '.jpeg', '.png', '.webp'):
         unique_filename = f"{uuid.uuid4()}{ext}"
     else:
-        unique_filename = f"{uuid.uuid4()}_{filename}"
+        unique_filename = f"{uuid.uuid4()}_{safe_name}"
     upload_folder = current_app.config['UPLOAD_FOLDER']
     
     if not os.path.exists(upload_folder):
@@ -49,6 +50,7 @@ def upload_file():
     image = Image(
         project_id=project_id,
         filename=unique_filename,
+        original_name=original_name,
         file_path=file_path,
         file_size=file_size
     )

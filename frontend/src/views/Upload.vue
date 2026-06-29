@@ -1405,12 +1405,13 @@ async function confirmModules() {
     }
 
     const promises = []
-    const useVision = genModelSupportsVision.value
+    const modelSupportsVision = genModelSupportsVision.value
     const hasMultipleImages = uploadedImageIds.value.length > 1
+    const genInteractionText = formatInteractionPaths(interactionPaths.value)
+    const genBaseDesc = imageDescriptions.value[0] || ''
+    const batchTime = new Date().toISOString()
     for (let j = 0; j < moduleForms.value.length; j++) {
       const mod = moduleForms.value[j]
-      const genInteractionText = formatInteractionPaths(interactionPaths.value)
-      const genBaseDesc = imageDescriptions.value[0] || ''
       const payload = {
         project_id: form.value.projectId,
         config_id: form.value.genConfigId,
@@ -1418,6 +1419,7 @@ async function confirmModules() {
         case_count: mod.case_count || 10,
         description: genInteractionText + (genBaseDesc ? '\n\n## 功能介绍\n' + genBaseDesc : ''),
         sprint_id: form.value.sprintId || '',
+        generated_at: batchTime,
         modules: [{
           image_id: uploadedImageIds.value[0] || '',
           module: mod.module,
@@ -1428,7 +1430,7 @@ async function confirmModules() {
         }],
         smart_mode: mod.smart_mode || false
       }
-      if (mod.use_vision && useVision) {
+      if (mod.use_vision && modelSupportsVision) {
         if (hasMultipleImages) {
           payload.image_ids = uploadedImageIds.value
         } else {
@@ -2339,5 +2341,17 @@ function goToModules() {
   0%, 100% { opacity: 0.05; }
   10% { opacity: 1; }
   50% { opacity: 0.05; }
+}
+
+.review-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  width: 100%;
+}
+
+.review-actions {
+  display: flex;
+  gap: 10px;
 }
 </style>
