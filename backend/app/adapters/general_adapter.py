@@ -10,7 +10,7 @@ class GeneralAdapter(BaseAIAdapter):
     def __init__(self, ai_config):
         super().__init__(
             api_key=ai_config.api_key,
-            api_base=ai_config.api_base or "https://api.yygu.cn/v3/llm.chat/chat/completions",
+            api_base=ai_config.api_base or "https://api.deepseek.com",
             model=ai_config.model or "kimi-k2.6",
             temperature=ai_config.temperature or 0.7,
             max_tokens=ai_config.max_tokens or 2000
@@ -85,7 +85,10 @@ class GeneralAdapter(BaseAIAdapter):
             result = response.json()
             content = result['choices'][0]['message']['content']
             json_match = content[content.find('['):content.rfind(']')+1]
-            testcases = json.loads(json_match)
+            try:
+                testcases = json.loads(json_match)
+            except Exception:
+                raise Exception(f"AI返回格式错误，无法解析JSON。原始响应（前500字）: {content[:500]}")
             return testcases
         except requests.exceptions.RequestException as e:
             raise Exception(f"API request error: {str(e)}")
@@ -148,7 +151,10 @@ class GeneralAdapter(BaseAIAdapter):
             result = response.json()
             content = result['choices'][0]['message']['content']
             json_match = content[content.find('['):content.rfind(']')+1]
-            testcases = json.loads(json_match)
+            try:
+                testcases = json.loads(json_match)
+            except Exception:
+                raise Exception(f"AI返回格式错误，无法解析JSON。原始响应（前500字）: {content[:500]}")
             return testcases
         except requests.exceptions.RequestException as e:
             raise Exception(f"API request error: {str(e)}")
@@ -207,6 +213,8 @@ class GeneralAdapter(BaseAIAdapter):
         return self.analyze_images([image_path], prompt)
     
     def analyze_images(self, image_paths: List[str], prompt: str) -> List[Dict]:
+        if not self.supports_vision:
+            raise Exception("当前AI模型不支持图片分析，请在设置中更换支持Vision的模型")
         optimized_paths = []
         try:
             for p in image_paths:

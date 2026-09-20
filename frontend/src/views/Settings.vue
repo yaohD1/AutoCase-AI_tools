@@ -55,7 +55,7 @@
               <el-input v-model="configForm.provider" :disabled="!!editingConfig" placeholder="如 kimi、volcengine、deepseek" style="width: 100%" />
             </el-form-item>
             <el-form-item label="API Key" required>
-              <el-input v-model="configForm.api_key" type="password" placeholder="请输入API Key" />
+              <el-input v-model="configForm.api_key" type="password" :placeholder="editingConfig ? '不修改请留空' : '请输入API Key'" />
             </el-form-item>
             <el-form-item label="API Base URL">
               <el-input v-model="configForm.api_base" placeholder="可选，自定义API地址" />
@@ -381,7 +381,7 @@ function editConfig(config) {
   editingConfig.value = config
   configForm.value = {
     provider: config.provider,
-    api_key: config.api_key ? config.api_key.replace('***', '') : '',
+    api_key: '',
     api_base: config.api_base || '',
     model: config.model || '',
     temperature: config.temperature || 0.7,
@@ -406,16 +406,25 @@ function cancelEdit() {
 }
 
 async function saveConfig() {
-  if (!configForm.value.provider || !configForm.value.api_key || !configForm.value.model) {
-    ElMessage.warning('请填写必填字段（服务商、API Key、模型名称）')
+  const isEdit = !!editingConfig.value
+  if (!configForm.value.provider || !configForm.value.model) {
+    ElMessage.warning('请填写必填字段（服务商、模型名称）')
+    return
+  }
+  if (!isEdit && !configForm.value.api_key) {
+    ElMessage.warning('请填写 API Key')
     return
   }
   try {
-    if (editingConfig.value) {
-      await api.updateAIConfig(editingConfig.value.id, configForm.value)
+    const data = { ...configForm.value }
+    if (isEdit && !data.api_key) {
+      delete data.api_key
+    }
+    if (isEdit) {
+      await api.updateAIConfig(editingConfig.value.id, data)
       ElMessage.success('更新成功')
     } else {
-      await api.createAIConfig(configForm.value)
+      await api.createAIConfig(data)
       ElMessage.success('添加成功')
     }
     cancelEdit()
