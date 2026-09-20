@@ -17,6 +17,7 @@ def create_app():
     from app.routes.config import config_bp
     from app.routes.sprint import sprint_bp
     from app.routes.knowledge import knowledge_bp
+    from app.routes.automation import automation_bp
     
     app.register_blueprint(upload_bp, url_prefix='/api')
     app.register_blueprint(testcase_bp, url_prefix='/api')
@@ -24,5 +25,6 @@ def create_app():
     app.register_blueprint(config_bp, url_prefix='/api')
     app.register_blueprint(sprint_bp, url_prefix='/api')
     app.register_blueprint(knowledge_bp, url_prefix='/api')
+    app.register_blueprint(automation_bp, url_prefix='/api')
     
     return app

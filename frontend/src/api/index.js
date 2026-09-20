@@ -158,7 +158,24 @@ batchDeleteTestcases(ids) {
   getKnowledgeFile(id) {
     return api.get(`/knowledge/files/${id}`)
   },
-  deleteKnowledgeFile(id) {
-    return api.delete(`/knowledge/files/${id}`)
+   deleteKnowledgeFile(id) {
+     return api.delete(`/knowledge/files/${id}`)
+   },
+
+  // 自动化脚本
+  getAutomationConfig(projectId) {
+    return api.get('/automation/config', { params: { project_id: projectId } })
+  },
+  saveAutomationConfig(data) {
+    return api.put('/automation/config', data)
+  },
+  generateAutomation(data) {
+    return api.post('/automation/generate', data)
+  },
+  getAutomationGenerations(projectId) {
+    return api.get('/automation/generations', { params: { project_id: projectId } })
+  },
+  downloadAutomationGeneration(id) {
+    return api.get(`/automation/generations/${id}/download`, { responseType: 'blob' })
   }
-}
+ }

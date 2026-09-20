@@ -1,7 +1,11 @@
 import json
+import os
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
-from app.models import db, TestCase, Image, Project, AIConfig, Sprint, PendingModule
+from app.models import (
+    db, TestCase, Image, Project, AIConfig, Sprint, PendingModule,
+    AutomationConfig, AutomationGeneration
+)
 from app.services.case_generator import CaseGenerator
 
 testcase_bp = Blueprint('testcase', __name__)
@@ -62,6 +66,7 @@ def delete_project(project_id):
     if not project:
         return jsonify({'error': 'Project not found'}), 404
     try:
+        archive_paths = []
         sprints = Sprint.query.filter_by(project_id=project_id).all()
         for sprint in sprints:
             TestCase.query.filter_by(sprint_id=sprint.id).delete()
@@ -70,8 +75,16 @@ def delete_project(project_id):
         TestCase.query.filter_by(project_id=project_id).delete()
         Image.query.filter_by(project_id=project_id).delete()
         PendingModule.query.filter_by(project_id=project_id).delete()
+        AutomationConfig.query.filter_by(project_id=project_id).delete()
+        generations = AutomationGeneration.query.filter_by(project_id=project_id).all()
+        for generation in generations:
+            archive_paths.append(os.path.join(current_app.config['EXPORT_FOLDER'], f'automation_{generation.id}.zip'))
+            db.session.delete(generation)
         db.session.delete(project)
         db.session.commit()
+        for archive in archive_paths:
+            if os.path.exists(archive):
+                os.remove(archive)
         return jsonify({'success': True}), 200
     except Exception as e:
         db.session.rollback()

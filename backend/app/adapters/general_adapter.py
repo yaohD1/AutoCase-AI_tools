@@ -208,6 +208,29 @@ class GeneralAdapter(BaseAIAdapter):
         content = result['choices'][0]['message']['content']
         json_match = content[content.find('['):content.rfind(']')+1]
         return json.loads(json_match)
+
+    def generate_structured_json(self, prompt: str, system_prompt: str, max_tokens: int = 4096):
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": self.temperature,
+            "max_tokens": max_tokens
+        }
+        response = requests.post(self.api_base, headers=headers, json=payload, timeout=self.timeout)
+        if response.status_code != 200:
+            raise Exception(f"API request failed: {response.status_code} - {response.text[:300]}")
+        content = response.json()['choices'][0]['message']['content']
+        start = min([index for index in (content.find('{'), content.find('[')) if index >= 0], default=-1)
+        if start < 0:
+            raise Exception('AI response did not contain JSON')
+        end = max(content.rfind('}'), content.rfind(']'))
+        if end < start:
+            raise Exception('AI response contained incomplete JSON')
+        return json.loads(content[start:end + 1])
     
     def analyze_image(self, image_path: str, prompt: str) -> List[Dict]:
         return self.analyze_images([image_path], prompt)

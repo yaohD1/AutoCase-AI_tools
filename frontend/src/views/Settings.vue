@@ -314,7 +314,7 @@ async function confirmDeleteProject(row) {
     await api.deleteProject(row.id)
     ElMessage.success('已删除')
     await loadProjectData()
-  } catch { if (error !== 'cancel') { ElMessage.error('删除失败') } }
+  } catch (error) { if (error !== 'cancel') { ElMessage.error('删除失败') } }
 }
 
 async function createProject() {

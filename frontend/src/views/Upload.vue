@@ -36,6 +36,10 @@
         <el-icon><Collection /></el-icon>
         <span>知识库</span>
       </div>
+      <div class="mode-tab" @click="goToAutomation">
+        <el-icon><Monitor /></el-icon>
+        <span>自动化脚本</span>
+      </div>
     </div>
 
     <el-card v-if="uploadMode !== 'knowledge'" class="upload-card">
@@ -664,7 +668,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading, Delete, Close, Collection } from '@element-plus/icons-vue'
+import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading, Delete, Close, Collection, Monitor } from '@element-plus/icons-vue'
 import api from '../api'
 
 const router = useRouter()
@@ -1014,6 +1018,10 @@ function switchMode(mode) {
   currentDocContent.value = ''
   form.value.analyzeConfigId = ''
   form.value.genConfigId = ''
+}
+
+function goToAutomation() {
+  router.push('/scripts')
 }
 
 async function createProject() {
@@ -1715,6 +1723,7 @@ async function deleteKnowledgeFile(row) {
 
 .mode-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 20px;
 }

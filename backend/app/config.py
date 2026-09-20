@@ -8,6 +8,9 @@ class Config:
     
     UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'storage', 'uploads')
     EXPORT_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'storage', 'exports')
+    AUTOMATION_WORKSPACE_ROOT = os.environ.get('AUTOMATION_WORKSPACE_ROOT') or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'storage', 'automation_workspaces'
+    )
     
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024
     

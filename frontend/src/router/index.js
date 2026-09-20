@@ -3,6 +3,7 @@ import Upload from '../views/Upload.vue'
 import CaseList from '../views/CaseList.vue'
 import ModuleList from '../views/ModuleList.vue'
 import Settings from '../views/Settings.vue'
+import Scripts from '../views/Scripts.vue'
 
 const routes = [
   {
@@ -24,6 +25,11 @@ const routes = [
     path: '/settings',
     name: 'Settings',
     component: Settings
+  },
+  {
+    path: '/scripts',
+    name: 'Scripts',
+    component: Scripts
   }
 ]
 
