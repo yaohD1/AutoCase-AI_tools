@@ -4,6 +4,7 @@ import CaseList from '../views/CaseList.vue'
 import ModuleList from '../views/ModuleList.vue'
 import Settings from '../views/Settings.vue'
 import Scripts from '../views/Scripts.vue'
+import AutomationGenerationDetail from '../views/AutomationGenerationDetail.vue'
 
 const routes = [
   {
@@ -30,6 +31,11 @@ const routes = [
     path: '/scripts',
     name: 'Scripts',
     component: Scripts
+  },
+  {
+    path: '/scripts/generations/:id',
+    name: 'AutomationGenerationDetail',
+    component: AutomationGenerationDetail
   }
 ]
 

@@ -28,7 +28,8 @@
 - `backend/app/routes/`：HTTP API；`testcase.py` 还包含项目、用例和模块相关接口。
 - `backend/app/models/`：SQLAlchemy 模型；`database.py` 负责 SQLite 初始化和轻量迁移。
 - `backend/app/services/case_generator.py`：AI 用例生成业务逻辑。
-- `backend/app/services/automation_generator.py`：自然语言用例到 Playwright 脚本的渲染、暂存、归档和路径校验。
+- `backend/app/services/automation_generator.py`：旧版自然语言动作渲染器，历史兼容代码；新自动化任务不再走这里。
+- `backend/app/services/opencode_runner.py`：启动 OpenCode orchestrator、写入任务 manifest、收集 Git 变更和生成归档。
 - `backend/app/adapters/`：AI 适配器，`GeneralAdapter` 支持通用 OpenAI 兼容接口和结构化 JSON。
 - `backend/app/utils/`：提示词、知识库检索、文档和校验工具。
 
@@ -42,18 +43,28 @@
 ## 核心业务流
 
 - 用例生成：上传文件 → AI 分析模块 → 模块审批 → 生成待审用例 → 用例审批 → 已审批用例。
-- 自动化脚本：选择已审批用例 → 保存项目级脚本配置 → AI 结构化步骤 → 渲染 Playwright TS → 写入服务端工作区 → 生成 ZIP 和历史记录。
+- 自动化脚本：输入自然语言需求 → OpenCode orchestrator → planner 探索和规划 → generator 生成 Playwright → 执行测试 → healer 修复 → 写入服务端 Git 工作区。
 - 图片审批：`TestCase.image_id/image_source` 和 `PendingModule.image_id` 负责原型图关联；“附带原图”只决定是否把图片送给 AI，不应影响审批页展示。
 
 ## 自动化脚本约定
 
-- 当前只支持 Playwright + TypeScript，不执行生成脚本。
-- 只允许从 `status='approved'` 的用例生成。
-- `Base URL`、工作区、脚本目录、浏览器、认证状态、超时、覆盖策略和 AI 配置保存在 `AutomationConfig`。
+- 当前只支持 Playwright + TypeScript；自动化入口直接调用 OpenCode，不依赖 AutoCase 已生成用例。
+- `Base URL`、工作区、脚本目录、浏览器、storageState、OpenCode 模型和最大修复次数保存在 `AutomationConfig`。
 - 生成批次保存在 `AutomationGeneration`，接口位于 `backend/app/routes/automation.py`。
 - 工作区路径必须位于 `AUTOMATION_WORKSPACE_ROOT` 内；默认拒绝覆盖已有文件。
-- 无法可靠推断定位器时生成 `TODO`，模型不能猜 CSS/XPath。
-- 生成接口同步执行；不要在小改动中擅自改成异步任务或引入新队列。
+- 工作区必须是后端可访问的 Git + Playwright 项目；脚本会保持未提交状态。
+- OpenCode 配置由服务端 `OPENCODE_CONFIG` 固定，前端不能传任意命令、配置或 prompt 路径。
+- `storageState` 必须存在且位于工作区内；不要把账号密码或 API Key 写入需求、manifest、日志或脚本。
+- 生成接口返回任务后在后台运行，OpenCode 超时由 `OPENCODE_TIMEOUT` 控制；状态和事件写入 `AutomationGeneration`。
+- 自动化详情页展示 planner 文档、生成脚本、healer 记录和 Git 变更；本地 commit 只提交本批次文件，不自动 push。
+
+## 自动化实时日志机制
+
+- 不用 `opencode run --attach`（IDE/沙箱里会死锁）；改起 headless `opencode serve` + HTTP 驱动：`POST /session`（agent=orchestrator+model）建会话 → `POST /session/{id}/prompt_async` 派发需求 → 订阅 `/event` SSE 旁观全部 agent 活动。子 agent（planner/generator/test_run/healer）仍由 orchestrator 在 OpenCode runtime 内用 `task` 工具驱动。
+- `opencode_runner.py` 把 SSE 事件映射成前端日志三元组 `(stage, event_type, message)`（`_map_bus_event`/`_map_part`/`_map_delta`）。约定：`session.idle` 只表示“本轮结束”、措辞不得暗示任务成功；`patch`/`step-*`/`file` 等内部 part 过滤不入日志。
+- 前端 `AutomationGenerationDetail.vue` 按 agent 分组渲染（1 总控 orchestrator + 4 子 agent），每组一个 sticky 标签、组内日志持续追加，不逐条重复 agent 名（仿 OpenCode TUI）；事件存 `AutomationGeneration.event_log`，前端按 `event_cursor` 轮询增量拉取。
+- 时间：后端统一存 UTC（`datetime.utcnow()`），前端 `parseUtc` 补 `Z` 再转本地（北京）显示；勿把 UTC 当本地直接 `new Date()`。
+- 判定都在 runner 主循环：orchestrator `session.idle`（busy 后）=完成；`OPENCODE_TIMEOUT`（默认 3600s）是全局共享总时长（所有 agent 共用一份，非每个各算）；启动 180s 无活动=未启动；运行中 busy 且 180s 无新事件=停滞（`stalled`）提前中止。
 
 ## API 快速索引
 
@@ -63,7 +74,7 @@
 - 模块审批：`/api/pending-modules`、`/api/pending-modules/approved`。
 - AI 配置：`/api/ai-configs`。
 - 知识库：`/api/knowledge/*`。
-- 自动化：`/api/automation/config`、`/api/automation/generate`、`/api/automation/generations`。
+- 自动化：`/api/automation/config`、`/api/automation/generate`、`/api/automation/generations`、`/api/automation/generations/<id>/artifact`、`/api/automation/generations/<id>/commit`。
 
 ## 常用命令
 

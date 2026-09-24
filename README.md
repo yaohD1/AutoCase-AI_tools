@@ -285,6 +285,33 @@ BaseAIAdapter (抽象基类)
 - API Key 请妥善保管，建议在设置页面配置而非硬编码
 - 本地运行即可，暂不支持部署
 
+## 自动化脚本 Agent
+
+首页“自动化脚本”入口直接调用项目内的 OpenCode `playwright-test-orchestrator`，不依赖已生成的业务测试用例。用户输入自然语言测试需求后，Agent 按以下顺序执行：
+
+```text
+planner 探索页面并生成计划
+    → generator 通过 Playwright 实际操作并生成脚本
+    → 运行脚本
+    → healer 分析失败并修复，最多 3 次
+```
+
+脚本写入后端配置的 Git 工作区，保持未提交状态。工作区必须位于 `AUTOMATION_WORKSPACE_ROOT` 下，并包含 `package.json`，同时是可运行的 Playwright 项目。可选的 `storageState` 文件必须位于工作区内。OpenCode 可执行文件和配置通过 `OPENCODE_BIN`、`OPENCODE_CONFIG` 配置，API Key 使用 OpenCode 自己的 provider 配置，不写入 AutoCase 数据库。
+
+启动后会进入任务详情页，实时查看 planner 计划文档、最终测试脚本、执行日志和 healer 修复记录。任务完成后可以只对本次生成文件创建本地 Git commit，不会自动 push，也不会提交工作区其他修改。
+
+相关接口：
+
+- `GET /api/automation/config?project_id=<id>`：读取项目自动化配置
+- `PUT /api/automation/config`：保存 Base URL、工作区和 OpenCode 参数
+- `POST /api/automation/generate`：提交自然语言测试需求并启动 orchestrator
+- `GET /api/automation/generations?project_id=<id>`：查看 Agent 任务记录
+- `GET /api/automation/generations/<id>?project_id=<id>`：查看任务详情和阶段状态
+- `GET /api/automation/generations/<id>/events?project_id=<id>&after=<cursor>`：读取增量事件
+- `GET /api/automation/generations/<id>/artifact?project_id=<id>&path=<relative_path>`：查看计划或脚本
+- `POST /api/automation/generations/<id>/commit?project_id=<id>`：只创建本次变更文件的本地 commit
+- `GET /api/automation/generations/<id>/download`：下载本次 Git 变更文件 ZIP
+
 ## 许可证
 
 MIT License

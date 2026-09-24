@@ -105,22 +105,17 @@
       "prompt": "{file:.opencode/prompts/playwright-test-orchestrator.md}",
       "permission": {
         "edit": {
-          "*": "allow",
-          "tests/**": "deny",
-          "test-plans/**": "deny",
-          "src/pages/**": "deny",
-          "src/fixtures/**": "deny"
+          "*": "deny"
         },
         "write": {
-          "*": "allow",
-          "tests/**": "deny",
-          "test-plans/**": "deny",
-          "src/pages/**": "deny",
-          "src/fixtures/**": "deny"
+          "*": "deny"
         },
         "bash": {
-          "*": "allow",
+          "*": "deny",
           "npx playwright test*": "allow",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "git rev-parse*": "allow",
           "node *_probe*.cjs": "ask",
           "node *_dbg*.cjs": "ask"
         },

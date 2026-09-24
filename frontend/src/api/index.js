@@ -170,12 +170,30 @@ batchDeleteTestcases(ids) {
     return api.put('/automation/config', data)
   },
   generateAutomation(data) {
-    return api.post('/automation/generate', data)
+    return api.post('/automation/generate', data, { timeout: 1900000 })
   },
   getAutomationGenerations(projectId) {
     return api.get('/automation/generations', { params: { project_id: projectId } })
   },
-  downloadAutomationGeneration(id) {
-    return api.get(`/automation/generations/${id}/download`, { responseType: 'blob' })
+  getAutomationGeneration(id, projectId) {
+    return api.get(`/automation/generations/${id}`, { params: { project_id: projectId } })
+  },
+  getAutomationGenerationEvents(id, projectId, after = 0) {
+    return api.get(`/automation/generations/${id}/events`, { params: { project_id: projectId, after } })
+  },
+  cancelAutomationGeneration(id, projectId) {
+    return api.post(`/automation/generations/${id}/cancel`, null, { params: { project_id: projectId } })
+  },
+  getAutomationArtifacts(id, projectId, kind) {
+    return api.get(`/automation/generations/${id}/artifacts`, { params: { project_id: projectId, kind } })
+  },
+  getAutomationArtifact(id, projectId, path) {
+    return api.get(`/automation/generations/${id}/artifact`, { params: { project_id: projectId, path } })
+  },
+  commitAutomationGeneration(id, projectId, message) {
+    return api.post(`/automation/generations/${id}/commit`, { message }, { params: { project_id: projectId } })
+  },
+  downloadAutomationGeneration(id, projectId) {
+    return api.get(`/automation/generations/${id}/download`, { params: { project_id: projectId }, responseType: 'blob' })
   }
  }
