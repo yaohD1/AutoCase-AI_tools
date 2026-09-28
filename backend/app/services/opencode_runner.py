@@ -872,6 +872,11 @@ class OpenCodeRunner:
         paths = set(before) | set(after)
         changed = []
         for path in sorted(paths):
+            normalized = path.replace('\\', '/')
+            # opencode serve 启动时会把 agent 定义导出为 .claude/agents、.github/agents 兼容文件，
+            # 这是框架运行时产物而非本任务的测试产物；忽略它们，避免误判越界并污染归档/提交。
+            if normalized.startswith('.claude/agents/') or normalized.startswith('.github/agents/'):
+                continue
             old = before.get(path, {}).get('hash')
             new = after.get(path, {}).get('hash')
             if old == new:
@@ -968,6 +973,9 @@ class OpenCodeRunner:
                 or path.startswith('.autocase/')
                 or path in allowed_root_files
                 or path.startswith('playwright.config.')
+                # opencode serve 自动导出的 agent 兼容文件，属于框架产物，不算越界修改
+                or path.startswith('.claude/agents/')
+                or path.startswith('.github/agents/')
             )
             if not allowed:
                 violations.append(path)
@@ -1046,14 +1054,27 @@ class OpenCodeRunner:
         driver = {'sid': None, 'busy': False, 'done': threading.Event(), 'fatal': None,
                   'last_activity': time.monotonic()}
 
+        artifact_cache = {'items': [], 'last': 0.0}
+
         def emit(stage, event_type, message):
             if event_callback:
                 try:
+                    # 产物索引实时化：此前 emit 恒传 []，artifacts 只在 run() 收尾收集一次，
+                    # 导致 planner/generator 完成后侧栏“测试计划/脚本”在任务进行中始终为空。
+                    # 这里节流收集（每 5 秒最多一次 git 快照），让产物随阶段推进实时出现。
+                    now = time.monotonic()
+                    if now - artifact_cache['last'] >= 5.0:
+                        artifact_cache['last'] = now
+                        try:
+                            artifact_cache['items'] = self._artifact_index(
+                                workspace, manifest.get('specs_path'), before)
+                        except Exception:
+                            pass
                     event_callback({
                         'event_type': event_type,
                         'stage': stage,
                         'message': self._redact_output(str(message))[:4000]
-                    }, [])
+                    }, artifact_cache['items'])
                 except Exception:
                     pass
 
@@ -1144,7 +1165,14 @@ class OpenCodeRunner:
                 emit('orchestrator', 'process_started',
                      f'OpenCode orchestrator session {session_id} created on server {base_url}.')
 
-                prompt_body = {'parts': [{'type': 'text', 'text': prompt}]}
+                # 关键：opencode serve 的 POST /session 会忽略 body 里的 agent 字段，真正生效的
+                # agent 必须在每轮 prompt_async 指定。缺了它，会话会退回默认 build agent，导致
+                # orchestrator 的 system prompt（中文输出 + 委派 planner/generator/healer）完全不
+                # 生效——表现为纯英文、零 task 委派、用 build 的 read/glob/grep/apply_patch 乱跑。
+                prompt_body = {
+                    'parts': [{'type': 'text', 'text': prompt}],
+                    'agent': 'playwright-test-orchestrator',
+                }
                 if model_ref:
                     prompt_body['model'] = {'providerID': model_ref['providerID'], 'modelID': model_ref['id']}
                 try:

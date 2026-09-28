@@ -212,7 +212,9 @@ const logStatusLabel = computed(() => {
 const latestLogLabel = computed(() => latestEvent.value ? `最近 ${formatDate(latestEvent.value.created_at)}` : '暂无日志')
 const planArtifacts = computed(() => artifacts.value.filter(item => item.kind === 'plan'))
 const scriptArtifacts = computed(() => artifacts.value.filter(item => item.kind === 'script'))
-const healerEvents = computed(() => events.value.filter(event => event.stage === 'healer' || /healer|修复/i.test(event.message || '')))
+// 只归入真正 healer 阶段的文字产出：此前用 /healer|修复/ 匹配 message，会把 orchestrator
+// 开场白里的“最大修复次数”“Run → Heal”等字样误抓进修复记录。stage 归因修好后只信任 stage。
+const healerEvents = computed(() => events.value.filter(event => event.stage === 'healer' && event.event_type === 'text'))
 const visibleEvents = computed(() => {
   const out = events.value.slice(0, revealedCount.value)
   const cur = events.value[revealedCount.value]
@@ -603,7 +605,7 @@ h1 { margin:0; color:#1d1d1f; font-size:26px; font-weight:650; letter-spacing:-.
 .log-line pre { margin:0; color:#d6dfeb; white-space:pre-wrap; word-break:break-word; font:13.5px/1.7 'JetBrains Mono','Cascadia Code','Fira Code',ui-monospace,SFMono-Regular,'SF Mono',Consolas,monospace; letter-spacing:.012em; }
 .log-line time { color:#5f6d82; font-size:11.5px; white-space:nowrap; font-family:'JetBrains Mono',ui-monospace,Consolas,monospace; letter-spacing:.02em; }
 .log-line-error pre { color:#ffb6b6; }.log-line-error .log-line-type { color:#f87171; }.log-line-success pre { color:#92f0b4; }.log-line-success .log-line-type { color:#4ade80; }
-.dialog-meta { display:flex; align-items:center; gap:8px; margin-bottom:10px; color:#909399; font:12px ui-monospace,monospace; }.source-view { margin:0; max-height:70vh; overflow:auto; background:#1f2937; color:#d1d5db; border-radius:6px; padding:16px; white-space:pre-wrap; word-break:break-word; font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; }.dialog-loading { min-height:300px; display:grid; place-items:center; color:#909399; }
+.dialog-meta { display:flex; align-items:center; gap:8px; margin-bottom:10px; color:#909399; font:12px ui-monospace,monospace; }.source-view { margin:0; max-height:70vh; overflow:auto; background:#1f2937; color:#e5e7eb; border-radius:6px; padding:18px 20px; white-space:pre-wrap; word-break:break-word; font:15px/1.75 ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.01em; }.dialog-loading { min-height:300px; display:grid; place-items:center; color:#909399; }
 @media (max-height:760px) { .generation-detail-page { height:auto; min-height:calc(100dvh - 144px); }.workspace-card { min-height:600px; }.log-stream { min-height:440px; } }
 @media (max-width:900px) { .generation-detail-page { height:auto; gap:14px; }.page-header { flex-direction:column; }.header-actions { width:100%; }.execution-layout { grid-template-columns:1fr; }.artifact-sidebar { border-right:0; border-bottom:1px solid #ebeef5; padding:0 0 14px; max-height:none; overflow:visible; }.log-stream { min-height:420px; max-height:70vh; }.stage-track { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; min-width:0; }.stage-item:not(:last-child)::after { display:none; }.log-toolbar-status { flex-wrap:wrap; }.log-meta { white-space:normal; }.status-card { overflow:auto; }.status-meta.url { max-width:200px; } }
 </style>
