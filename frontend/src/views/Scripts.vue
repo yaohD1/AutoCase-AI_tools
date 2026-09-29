@@ -105,6 +105,7 @@
           <p class="history-requirement">{{ item.requirement || '无需求文本' }}</p>
           <div class="history-bottom">
             <div class="history-meta">
+              <span class="chip"><i>批次</i>{{ item.run_key || item.id?.slice(0, 8) }}</span>
               <span class="chip"><i>阶段</i>{{ item.stage || '-' }}</span>
               <span class="chip"><i>文件</i>{{ (item.files || []).length }}</span>
               <span class="chip"><i>修复</i>{{ item.heal_attempts || 0 }}</span>
@@ -163,7 +164,7 @@ const result = ref(null)
 const showResult = ref(false)
 
 const emptyForm = () => ({
-  project_id: '', framework: 'playwright', language: 'typescript', workspace_path: '', specs_path: 'tests',
+  project_id: '', framework: 'playwright', language: 'typescript', workspace_path: '', specs_path: 'autocase/tests',
   base_url: '', environment_name: 'test', browser: 'chromium', auth_state_path: '', opencode_model: '',
   max_heal_attempts: 3, overwrite_policy: 'reject'
 })
@@ -250,7 +251,7 @@ async function download(item) {
     const url = window.URL.createObjectURL(new Blob([response.data]))
     const link = document.createElement('a')
     link.href = url
-    link.download = `automation_${item.id}.zip`
+    link.download = `automation_${item.run_key || item.id}.zip`
     document.body.appendChild(link)
     link.click()
     link.remove()

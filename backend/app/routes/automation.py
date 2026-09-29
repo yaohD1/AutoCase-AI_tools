@@ -19,6 +19,31 @@ from app.utils.sensitive import redact_sensitive_text
 automation_bp = Blueprint('automation', __name__)
 
 
+# stage 单调递增：事件与子会话交错会把 generation.stage 打回 orchestrator（进度条回跳），
+# 用 rank 保证“当前阶段”只前进不后退；日志分组仍用每条事件的真实 stage，不受影响。
+_STAGE_RANK = {'pending': -1, 'queued': -1, 'orchestrator': 0, 'planner': 1,
+               'generator': 2, 'test_run': 3, 'healer': 4, 'completed': 5}
+
+
+def _new_run_key():
+    """Return a readable UTC batch key; add a counter only on same-second collisions."""
+    base = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    candidate = base
+    suffix = 1
+    while AutomationGeneration.query.filter_by(run_key=candidate).first():
+        suffix += 1
+        candidate = f'{base}-{suffix}'
+    return candidate
+
+
+def _advance_stage(current, incoming):
+    if not incoming:
+        return current or 'orchestrator'
+    if _STAGE_RANK.get(incoming, -1) >= _STAGE_RANK.get(current, -1):
+        return incoming
+    return current or incoming
+
+
 def _append_generation_event(app, generation_id, event, artifacts):
     with app.app_context():
         for attempt in range(3):
@@ -38,7 +63,7 @@ def _append_generation_event(app, generation_id, event, artifacts):
             })
             generation.event_cursor = (generation.event_cursor or 0) + 1
             if generation.status not in ('completed', 'failed', 'interrupted'):
-                generation.stage = event.get('stage') or generation.stage
+                generation.stage = _advance_stage(generation.stage, event.get('stage'))
             generation.event_log = json.dumps(events[-500:], ensure_ascii=False)
             generation.artifact_index = json.dumps(artifacts or [], ensure_ascii=False)
             generation.updated_at = datetime.utcnow()
@@ -133,7 +158,7 @@ def _run_generation(app, generation_id, workspace, manifest, model, timeout):
                 return
             cancellation_won = generation.status == 'interrupted' and not result.get('interrupted')
             generation.status = 'interrupted' if result.get('interrupted') or cancellation_won else ('completed' if result['success'] else 'failed')
-            generation.stage = 'interrupted' if result.get('interrupted') or cancellation_won else ('completed' if result['success'] else (result.get('stage') or 'orchestrator'))
+            generation.stage = 'interrupted' if result.get('interrupted') or cancellation_won else ('completed' if result['success'] else _advance_stage(generation.stage, result.get('stage')))
             generation.files = json.dumps(result['files'], ensure_ascii=False)
             generation.artifact_index = json.dumps(result.get('artifacts', []), ensure_ascii=False)
             generation.test_result = json.dumps({
@@ -146,46 +171,56 @@ def _run_generation(app, generation_id, workspace, manifest, model, timeout):
                 'output': result.get('output', '')[-20000:]
             }, ensure_ascii=False)
             generation.heal_attempts = result.get('heal_attempts', 0)
+            generation.heal_records = json.dumps(result.get('heal_records', []), ensure_ascii=False)
             generation.process_id = result.get('process_id') if result.get('cleanup_failed') else None
             if result.get('interrupted') or cancellation_won:
-                generation.error = 'OpenCode workflow was interrupted by the user.'
+                generation.error = '任务已被用户中止。'
                 final_message = result.get('output') or generation.error
             elif result.get('stalled'):
-                generation.error = f"OpenCode produced no workflow activity for {result.get('idle_timeout_seconds')} seconds."
+                generation.error = f"OpenCode 在 {result.get('idle_timeout_seconds')} 秒内没有任何新活动，疑似卡死，已提前中止。"
                 if result.get('cleanup_failed'):
-                    generation.error += ' The process did not exit cleanly; the workspace lock was retained.'
+                    generation.error += ' 进程未能干净退出，工作区锁已保留。'
+                generation.error += ' 建议：确认目标应用与模型服务可正常访问后点击「重试」；若反复卡死，可拆分需求或减少单次生成的用例数量。'
                 final_message = f"{generation.error}\n{result.get('output') or ''}"
             elif result['success']:
                 generation.error = None
-                final_message = result.get('output') or 'OpenCode workflow completed.'
+                final_message = result.get('output') or 'OpenCode 工作流已完成。'
             elif result.get('timed_out'):
-                generation.error = f"OpenCode process timed out after {result.get('timeout_seconds')} seconds."
+                generation.error = f"OpenCode 运行超过 {result.get('timeout_seconds')} 秒总时限，已中止。"
                 if result.get('cleanup_failed'):
-                    generation.error += ' The process did not exit cleanly; the workspace lock was retained.'
+                    generation.error += ' 进程未能干净退出，工作区锁已保留。'
+                generation.error += ' 建议：拆分需求、减少单次生成的用例数量，或在服务端配置调大 OPENCODE_TIMEOUT 后重试。'
                 final_message = f"{generation.error}\n{result.get('output') or ''}"
             elif result.get('cleanup_failed'):
-                generation.error = 'OpenCode process did not exit cleanly; the workspace lock was retained.'
+                generation.error = 'OpenCode 进程未能干净退出，工作区锁已保留。'
+                generation.error += ' 建议：确认工作区内无残留 opencode 进程、并释放 .autocase/generation.lock 后重试。'
                 final_message = f"{generation.error}\n{result.get('output') or ''}"
             elif any(marker in (result.get('output') or '').lower() for marker in ('ai_apicallerror', 'stream error')):
-                generation.error = '模型 API 流请求失败，OpenCode 未能完成本次工作流。'
+                generation.error = '模型 API 流式请求失败，OpenCode 未能完成本次工作流。'
+                generation.error += ' 建议：检查 AI 配置的模型名称、API Key、Base URL 是否有效及额度是否充足，然后重试。'
                 final_message = f"{generation.error}\n{result.get('output') or ''}"
             elif result.get('secret_violations'):
-                generation.error = 'Generated artifacts contain sensitive data and were withheld from publication.'
-                final_message = f"{generation.error}\nFiles: {', '.join(result['secret_violations'])}"
+                generation.error = '生成的产物包含敏感信息（如明文凭据），已阻止发布。'
+                generation.error += ' 建议：将账号密码等凭据改为从目标项目环境变量引用，不要写入需求或脚本，然后重试。'
+                final_message = f"{generation.error}\n涉及文件：{', '.join(result['secret_violations'])}"
             elif result.get('scope_violations'):
-                generation.error = 'Agent attempted to modify files outside the automation test scope.'
-                final_message = f"{generation.error}\nFiles: {', '.join(result['scope_violations'])}"
+                generation.error = 'Agent 试图修改自动化测试范围之外的文件，已判失败。'
+                generation.error += ' 建议：确认涉及文件是否为框架运行产物（如 .playwright-mcp/ 快照），若是可将其加入服务端文件白名单后重试。'
+                final_message = f"{generation.error}\n涉及文件：{', '.join(result['scope_violations'])}"
             elif result.get('return_code') not in (0, None):
                 code = result.get('return_code')
                 code_hex = result.get('return_code_hex') or 'unknown hex code'
                 code_name = result.get('return_code_name') or 'unknown status'
-                generation.error = f"OpenCode exited with code {code} ({code_hex}, {code_name})."
+                generation.error = f"OpenCode 异常退出（code {code}，{code_hex}，{code_name}）。"
+                generation.error += ' 建议：展开下方对应 Agent 的执行日志定位具体报错，修正后重试。'
                 final_message = f"{generation.error}\n{result.get('output') or ''}"
             elif not result.get('files'):
-                generation.error = 'OpenCode completed without generating workspace files.'
+                generation.error = 'OpenCode 工作流结束，但在测试目录下没有检测到任何新增或修改的测试文件。'
+                generation.error += ' 建议：检查「测试目录」(specs_path) 是否与目标项目 playwright.config 的 testDir 一致、「运行环境」是否为目标项目支持的合法值，然后重试。'
                 final_message = f"{generation.error}\n{result.get('output') or ''}"
             else:
-                generation.error = 'OpenCode workflow failed; inspect the generation log.'
+                generation.error = 'OpenCode 工作流失败，具体原因见下方执行日志。'
+                generation.error += ' 建议：展开下方各 Agent 的执行日志查看报错细节，修正需求或配置后重试。'
                 final_message = f"{generation.error}\n{result.get('output') or ''}"
             generation.completed_at = datetime.utcnow()
             generation.updated_at = datetime.utcnow()
@@ -224,8 +259,8 @@ def _run_generation(app, generation_id, workspace, manifest, model, timeout):
                         db.session.commit()
                     return
                 generation.status = 'failed'
-                generation.stage = 'orchestrator'
-                error_message = OpenCodeRunner._redact_output(str(exc))[:2000] or 'OpenCode workflow failed.'
+                generation.stage = _advance_stage(generation.stage, 'orchestrator')
+                error_message = '自动化任务执行异常：' + (OpenCodeRunner._redact_output(str(exc))[:2000] or '未知错误')
                 generation.error = error_message
                 generation.test_result = json.dumps({
                     'success': False,
@@ -268,7 +303,7 @@ def _default_config(project_id):
         'framework': 'playwright',
         'language': 'typescript',
         'workspace_path': '',
-        'specs_path': 'tests',
+        'specs_path': 'autocase/tests',
         'base_url': '',
         'environment_name': 'test',
         'browser': 'chromium',
@@ -296,7 +331,7 @@ def _normalise_config(config):
     if not config.language:
         config.language = 'typescript'
     if not config.specs_path:
-        config.specs_path = 'tests'
+        config.specs_path = 'autocase/tests'
     if not config.environment_name:
         config.environment_name = 'test'
     if not config.browser:
@@ -372,6 +407,38 @@ def save_automation_config():
     return jsonify({'success': True, 'config': config.to_dict()}), 200
 
 
+def _build_manifest(project, config, safe_requirement, storage_state, workspace, run_key):
+    artifact_root = f'autocase/runs/{run_key}' if run_key else 'autocase'
+    return {
+        'version': 1,
+        'project_id': project.id,
+        'project_name': project.name,
+        'requirement': safe_requirement,
+        'base_url': config.base_url,
+        'environment_name': config.environment_name or 'test',
+        'browser': config.browser or 'chromium',
+        'specs_path': f'{artifact_root}/tests',
+        'plan_path': f'{artifact_root}/test-plans',
+        'run_key': run_key,
+        'storage_state': str(storage_state.relative_to(workspace)).replace('\\', '/') if storage_state else '',
+        'max_heal_attempts': config.max_heal_attempts if config.max_heal_attempts is not None else 3,
+        'overwrite_policy': config.overwrite_policy or 'reject',
+        'rules': [
+            'Use the provided Base URL and storage state when exploring the application.',
+            'Do not write credentials, API keys, or secrets into prompts, logs, or test files.',
+            'Credentials from the requirement are redacted; use storage_state for authenticated flows.',
+            'Write the plan below plan_path and generated tests only below specs_path; keep the workspace uncommitted.'
+        ]
+    }
+
+
+def _generation_artifact_paths(generation, config):
+    if generation.run_key:
+        root = f'autocase/runs/{generation.run_key}'
+        return f'{root}/tests', f'{root}/test-plans'
+    return config.get('specs_path') or 'tests', 'test-plans'
+
+
 @automation_bp.route('/automation/generate', methods=['POST'])
 def generate_automation_scripts():
     data = request.get_json() or {}
@@ -408,6 +475,7 @@ def generate_automation_scripts():
 
     generation = AutomationGeneration(
         project_id=project_id,
+        run_key=_new_run_key(),
         status='pending',
         stage='starting',
         requirement=safe_requirement,
@@ -424,25 +492,80 @@ def generate_automation_scripts():
     db.session.add(generation)
     db.session.commit()
 
-    manifest = {
-        'version': 1,
-        'project_id': project.id,
-        'project_name': project.name,
-        'requirement': safe_requirement,
-        'base_url': config.base_url,
-        'environment_name': config.environment_name or 'test',
-        'browser': config.browser or 'chromium',
-        'specs_path': config.specs_path or 'tests',
-        'storage_state': str(storage_state.relative_to(workspace)).replace('\\', '/') if storage_state else '',
-        'max_heal_attempts': config.max_heal_attempts if config.max_heal_attempts is not None else 3,
-        'overwrite_policy': config.overwrite_policy or 'reject',
-        'rules': [
-            'Use the provided Base URL and storage state when exploring the application.',
-            'Do not write credentials, API keys, or secrets into prompts, logs, or test files.',
-            'Credentials from the requirement are redacted; use storage_state for authenticated flows.',
-            'Write generated tests only below specs_path and keep the workspace uncommitted.'
-        ]
-    }
+    manifest = _build_manifest(project, config, safe_requirement, storage_state, workspace, generation.run_key)
+    generation.stage = 'queued'
+    db.session.commit()
+    app = current_app._get_current_object()
+    runner.register_run(generation.id)
+    thread = threading.Thread(
+        target=_run_generation,
+        args=(app, generation.id, workspace, manifest, config.opencode_model or None, app.config.get('OPENCODE_TIMEOUT', 3600)),
+        daemon=True
+    )
+    thread.start()
+    response = generation.to_dict()
+    response['location'] = f'/scripts/generations/{generation.id}'
+    return jsonify({'success': True, 'generation': response}), 202
+
+
+@automation_bp.route('/automation/generations/<generation_id>/retry', methods=['POST'])
+def retry_generation(generation_id):
+    generation = _get_project_generation(generation_id)
+    if not generation:
+        return jsonify({'error': 'Generation not found'}), 404
+    if generation.status in ('pending', 'queued', 'running'):
+        return jsonify({'error': '任务正在进行中，无法重试。'}), 409
+    if generation.process_id:
+        return jsonify({'error': '上一次运行的进程尚未清理，请先停止任务或稍后再试。'}), 409
+
+    project = Project.query.get(generation.project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+    config = AutomationConfig.query.filter_by(project_id=generation.project_id).first()
+    if not config:
+        return jsonify({'error': '自动化配置不存在，请先保存配置。'}), 400
+    _normalise_config(config)
+    validation_error = _validate_config(config, require_generation=True)
+    if validation_error:
+        return jsonify({'error': validation_error}), 400
+
+    runner = OpenCodeRunner(current_app.config)
+    requirement = (generation.requirement or '').strip()
+    if not requirement:
+        return jsonify({'error': '原始需求为空，无法重试。'}), 400
+    try:
+        _, workspace = runner.resolve_workspace(config.workspace_path)
+        runner.validate_workspace(workspace)
+        storage_state = runner.resolve_storage_state(workspace, config.auth_state_path)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    # 就地重置当前任务，复用同一条记录（不新建），使用当前配置 + 原需求重跑。
+    generation.status = 'pending'
+    if not generation.run_key:
+        generation.run_key = _new_run_key()
+    generation.stage = 'starting'
+    generation.config_snapshot = json.dumps(config.to_dict(), ensure_ascii=False)
+    generation.files = json.dumps([], ensure_ascii=False)
+    generation.warnings = json.dumps([], ensure_ascii=False)
+    generation.event_log = json.dumps([], ensure_ascii=False)
+    generation.event_cursor = 0
+    generation.artifact_index = json.dumps([], ensure_ascii=False)
+    generation.test_result = None
+    generation.heal_attempts = 0
+    generation.heal_records = json.dumps([], ensure_ascii=False)
+    generation.commit_status = 'uncommitted'
+    generation.commit_hash = None
+    generation.commit_message = None
+    generation.committed_files = json.dumps([], ensure_ascii=False)
+    generation.error = None
+    generation.started_at = datetime.utcnow()
+    generation.completed_at = None
+    generation.process_id = None
+    generation.updated_at = datetime.utcnow()
+    db.session.commit()
+
+    manifest = _build_manifest(project, config, requirement, storage_state, workspace, generation.run_key)
     generation.stage = 'queued'
     db.session.commit()
     app = current_app._get_current_object()
@@ -665,12 +788,13 @@ def get_generation_artifact(generation_id):
     except OSError:
         return jsonify({'error': 'Artifact is unavailable'}), 404
     safe_content = redact_sensitive_text(content)
-    if safe_content != content:
-        return jsonify({'error': 'Artifact contains sensitive data and is not readable'}), 403
+    # 不再因命中脱敏就整体 403：返回打码后的内容，登录脚本等含 username/password 字样的
+    # 测试脚本也能正常查看；真正的敏感文件（.env/.auth/.key/.pem）已在上方硬阻断。
     return jsonify({
         'path': relative_path,
         'kind': matching.get('kind'),
-        'content': safe_content
+        'content': safe_content,
+        'redacted': safe_content != content
     }), 200
 
 
@@ -697,10 +821,11 @@ def commit_generation(generation_id):
         file_lock = runner._acquire_file_lock(workspace)
         files = json.loads(generation.files or '[]')
         paths = [item.get('path') for item in files if item.get('path')]
-        violations = runner._file_scope(files, config.get('specs_path'))
+        specs_path, plan_path = _generation_artifact_paths(generation, config)
+        violations = runner._file_scope(files, specs_path, plan_path)
         if violations:
             return jsonify({'error': 'Generation contains files outside the commit scope', 'files': violations}), 409
-        allowed = [path for path in paths if path.startswith('test-plans/') or path.startswith(f"{Path(config.get('specs_path') or 'tests').as_posix().rstrip('/')}/") or path.startswith('playwright.config.')]
+        allowed = [path for path in paths if path.startswith(f'{plan_path.rstrip("/")}/') or path.startswith(f'{specs_path.rstrip("/")}/') or (not generation.run_key and path.startswith('playwright.config.'))]
         if not allowed:
             return jsonify({'error': 'No committable generated files found'}), 409
         expected_hashes = {item.get('path'): item.get('sha256') for item in files}
@@ -732,13 +857,104 @@ def commit_generation(generation_id):
     return jsonify({'success': True, 'generation': generation.to_dict()}), 200
 
 
+def _revert_summary(result):
+    if result.get('mode') == 'revert':
+        return f"已撤回：对本批次提交执行 git revert，生成反向提交 {(result.get('revert_commit') or '')[:12]}。"
+    parts = []
+    if result.get('deleted'):
+        parts.append(f"删除新增文件 {len(result['deleted'])} 个")
+    if result.get('restored'):
+        parts.append(f"还原修改文件 {len(result['restored'])} 个")
+    if result.get('skipped'):
+        parts.append(f"跳过 {len(result['skipped'])} 个（与 HEAD 一致）")
+    if result.get('failed'):
+        parts.append(f"失败 {len(result['failed'])} 个")
+    return '已撤回：' + ('，'.join(parts) if parts else '无可撤回改动') + '。'
+
+
+@automation_bp.route('/automation/generations/<generation_id>/revert', methods=['POST'])
+def revert_generation(generation_id):
+    generation = _get_project_generation(generation_id)
+    if not generation:
+        return jsonify({'error': 'Generation not found'}), 404
+    if generation.status in ('pending', 'queued', 'running') or generation.process_id:
+        return jsonify({'error': '任务正在进行中，无法撤回。请先停止任务。'}), 409
+    if generation.commit_status == 'reverted':
+        return jsonify({'error': '本批次改动已撤回，无需重复操作。'}), 409
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get('force'))
+    try:
+        config = json.loads(generation.config_snapshot or '{}')
+    except (TypeError, ValueError):
+        return jsonify({'error': '任务配置无效，无法定位工作区。'}), 409
+    try:
+        files = json.loads(generation.files or '[]')
+    except (TypeError, ValueError):
+        files = []
+    committed = generation.commit_status == 'committed' and bool(generation.commit_hash)
+    if not committed and not files:
+        return jsonify({'error': '没有可撤回的改动记录。'}), 409
+    specs_path, plan_path = _generation_artifact_paths(generation, config)
+
+    runner = OpenCodeRunner(current_app.config)
+    lock = None
+    file_lock = None
+    try:
+        _, workspace = runner.resolve_workspace(config.get('workspace_path'))
+        runner.validate_workspace(workspace)
+        lock = runner._workspace_lock(workspace)
+        file_lock = runner._acquire_file_lock(workspace)
+        result = runner.revert_files(
+            workspace,
+            files,
+            specs_path,
+            plan_path,
+            commit_hash=generation.commit_hash if committed else None,
+            force=force
+        )
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return jsonify({'error': f'撤回失败：{exc}'}), 409
+    finally:
+        if file_lock:
+            runner._release_file_lock(file_lock, f'launcher:{os.getpid()}')
+        if lock:
+            lock.release()
+
+    if result.get('drifted') and not force:
+        return jsonify({
+            'error': '部分文件在生成后被手动修改过，撤回会覆盖这些改动。',
+            'require_force': True,
+            'drifted': result['drifted'],
+            'preview': result.get('preview', {})
+        }), 409
+
+    generation.commit_status = 'reverted'
+    generation.updated_at = datetime.utcnow()
+    try:
+        events = json.loads(generation.event_log or '[]')
+    except (TypeError, ValueError):
+        events = []
+    events.append({
+        'sequence': (generation.event_cursor or 0) + 1,
+        'stage': generation.stage,
+        'event_type': 'reverted',
+        'message': _revert_summary(result),
+        'created_at': datetime.utcnow().isoformat()
+    })
+    generation.event_cursor = (generation.event_cursor or 0) + 1
+    generation.event_log = json.dumps(events[-500:], ensure_ascii=False)
+    db.session.commit()
+    return jsonify({'success': True, 'result': result, 'generation': generation.to_dict()}), 200
+
+
 @automation_bp.route('/automation/generations/<generation_id>/download', methods=['GET'])
 def download_generation(generation_id):
     generation = AutomationGeneration.query.get(generation_id)
     project_id = request.args.get('project_id')
     if not generation or generation.status != 'completed' or generation.project_id != project_id:
         return jsonify({'error': 'Completed generation not found'}), 404
-    path = Path(current_app.config['EXPORT_FOLDER']) / f'automation_{generation.id}.zip'
+    archive_key = generation.run_key or generation.id
+    path = Path(current_app.config['EXPORT_FOLDER']) / f'automation_{archive_key}.zip'
     if not path.exists():
         return jsonify({'error': 'Generated archive not found'}), 404
     return send_file(path, as_attachment=True, download_name=path.name)

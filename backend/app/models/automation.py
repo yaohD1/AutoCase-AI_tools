@@ -14,7 +14,7 @@ class AutomationConfig(db.Model):
     framework = db.Column(db.String(50), default='playwright', nullable=False)
     language = db.Column(db.String(50), default='typescript', nullable=False)
     workspace_path = db.Column(db.String(500), default='')
-    specs_path = db.Column(db.String(255), default='tests')
+    specs_path = db.Column(db.String(255), default='autocase/tests')
     base_url = db.Column(db.String(500), default='')
     environment_name = db.Column(db.String(100), default='test')
     browser = db.Column(db.String(50), default='chromium')
@@ -32,7 +32,7 @@ class AutomationConfig(db.Model):
             'framework': self.framework,
             'language': self.language,
             'workspace_path': self.workspace_path or '',
-            'specs_path': self.specs_path or 'tests',
+            'specs_path': self.specs_path or 'autocase/tests',
             'base_url': redact_sensitive_text(self.base_url or ''),
             'environment_name': self.environment_name or 'test',
             'browser': self.browser or 'chromium',
@@ -49,6 +49,7 @@ class AutomationGeneration(db.Model):
     __tablename__ = 'automation_generations'
 
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_key = db.Column(db.String(40), unique=True)
     project_id = db.Column(db.String(36), db.ForeignKey('projects.id'), nullable=False)
     status = db.Column(db.String(20), default='pending', nullable=False)
     stage = db.Column(db.String(50), default='pending')
@@ -62,6 +63,7 @@ class AutomationGeneration(db.Model):
     artifact_index = db.Column(db.Text)
     test_result = db.Column(db.Text)
     heal_attempts = db.Column(db.Integer, default=0)
+    heal_records = db.Column(db.Text)
     commit_status = db.Column(db.String(20), default='uncommitted')
     commit_hash = db.Column(db.String(80))
     commit_message = db.Column(db.String(500))
@@ -85,6 +87,20 @@ class AutomationGeneration(db.Model):
         events = parse(self.event_log, []) if include_events else []
         if not isinstance(events, list):
             events = []
+        heal_records = parse(self.heal_records, [])
+        if not isinstance(heal_records, list):
+            heal_records = []
+        # 采集时已脱敏，这里再做一次防御：避免旧数据或意外写入的凭据外泄。
+        for record in heal_records:
+            if not isinstance(record, dict):
+                continue
+            if isinstance(record.get('reason'), str):
+                record['reason'] = redact_sensitive_text(record['reason'])
+            changes = record.get('changes')
+            if isinstance(changes, list):
+                for change in changes:
+                    if isinstance(change, dict) and isinstance(change.get('diff'), str):
+                        change['diff'] = redact_sensitive_text(change['diff'])
         config = parse(self.config_snapshot, {})
         if isinstance(config, dict):
             config = {
@@ -100,6 +116,7 @@ class AutomationGeneration(db.Model):
             safe_events.append(safe_event)
         return {
             'id': self.id,
+            'run_key': self.run_key or (self.id[:8] if self.id else ''),
             'project_id': self.project_id,
             'status': self.status,
             'stage': self.stage or self.status,
@@ -114,6 +131,7 @@ class AutomationGeneration(db.Model):
             'artifacts': parse(self.artifact_index, []),
             'test_result': parse(self.test_result, {}),
             'heal_attempts': self.heal_attempts or 0,
+            'heal_records': heal_records,
             'commit_status': self.commit_status or 'uncommitted',
             'commit_hash': self.commit_hash,
             'commit_message': self.commit_message,

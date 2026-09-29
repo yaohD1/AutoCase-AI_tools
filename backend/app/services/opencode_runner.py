@@ -1,3 +1,4 @@
+import difflib
 import json
 import hashlib
 import os
@@ -8,6 +9,7 @@ import threading
 import time
 import zipfile
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from queue import Empty, Full, Queue
 
@@ -606,7 +608,7 @@ class OpenCodeRunner:
 
     _STAGE_LABELS = {
         'orchestrator': '总控协调', 'planner': 'Planner 规划', 'generator': 'Generator 生成',
-        'test_run': '执行测试', 'healer': 'Healer 修复'
+        'test_run': 'Healer 执行测试', 'healer': 'Healer 执行与修复'
     }
 
     @staticmethod
@@ -618,8 +620,10 @@ class OpenCodeRunner:
             return 'generator'
         if 'plan' in value or 'explor' in value:
             return 'planner'
+        # Playwright's three-agent loop has no standalone test-runner agent:
+        # test_run is a healer tool action and should stay in the healer group.
         if 'test' in value and 'run' in value:
-            return 'test_run'
+            return 'healer'
         return 'orchestrator'
 
     @staticmethod
@@ -765,6 +769,9 @@ class OpenCodeRunner:
             if key in state['seen']:
                 return None
             state['seen'].add(key)
+            # 只采集 healer 的最终文本作为“失败原因/结论”，不采 _map_delta 的流式碎片。
+            if stage == 'healer' and session_id:
+                state.setdefault('heal_reasons', {}).setdefault(session_id, []).append(text[:2000])
             return stage, 'text', text[:2000]
 
         if part_type == 'reasoning':
@@ -792,39 +799,10 @@ class OpenCodeRunner:
         return stage, 'diagnostic', f'{part_type}: {compact}'
 
     def _map_delta(self, properties, state):
-        part_id = properties.get('partID') or properties.get('partId') or properties.get('id')
-        chunk = properties.get('delta')
-        if not part_id or not isinstance(chunk, str) or not chunk:
-            return None
-        session_id = properties.get('sessionID') or properties.get('sessionId')
-        field = properties.get('field') or ''
-        buffers = state.setdefault('delta_buf', {})
-        if len(buffers) > 500:
-            buffers.clear()
-        entry = buffers.get(part_id)
-        if entry is None:
-            entry = {
-                'text': '', 'session': session_id, 'field': field,
-                'last_emit': 0.0, 'emitted': 0,
-                'type': state.get('part_type', {}).get(part_id),
-            }
-            buffers[part_id] = entry
-        entry['text'] = (entry['text'] + chunk)[-4000:]
-        if session_id and not entry.get('session'):
-            entry['session'] = session_id
-        now = time.monotonic()
-        grown = len(entry['text']) - entry['emitted']
-        if now - entry['last_emit'] < 2.5 or grown < 24:
-            return None
-        entry['last_emit'] = now
-        entry['emitted'] = len(entry['text'])
-        tail = entry['text'][-400:].strip()
-        if not tail:
-            return None
-        part_type = entry.get('type') or state.get('part_type', {}).get(part_id) or entry.get('field')
-        stage = self._stage_for(state, entry['session'])
-        prefix = '[思考] ' if part_type == 'reasoning' else ''
-        return stage, 'text', f'{prefix}…{tail}'
+        # Delta 事件只是同一个 text/reasoning part 的中间片段。
+        # 若把定时截取的尾部作为独立日志写入，最终 part 完成时会出现多条半截和重复文本。
+        # 保留事件消费流程，但只在 _map_part() 收到完成 part 时持久化完整内容。
+        return None
 
     @staticmethod
     def _git_snapshot(workspace, extra_roots=()):
@@ -892,20 +870,22 @@ class OpenCodeRunner:
     @staticmethod
     def _artifact_kind(path):
         normalized = path.replace('\\', '/')
-        if normalized.startswith('test-plans/'):
+        if '/test-plans/' in f'/{normalized}' or normalized.startswith('test-plans/'):
             return 'plan'
         if normalized.endswith('.spec.ts') or normalized.endswith('.spec.js'):
             return 'script'
         return 'config'
 
     @classmethod
-    def _artifact_index(cls, workspace, specs_path, before):
-        current = cls._git_snapshot(workspace, (specs_path or 'tests', 'test-plans'))
+    def _artifact_index(cls, workspace, specs_path, before, plan_path=None):
+        plan_path = plan_path or 'test-plans'
+        current = cls._git_snapshot(workspace, (specs_path or 'tests', plan_path))
         specs = Path(specs_path or 'tests').as_posix().rstrip('/') + '/'
+        plans = Path(plan_path).as_posix().rstrip('/') + '/'
         artifacts = []
         for path, info in current.items():
             normalized = path.replace('\\', '/')
-            if not (normalized.startswith('test-plans/') or normalized.startswith(specs) or normalized.startswith('playwright.config.')):
+            if not (normalized.startswith(plans) or normalized.startswith(specs) or normalized.startswith('playwright.config.')):
                 continue
             old_hash = before.get(path, {}).get('hash')
             if old_hash == info.get('hash'):
@@ -957,25 +937,138 @@ class OpenCodeRunner:
         return redact_sensitive_text(output)[-200000:]
 
     @staticmethod
+    def _heal_roots(manifest):
+        # healer 只在当前批次目录内产生修复 diff；旧任务继续兼容历史目录。
+        roots = []
+        manifest = manifest or {}
+        for name in (manifest.get('specs_path'), manifest.get('plan_path'), 'scripts', 'tests'):
+            normalized = str(name).strip().replace('\\', '/').strip('/')
+            if normalized and normalized not in roots:
+                roots.append(normalized)
+        return tuple(roots)
+
+    @staticmethod
+    def _text_snapshot(workspace, roots, max_file_bytes=256 * 1024, max_total_bytes=2 * 1024 * 1024):
+        # 抓取 roots 下文本文件内容，用于 healer 修复前后对比；跳过二进制、超大文件与总量上限。
+        snapshot = {}
+        total = 0
+        for root_name in roots:
+            root = workspace / root_name
+            try:
+                root = root.resolve()
+            except OSError:
+                continue
+            if root != workspace and workspace not in root.parents:
+                continue
+            if not root.exists() or not root.is_dir():
+                continue
+            for target in root.rglob('*'):
+                try:
+                    if not target.is_file() or target.is_symlink():
+                        continue
+                    if target.stat().st_size > max_file_bytes:
+                        continue
+                    relative = target.relative_to(workspace).as_posix()
+                    if relative in snapshot:
+                        continue
+                    content = target.read_text(encoding='utf-8')
+                except (OSError, UnicodeDecodeError, ValueError):
+                    continue
+                total += len(content)
+                if total > max_total_bytes:
+                    return snapshot
+                snapshot[relative] = content
+        return snapshot
+
+    @staticmethod
+    def _diff_snapshot(before, after, max_diff_chars=8000):
+        changes = []
+        for path in sorted(set(before) | set(after)):
+            old = before.get(path)
+            new = after.get(path)
+            if old == new:
+                continue
+            if old is None:
+                status = 'added'
+            elif new is None:
+                status = 'deleted'
+            else:
+                status = 'modified'
+            diff_lines = difflib.unified_diff(
+                (old or '').splitlines(), (new or '').splitlines(),
+                fromfile='a/' + path, tofile='b/' + path, lineterm=''
+            )
+            diff_text = redact_sensitive_text('\n'.join(diff_lines))[:max_diff_chars]
+            changes.append({'path': path, 'status': status, 'diff': diff_text})
+        return changes
+
+    def _finalize_heal_record(self, state, session_id, workspace, manifest):
+        entry = state.get('heal_snapshots', {}).get(session_id)
+        if entry is None or session_id in state.get('heal_done', set()):
+            return
+        state.setdefault('heal_done', set()).add(session_id)
+        try:
+            after = self._text_snapshot(workspace, self._heal_roots(manifest))
+        except Exception:
+            after = {}
+        changes = self._diff_snapshot(entry.get('before') or {}, after)
+        reasons = state.get('heal_reasons', {}).get(session_id) or []
+        reason = redact_sensitive_text('\n\n'.join(r for r in reasons if r).strip())[:4000]
+        state.setdefault('heal_records', []).append({
+            'index': len(state['heal_records']) + 1,
+            'reason': reason or '（无文字说明）',
+            'changes': changes,
+            'started_at': entry.get('started_at'),
+            'ended_at': datetime.utcnow().isoformat()
+        })
+
+    def _track_heal(self, event, state, workspace, manifest):
+        if not isinstance(event, dict):
+            return
+        roots = self._heal_roots(manifest)
+        # 开始：新出现的 healer 会话，抓“修复前”快照（此时 healer 尚未改文件）。
+        for session_id in list(state.get('healer_sessions', ())):
+            if session_id in state.get('heal_snapshots', {}) or session_id in state.get('heal_done', set()):
+                continue
+            try:
+                before = self._text_snapshot(workspace, roots)
+            except Exception:
+                before = {}
+            state.setdefault('heal_snapshots', {})[session_id] = {
+                'before': before, 'started_at': datetime.utcnow().isoformat()
+            }
+        # 结束：healer 会话 idle → 生成 before/after diff 记录。
+        if str(event.get('type') or '') != 'session.idle':
+            return
+        properties = event.get('properties') if isinstance(event.get('properties'), dict) else {}
+        session_id = properties.get('sessionID') or self._info_session(properties)
+        if not session_id or session_id not in state.get('heal_snapshots', {}) or session_id in state.get('heal_done', set()):
+            return
+        self._finalize_heal_record(state, session_id, workspace, manifest)
+
+    @staticmethod
     def redact_sensitive_text(value):
         return redact_sensitive_text(value)
 
     @staticmethod
-    def _file_scope(files, specs_path):
+    def _file_scope(files, specs_path, plan_path=None):
         specs = Path(specs_path or 'tests').as_posix().rstrip('/') + '/'
+        plans = Path(plan_path or 'test-plans').as_posix().rstrip('/') + '/'
+        batch_scope = specs.startswith('autocase/runs/') and plans.startswith('autocase/runs/')
         allowed_root_files = {'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'}
         violations = []
         for item in files:
             path = item['path'].replace('\\', '/')
             allowed = (
                 path.startswith(specs)
-                or path.startswith('test-plans/')
+                or path.startswith(plans)
                 or path.startswith('.autocase/')
-                or path in allowed_root_files
-                or path.startswith('playwright.config.')
+                or (not batch_scope and path in allowed_root_files)
+                or (not batch_scope and path.startswith('playwright.config.'))
                 # opencode serve 自动导出的 agent 兼容文件，属于框架产物，不算越界修改
                 or path.startswith('.claude/agents/')
                 or path.startswith('.github/agents/')
+                or path.startswith('.playwright-mcp/')
             )
             if not allowed:
                 violations.append(path)
@@ -1031,6 +1124,109 @@ class OpenCodeRunner:
         )
         return commit.stdout.strip()
 
+    @staticmethod
+    def revert_files(workspace, files, specs_path, plan_path=None, commit_hash=None, force=False):
+        """撤回本批次 agent 在工作区留下的改动；只处理真实产物（specs/、test-plans/、playwright.config.*）。
+
+        commit_hash 非空（已提交）→ git revert --no-edit 生成反向提交；
+        否则（未提交）→ 按当前 git 状态分桶：未跟踪文件删除、已跟踪改动 git checkout HEAD 还原。
+        任一待处理文件的当前内容与生成时记录的 sha256 不一致即为 drift；drift 且未 force 时不动手，
+        返回 drifted 清单交由上层二次确认。全程只用带 pathspec 的命令，不碰本批之外的文件。
+        """
+        specs_prefix = Path(specs_path or 'tests').as_posix().rstrip('/') + '/'
+        plans_prefix = Path(plan_path or 'test-plans').as_posix().rstrip('/') + '/'
+
+        def _in_scope(p):
+            p = p.replace('\\', '/')
+            return p.startswith(plans_prefix) or p.startswith(specs_prefix) or p.startswith('playwright.config.')
+
+        recorded = {}
+        for item in files or []:
+            path = (item.get('path') or '').replace('\\', '/')
+            if path and _in_scope(path):
+                recorded[path] = item.get('sha256')
+        allowed = sorted(recorded)
+
+        def _sha(path):
+            target = (workspace / path).resolve()
+            if target != workspace and workspace not in target.parents:
+                return None
+            try:
+                return hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
+            except OSError:
+                return None
+
+        def _git(args, timeout=60, check=False):
+            return subprocess.run(['git', '-C', str(workspace), *args], check=check,
+                                  capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout)
+
+        # ---- 已提交：对本批 commit 生成反向提交 ----
+        if commit_hash:
+            dirty = OpenCodeRunner._git_status(workspace)
+            drifted = [p for p in allowed if p in dirty]
+            if drifted and not force:
+                return {'mode': 'revert', 'deleted': [], 'restored': [], 'skipped': [], 'failed': [],
+                        'drifted': drifted, 'preview': {'restore': drifted}, 'revert_commit': None}
+            if drifted:
+                _git(['checkout', 'HEAD', '--', *drifted], timeout=30)
+            result = _git(['revert', '--no-edit', commit_hash])
+            if result.returncode != 0:
+                _git(['revert', '--abort'], timeout=30)
+                raise RuntimeError((result.stderr or result.stdout or 'git revert 失败').strip()[:500])
+            head = _git(['rev-parse', 'HEAD'], timeout=20, check=True)
+            return {'mode': 'revert', 'deleted': [], 'restored': allowed, 'skipped': [], 'failed': [],
+                    'drifted': drifted, 'revert_commit': head.stdout.strip()}
+
+        # ---- 未提交：按当前状态分桶还原/删除 ----
+        if not allowed:
+            return {'mode': 'working_tree', 'deleted': [], 'restored': [], 'skipped': [], 'failed': [],
+                    'drifted': [], 'revert_commit': None}
+        current = OpenCodeRunner._git_status(workspace)
+        to_delete, to_restore, skipped, drifted = [], [], [], []
+        for path in allowed:
+            status = current.get(path)
+            if status in ('??', 'A'):
+                if _sha(path) is None:
+                    skipped.append(path)
+                    continue
+                if recorded.get(path) and _sha(path) != recorded[path]:
+                    drifted.append(path)
+                to_delete.append(path)
+            elif status:
+                if recorded.get(path) and _sha(path) not in (None, recorded[path]):
+                    drifted.append(path)
+                to_restore.append(path)
+            else:
+                skipped.append(path)
+        if drifted and not force:
+            return {'mode': 'working_tree', 'deleted': [], 'restored': [], 'skipped': skipped, 'failed': [],
+                    'drifted': drifted, 'preview': {'delete': to_delete, 'restore': to_restore}, 'revert_commit': None}
+        restored, deleted, failed = [], [], []
+        if to_restore:
+            res = _git(['checkout', 'HEAD', '--', *to_restore])
+            if res.returncode == 0:
+                restored = list(to_restore)
+            else:
+                for path in to_restore:
+                    if _git(['checkout', 'HEAD', '--', path], timeout=30).returncode == 0:
+                        restored.append(path)
+                    else:
+                        failed.append(path)
+        if to_delete:
+            _git(['rm', '--cached', '--ignore-unmatch', '-q', '--', *to_delete], timeout=30)
+            for path in to_delete:
+                target = (workspace / path).resolve()
+                if target != workspace and workspace not in target.parents:
+                    continue
+                try:
+                    if target.is_file():
+                        target.unlink()
+                        deleted.append(path)
+                except OSError:
+                    failed.append(path)
+        return {'mode': 'working_tree', 'deleted': deleted, 'restored': restored, 'skipped': skipped,
+                'failed': failed, 'drifted': drifted, 'revert_commit': None}
+
     def run(self, workspace, manifest, generation_id, model=None, timeout=3600, event_callback=None, process_callback=None):
         active_run = self._register_active_run(generation_id)
         lock = None
@@ -1050,7 +1246,8 @@ class OpenCodeRunner:
         current_stage = 'orchestrator'
         output_lines = deque(maxlen=2000)
         binary = self.app_config.get('OPENCODE_BIN')
-        map_state = {'session_stage': {}, 'current_stage': 'orchestrator', 'seen': set(), 'healer_sessions': set()}
+        map_state = {'session_stage': {}, 'current_stage': 'orchestrator', 'seen': set(), 'healer_sessions': set(),
+                     'heal_snapshots': {}, 'heal_reasons': {}, 'heal_records': [], 'heal_done': set()}
         driver = {'sid': None, 'busy': False, 'done': threading.Event(), 'fatal': None,
                   'last_activity': time.monotonic()}
 
@@ -1067,7 +1264,7 @@ class OpenCodeRunner:
                         artifact_cache['last'] = now
                         try:
                             artifact_cache['items'] = self._artifact_index(
-                                workspace, manifest.get('specs_path'), before)
+                                workspace, manifest.get('specs_path'), before, manifest.get('plan_path'))
                         except Exception:
                             pass
                     event_callback({
@@ -1090,6 +1287,10 @@ class OpenCodeRunner:
             mapped = self._map_bus_event(event, map_state)
             if mapped:
                 emit(mapped[0], mapped[1], mapped[2])
+            try:
+                self._track_heal(event, map_state, workspace, manifest)
+            except Exception:
+                pass
 
         def serve_sink(line):
             output_lines.append(line)
@@ -1098,7 +1299,14 @@ class OpenCodeRunner:
         try:
             lock = self._workspace_lock(workspace)
             file_lock = self._acquire_file_lock(workspace)
-            extra_roots = (manifest.get('specs_path') or 'tests', 'test-plans')
+            specs_path = manifest.get('specs_path') or 'tests'
+            plan_path = manifest.get('plan_path') or 'test-plans'
+            for relative in (specs_path, plan_path):
+                target = (workspace / relative).resolve()
+                if target != workspace and workspace not in target.parents:
+                    raise ValueError('automation artifact path must stay inside workspace')
+                target.mkdir(parents=True, exist_ok=True)
+            extra_roots = (specs_path, plan_path)
             before = self._git_snapshot(workspace, extra_roots)
             task_dir = workspace / '.autocase'
             task_dir.mkdir(parents=True, exist_ok=True)
@@ -1251,16 +1459,27 @@ class OpenCodeRunner:
             current_stage = map_state.get('current_stage') or 'orchestrator'
             cleanup_failed = preserve_file_lock
             files = [] if cleanup_failed else self._changed_files(workspace, before, extra_roots)
-            violations = ['OpenCode process cleanup failed'] if cleanup_failed else self._file_scope(files, manifest.get('specs_path'))
+            violations = ['OpenCode process cleanup failed'] if cleanup_failed else self._file_scope(
+                files, manifest.get('specs_path'), manifest.get('plan_path')
+            )
             if not cleanup_failed:
                 violations.extend(self._overwrite_violations(files, before, manifest.get('overwrite_policy', 'reject')))
             violations = sorted(set(violations))
-            archive_path = self._archive(workspace, files, generation_id) if files and not violations else None
+            archive_path = self._archive(
+                workspace, files, manifest.get('run_key') or generation_id
+            ) if files and not violations else None
             output = '\n'.join(output_lines)
             success = return_code == 0 and bool(files) and not violations and not interrupted and not timed_out and not stalled
             if not files:
                 output += '\nOpenCode completed without workspace changes.'
-            heal_attempts = min(max(len(map_state['healer_sessions']), output.count('playwright-test-healer')), 3)
+            # 兜底：若某 healer 会话没有收到 session.idle（异常中止等），run 收尾时补记一次。
+            for heal_sid in list(map_state.get('heal_snapshots', {})):
+                if heal_sid not in map_state['heal_done']:
+                    try:
+                        self._finalize_heal_record(map_state, heal_sid, workspace, manifest)
+                    except Exception:
+                        pass
+            heal_attempts = len(map_state['heal_records']) or min(max(len(map_state['healer_sessions']), output.count('playwright-test-healer')), 3)
             return {
                 'success': success,
                 'return_code': return_code,
@@ -1268,9 +1487,12 @@ class OpenCodeRunner:
                 'return_code_name': self._exit_code_details(return_code)['name'],
                 'output': self._redact_output(output),
                 'files': files,
-                'artifacts': [] if cleanup_failed else self._artifact_index(workspace, manifest.get('specs_path'), before),
+                'artifacts': [] if cleanup_failed else self._artifact_index(
+                    workspace, manifest.get('specs_path'), before, manifest.get('plan_path')
+                ),
                 'archive_path': str(archive_path) if archive_path else None,
                 'heal_attempts': heal_attempts,
+                'heal_records': map_state['heal_records'],
                 'scope_violations': violations,
                 'secret_violations': [],
                 'timed_out': timed_out,

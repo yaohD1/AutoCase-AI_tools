@@ -193,7 +193,7 @@ test({title}, async ({{ page }}) => {{
 
     def generate(self, project, testcases, config, ai_config, generation_id):
         root, workspace = self._resolve_workspace(config.get('workspace_path'))
-        specs_path = Path(config.get('specs_path') or 'tests')
+        specs_path = Path(config.get('specs_path') or 'autocase/tests')
         if specs_path.is_absolute() or '..' in specs_path.parts:
             raise ValueError('specs_path must be a relative directory without ..')
         output_dir = (workspace / specs_path).resolve()

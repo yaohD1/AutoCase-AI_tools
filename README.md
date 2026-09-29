@@ -292,11 +292,11 @@ BaseAIAdapter (抽象基类)
 ```text
 planner 探索页面并生成计划
     → generator 通过 Playwright 实际操作并生成脚本
-    → 运行脚本
+    → healer 首次运行脚本
     → healer 分析失败并修复，最多 3 次
 ```
 
-脚本写入后端配置的 Git 工作区，保持未提交状态。工作区必须位于 `AUTOMATION_WORKSPACE_ROOT` 下，并包含 `package.json`，同时是可运行的 Playwright 项目。可选的 `storageState` 文件必须位于工作区内。OpenCode 可执行文件和配置通过 `OPENCODE_BIN`、`OPENCODE_CONFIG` 配置，API Key 使用 OpenCode 自己的 provider 配置，不写入 AutoCase 数据库。
+脚本和计划按批次写入后端配置的 Git 工作区 `autocase/runs/<run_key>/`，保持未提交状态。工作区必须位于 `AUTOMATION_WORKSPACE_ROOT` 下，并包含 `package.json`，同时是可运行的 Playwright 项目。可选的 `storageState` 文件必须位于工作区内。OpenCode 可执行文件和配置通过 `OPENCODE_BIN`、`OPENCODE_CONFIG` 配置，API Key 使用 OpenCode 自己的 provider 配置，不写入 AutoCase 数据库。
 
 启动后会进入任务详情页，实时查看 planner 计划文档、最终测试脚本、执行日志和 healer 修复记录。任务完成后可以只对本次生成文件创建本地 Git commit，不会自动 push，也不会提交工作区其他修改。
 

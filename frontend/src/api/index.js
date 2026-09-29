@@ -184,6 +184,9 @@ batchDeleteTestcases(ids) {
   cancelAutomationGeneration(id, projectId) {
     return api.post(`/automation/generations/${id}/cancel`, null, { params: { project_id: projectId } })
   },
+  retryAutomationGeneration(id, projectId) {
+    return api.post(`/automation/generations/${id}/retry`, null, { params: { project_id: projectId }, timeout: 1900000 })
+  },
   getAutomationArtifacts(id, projectId, kind) {
     return api.get(`/automation/generations/${id}/artifacts`, { params: { project_id: projectId, kind } })
   },
@@ -192,6 +195,9 @@ batchDeleteTestcases(ids) {
   },
   commitAutomationGeneration(id, projectId, message) {
     return api.post(`/automation/generations/${id}/commit`, { message }, { params: { project_id: projectId } })
+  },
+  revertAutomationGeneration(id, projectId, force = false) {
+    return api.post(`/automation/generations/${id}/revert`, { force }, { params: { project_id: projectId } })
   },
   downloadAutomationGeneration(id, projectId) {
     return api.get(`/automation/generations/${id}/download`, { params: { project_id: projectId }, responseType: 'blob' })

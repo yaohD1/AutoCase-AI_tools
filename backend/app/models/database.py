@@ -42,16 +42,22 @@ def migrate_db(app: Flask):
             ):
                 if name not in cols:
                     cur.execute(f"ALTER TABLE automation_configs ADD COLUMN {name} {definition}")
+            cur.execute(
+                "UPDATE automation_configs SET specs_path = 'autocase/tests' "
+                "WHERE specs_path IS NULL OR specs_path = '' OR specs_path = 'tests'"
+            )
         cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='automation_generations'")
         if cur.fetchone():
             cur.execute("PRAGMA table_info(automation_generations)")
             cols = [r[1] for r in cur.fetchall()]
             for name, definition in (
                 ('stage', "VARCHAR(50) DEFAULT 'pending'"),
+                ('run_key', 'VARCHAR(40)'),
                 ('requirement', 'TEXT'),
                 ('event_log', 'TEXT'),
                 ('test_result', 'TEXT'),
                 ('heal_attempts', 'INTEGER DEFAULT 0'),
+                ('heal_records', 'TEXT'),
                 ('event_cursor', 'INTEGER DEFAULT 0'),
                 ('artifact_index', 'TEXT'),
                 ('commit_status', "VARCHAR(20) DEFAULT 'uncommitted'"),
