@@ -386,6 +386,50 @@ def get_automation_config():
     return jsonify({'config': config.to_dict() if config else _default_config(project_id)}), 200
 
 
+_MODELS_CACHE = {'items': [], 'fetched_at': 0.0}
+_MODELS_CACHE_TTL = 300
+
+
+def _parse_model_lines(stdout):
+    models = []
+    seen = set()
+    for raw in (stdout or '').splitlines():
+        line = raw.strip()
+        if not line or '/' not in line or ' ' in line:
+            continue
+        provider, _, model = line.partition('/')
+        provider = provider.strip()
+        model = model.strip()
+        if not provider or not model or line in seen:
+            continue
+        seen.add(line)
+        models.append({'value': line, 'provider': provider, 'model': model})
+    return models
+
+
+@automation_bp.route('/automation/models', methods=['GET'])
+def list_automation_models():
+    refresh = request.args.get('refresh') in ('1', 'true', 'yes')
+    now = time.time()
+    if not refresh and _MODELS_CACHE['items'] and now - _MODELS_CACHE['fetched_at'] < _MODELS_CACHE_TTL:
+        return jsonify({'models': _MODELS_CACHE['items'], 'cached': True}), 200
+    binary = current_app.config.get('OPENCODE_BIN') or 'opencode'
+    try:
+        result = subprocess.run(
+            [binary, 'models'], capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=30
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return jsonify({'models': [], 'error': f'无法执行 opencode models：{exc}'}), 200
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or '').strip()[:300]
+        return jsonify({'models': [], 'error': f'opencode models 退出码 {result.returncode}：{detail}'}), 200
+    models = _parse_model_lines(result.stdout)
+    _MODELS_CACHE['items'] = models
+    _MODELS_CACHE['fetched_at'] = now
+    return jsonify({'models': models, 'cached': False}), 200
+
+
 @automation_bp.route('/automation/config', methods=['PUT'])
 def save_automation_config():
     data = request.get_json() or {}
@@ -407,29 +451,63 @@ def save_automation_config():
     return jsonify({'success': True, 'config': config.to_dict()}), 200
 
 
-def _build_manifest(project, config, safe_requirement, storage_state, workspace, run_key):
-    artifact_root = f'autocase/runs/{run_key}' if run_key else 'autocase'
+def _clean_requirement(requirement, base_url):
+    """Remove the duplicated base URL from the requirement text so the URL lives only in base_url."""
+    text = str(requirement or '')
+    base = str(base_url or '').strip()
+    if base:
+        for candidate in {base, base.rstrip('/')}:
+            if candidate:
+                text = text.replace(candidate, ' ')
+    return ' '.join(text.split())
+
+
+def _build_dispatch(requirement, base_url, specs_path, plan_path, max_heal_attempts):
+    """代码定死的子 agent 字段行；orchestrator 只允许填 <PLAN_FILE>/<GENERATED_FILES>，不得增删字段。"""
+    runtime = [f'requirement: {requirement}']
+    if base_url:
+        runtime.append(f'base_url: {base_url}')
+    runtime.append(f'specs_path: {specs_path}')
+    runtime.append(f'plan_path: {plan_path}')
+    generator = runtime + [
+        'plan_file: <PLAN_FILE>',
+        'For every page.goto use the complete base_url above; never use a relative path such as "/login".',
+    ]
+    healer = runtime + [
+        f'max_heal_attempts: {max_heal_attempts}',
+        'generated_files: <GENERATED_FILES>',
+        'Run the tests against the complete base_url above.',
+    ]
     return {
+        'planner': list(runtime),
+        'generator': generator,
+        'healer': healer,
+    }
+
+
+def _build_manifest(project, config, requirement, storage_state, workspace, run_key):
+    artifact_root = f'autocase/runs/{run_key}' if run_key else 'autocase'
+    base_url = config.base_url or ''
+    specs_path = f'{artifact_root}/tests'
+    plan_path = f'{artifact_root}/test-plans'
+    max_heal_attempts = config.max_heal_attempts if config.max_heal_attempts is not None else 3
+    clean_requirement = _clean_requirement(requirement, base_url)
+    manifest = {
         'version': 1,
         'project_id': project.id,
         'project_name': project.name,
-        'requirement': safe_requirement,
-        'base_url': config.base_url,
-        'environment_name': config.environment_name or 'test',
-        'browser': config.browser or 'chromium',
-        'specs_path': f'{artifact_root}/tests',
-        'plan_path': f'{artifact_root}/test-plans',
+        'requirement': clean_requirement,
+        'base_url': base_url,
+        'specs_path': specs_path,
+        'plan_path': plan_path,
         'run_key': run_key,
-        'storage_state': str(storage_state.relative_to(workspace)).replace('\\', '/') if storage_state else '',
-        'max_heal_attempts': config.max_heal_attempts if config.max_heal_attempts is not None else 3,
+        'max_heal_attempts': max_heal_attempts,
         'overwrite_policy': config.overwrite_policy or 'reject',
-        'rules': [
-            'Use the provided Base URL and storage state when exploring the application.',
-            'Do not write credentials, API keys, or secrets into prompts, logs, or test files.',
-            'Credentials from the requirement are redacted; use storage_state for authenticated flows.',
-            'Write the plan below plan_path and generated tests only below specs_path; keep the workspace uncommitted.'
-        ]
+        'dispatch': _build_dispatch(clean_requirement, base_url, specs_path, plan_path, max_heal_attempts),
     }
+    if storage_state:
+        manifest['storage_state'] = str(storage_state.relative_to(workspace)).replace('\\', '/')
+    return manifest
 
 
 def _generation_artifact_paths(generation, config):
@@ -465,7 +543,7 @@ def generate_automation_scripts():
         return jsonify({'error': validation_error}), 400
 
     runner = OpenCodeRunner(current_app.config)
-    safe_requirement = runner.redact_sensitive_text(requirement.strip())
+    requirement = requirement.strip()
     try:
         _, workspace = runner.resolve_workspace(config.workspace_path)
         runner.validate_workspace(workspace)
@@ -478,7 +556,7 @@ def generate_automation_scripts():
         run_key=_new_run_key(),
         status='pending',
         stage='starting',
-        requirement=safe_requirement,
+        requirement=requirement,
         config_snapshot=json.dumps(config.to_dict(), ensure_ascii=False),
         testcase_ids=json.dumps([], ensure_ascii=False),
         event_log=json.dumps([], ensure_ascii=False),
@@ -492,7 +570,7 @@ def generate_automation_scripts():
     db.session.add(generation)
     db.session.commit()
 
-    manifest = _build_manifest(project, config, safe_requirement, storage_state, workspace, generation.run_key)
+    manifest = _build_manifest(project, config, requirement, storage_state, workspace, generation.run_key)
     generation.stage = 'queued'
     db.session.commit()
     app = current_app._get_current_object()

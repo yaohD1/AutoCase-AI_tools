@@ -618,12 +618,12 @@ function artifactKindLabel(kind) { return ({ plan: 'Planner', script: 'Playwrigh
 .status-meta.url { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .status-meta b { color:#0071e3; font-weight:700; }
 .progress-row { display:flex; align-items:center; gap:14px; margin:10px 0 2px; }
-.run-progress { flex:1; }
+.run-progress { flex:1; position:relative; overflow:hidden; border-radius:8px; }
 .run-progress :deep(.el-progress-bar__outer) { border-radius:8px; background:#eef1f6; }
 .run-progress :deep(.el-progress-bar__inner) { border-radius:8px; background:linear-gradient(90deg,#0a84ff,#0071e3); transition:width .5s cubic-bezier(.4,0,.2,1); }
-.run-progress.is-running :deep(.el-progress-bar__inner) { position:relative; overflow:hidden; background:linear-gradient(90deg,#1687f4,#056bd6); }
-.run-progress.is-running :deep(.el-progress-bar__inner)::after { content:''; position:absolute; top:0; bottom:0; left:-34%; width:34%; border-radius:8px; background:linear-gradient(90deg,transparent,rgba(255,255,255,.2),transparent); animation:progress-sweep 2.4s ease-in-out infinite; pointer-events:none; }
-@keyframes progress-sweep { 0% { transform:translateX(0); opacity:0; } 12% { opacity:.7; } 72% { opacity:.7; } 100% { transform:translateX(394%); opacity:0; } }
+.run-progress.is-running :deep(.el-progress-bar__inner) { background:linear-gradient(90deg,#1687f4,#056bd6); }
+.run-progress.is-running::after { content:''; position:absolute; z-index:2; top:0; bottom:0; left:-28%; width:28%; border-radius:8px; background:linear-gradient(90deg,transparent,rgba(255,255,255,.2),transparent); animation:progress-sweep 2.4s ease-in-out infinite; pointer-events:none; }
+@keyframes progress-sweep { 0% { transform:translateX(0); opacity:0; } 12% { opacity:.7; } 72% { opacity:.7; } 100% { transform:translateX(457%); opacity:0; } }
 .progress-num { font-size:17px; font-weight:700; line-height:1; color:#0071e3; font-variant-numeric:tabular-nums; min-width:58px; text-align:right; font-family:-apple-system,'SF Pro Display',system-ui,sans-serif; }
 .progress-num i { font-style:normal; font-size:12px; font-weight:600; margin-left:1px; opacity:.55; }
 .progress-num.success { color:#34c759; }
@@ -718,7 +718,7 @@ function artifactKindLabel(kind) { return ({ plan: 'Planner', script: 'Playwrigh
 .type-cursor { display:inline-block; width:8px; height:15px; margin-left:3px; vertical-align:-2px; background:#60a5fa; border-radius:2px; box-shadow:0 0 9px rgba(96,165,250,.75); animation:cursor-blink 1.1s ease-in-out infinite; }
 @keyframes cursor-blink { 0%,100% { opacity:1; } 50% { opacity:.15; } }
 @keyframes line-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
-@media (prefers-reduced-motion: reduce) { .log-line { animation:none; } .type-cursor, .log-dot.active, .stage-item.current .stage-dot::after, .run-progress.is-running :deep(.el-progress-bar__inner)::after { animation:none; } }
+@media (prefers-reduced-motion: reduce) { .log-line { animation:none; } .type-cursor, .log-dot.active, .stage-item.current .stage-dot::after, .run-progress.is-running::after { animation:none; } }
 .log-line-type { color:#7c8aa0; font-size:12px; white-space:nowrap; letter-spacing:.01em; }
 .log-line pre { margin:0; color:#d6dfeb; white-space:pre-wrap; word-break:break-word; font:13.5px/1.7 'JetBrains Mono','Cascadia Code','Fira Code',ui-monospace,SFMono-Regular,'SF Mono',Consolas,monospace; letter-spacing:.012em; }
 .log-line time { color:#5f6d82; font-size:11.5px; white-space:nowrap; font-family:'JetBrains Mono',ui-monospace,Consolas,monospace; letter-spacing:.02em; }

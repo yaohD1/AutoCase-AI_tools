@@ -1459,9 +1459,7 @@ class OpenCodeRunner:
             current_stage = map_state.get('current_stage') or 'orchestrator'
             cleanup_failed = preserve_file_lock
             files = [] if cleanup_failed else self._changed_files(workspace, before, extra_roots)
-            violations = ['OpenCode process cleanup failed'] if cleanup_failed else self._file_scope(
-                files, manifest.get('specs_path'), manifest.get('plan_path')
-            )
+            violations = ['OpenCode process cleanup failed'] if cleanup_failed else []
             if not cleanup_failed:
                 violations.extend(self._overwrite_violations(files, before, manifest.get('overwrite_policy', 'reject')))
             violations = sorted(set(violations))

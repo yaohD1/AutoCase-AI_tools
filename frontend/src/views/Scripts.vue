@@ -64,7 +64,19 @@
           </div>
           <div class="form-grid">
             <el-form-item label="OpenCode 模型（可选）">
-              <el-input v-model="form.opencode_model" placeholder="provider/model，留空使用默认模型" />
+              <el-select
+                v-model="form.opencode_model"
+                filterable
+                clearable
+                allow-create
+                default-first-option
+                placeholder="留空使用默认模型"
+                style="width:100%"
+                @visible-change="onModelDropdown"
+              >
+                <el-option v-for="m in modelOptions" :key="m.value" :label="m.value" :value="m.value" />
+              </el-select>
+              <div v-if="modelsLoadError" class="field-hint">模型列表加载失败，可手动输入 provider/model。</div>
             </el-form-item>
             <el-form-item label="最大修复次数">
               <el-input-number v-model="form.max_heal_attempts" :min="0" :max="3" style="width:100%" />
@@ -162,6 +174,9 @@ const saving = ref(false)
 const generating = ref(false)
 const result = ref(null)
 const showResult = ref(false)
+const modelOptions = ref([])
+const modelsLoadError = ref(false)
+let modelsLoaded = false
 
 const emptyForm = () => ({
   project_id: '', framework: 'playwright', language: 'typescript', workspace_path: '', specs_path: 'autocase/tests',
@@ -171,7 +186,23 @@ const emptyForm = () => ({
 const form = ref(emptyForm())
 const canGenerate = computed(() => Boolean(selectedProject.value && form.value.requirement?.trim() && form.value.base_url && form.value.workspace_path))
 
-onMounted(loadProjects)
+onMounted(() => { loadProjects(); loadModels() })
+
+async function loadModels(force = false) {
+  if (modelsLoaded && !force) return
+  try {
+    const response = await api.getAutomationModels(force)
+    modelOptions.value = response.data.models || []
+    modelsLoadError.value = false
+    modelsLoaded = true
+  } catch {
+    modelsLoadError.value = true
+  }
+}
+
+function onModelDropdown(open) {
+  if (open) loadModels()
+}
 
 async function loadProjects() {
   try {

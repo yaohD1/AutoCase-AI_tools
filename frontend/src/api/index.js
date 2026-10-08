@@ -166,6 +166,9 @@ batchDeleteTestcases(ids) {
   getAutomationConfig(projectId) {
     return api.get('/automation/config', { params: { project_id: projectId } })
   },
+  getAutomationModels(refresh = false) {
+    return api.get('/automation/models', { params: refresh ? { refresh: 1 } : {} })
+  },
   saveAutomationConfig(data) {
     return api.put('/automation/config', data)
   },

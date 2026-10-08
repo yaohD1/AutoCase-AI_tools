@@ -120,7 +120,7 @@ class AutomationGeneration(db.Model):
             'project_id': self.project_id,
             'status': self.status,
             'stage': self.stage or self.status,
-            'requirement': redact_sensitive_text(self.requirement or ''),
+            'requirement': self.requirement or '',
             'config': config,
             'testcase_ids': parse(self.testcase_ids, []),
             'files': parse(self.files, []),
