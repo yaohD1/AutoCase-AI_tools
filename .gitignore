@@ -43,5 +43,6 @@ yarn-error.log*
 *.xmind
 *.db
 
-.opencode/
+.opencode/*
+!.opencode/prompts/
 .playwright-mcp/

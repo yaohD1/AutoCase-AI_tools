@@ -109,7 +109,11 @@
               <div class="agent-block-body">
                 <div v-for="event in group.events" :key="event.sequence" :class="['log-line', `log-line-${eventType(event)}`, { 'log-line-typing': event._typing, 'log-line-speech': isAgentSpeech(event) }]">
                   <span class="log-line-type">{{ eventTypeLabel(event) }}</span>
-                  <pre>{{ event.message }}<span v-if="event._typing" class="type-cursor" /></pre>
+                  <details v-if="isReasoning(event) && !event._typing" class="log-reasoning">
+                    <summary>{{ reasoningSummary(event) }}</summary>
+                    <pre>{{ event.message }}</pre>
+                  </details>
+                  <pre v-else>{{ event.message }}<span v-if="event._typing" class="type-cursor" /></pre>
                   <time>{{ formatTime(event.created_at) }}</time>
                 </div>
               </div>
@@ -128,7 +132,6 @@
     <el-dialog v-model="artifactDialog.visible" :title="artifactDialog.title" width="min(1100px, 92vw)" top="5vh" destroy-on-close>
       <div class="dialog-meta">
         <el-tag size="small">{{ artifactDialog.kindLabel }}</el-tag>
-        <el-tag v-if="artifactDialog.redacted" size="small" type="warning">已脱敏</el-tag>
         <span>{{ artifactDialog.path }}</span>
       </div>
       <div v-if="artifactDialog.loading" class="dialog-loading">正在读取内容...</div>
@@ -164,7 +167,7 @@ const events = ref([])
 const artifacts = ref([])
 const autoFollow = ref(true)
 const logContainer = ref(null)
-const artifactDialog = ref({ visible: false, loading: false, title: '', path: '', kindLabel: '', content: '', mode: 'text', heal: null, redacted: false })
+const artifactDialog = ref({ visible: false, loading: false, title: '', path: '', kindLabel: '', content: '', mode: 'text', heal: null })
 let artifactRequestId = 0
 const commitMessage = ref('test: generate Playwright tests')
 const committing = ref(false)
@@ -236,6 +239,15 @@ const visibleEvents = computed(() => {
 function isAgentSpeech(event) {
   const message = event.message || ''
   return event.event_type === 'text' || (event.event_type === 'diagnostic' && (message.startsWith('[推理]') || message.startsWith('[思考]')))
+}
+// 模型推理内容多为英文，默认折叠，避免盖住中文叙述；展开后仍可查看原文。
+function isReasoning(event) {
+  const message = event.message || ''
+  return event.event_type === 'diagnostic' && (message.startsWith('[推理]') || message.startsWith('[思考]'))
+}
+function reasoningSummary(event) {
+  const body = (event.message || '').replace(/^\[(推理|思考)\]\s*/, '')
+  return `思考过程：${body.slice(0, 40)}${body.length > 40 ? '…' : ''}`
 }
 function isAgentEvent(event) {
   return isAgentSpeech(event) || ['error', 'failed', 'completed', 'interrupted', 'model_error'].includes(event.event_type)
@@ -337,14 +349,12 @@ async function openArtifact(item) {
     kindLabel: artifactKindLabel(item.kind),
     content: '',
     mode: 'text',
-    heal: null,
-    redacted: false
+    heal: null
   }
   try {
     const response = await api.getAutomationArtifact(route.params.id, projectId.value, item.path)
     if (requestId === artifactRequestId) {
       artifactDialog.value.content = response.data.content || ''
-      artifactDialog.value.redacted = !!response.data.redacted
     }
   } catch (error) {
     if (requestId === artifactRequestId) artifactDialog.value.content = error.response?.data?.error || '文件暂不可用'
@@ -368,8 +378,7 @@ function openHealRecord(record, index) {
     kindLabel: '修复记录',
     content: '',
     mode: 'heal',
-    heal: record,
-    redacted: false
+    heal: record
   }
 }
 
@@ -722,6 +731,9 @@ function artifactKindLabel(kind) { return ({ plan: 'Planner', script: 'Playwrigh
 .log-line-type { color:#7c8aa0; font-size:12px; white-space:nowrap; letter-spacing:.01em; }
 .log-line pre { margin:0; color:#d6dfeb; white-space:pre-wrap; word-break:break-word; font:13.5px/1.7 'JetBrains Mono','Cascadia Code','Fira Code',ui-monospace,SFMono-Regular,'SF Mono',Consolas,monospace; letter-spacing:.012em; }
 .log-line time { color:#5f6d82; font-size:11.5px; white-space:nowrap; font-family:'JetBrains Mono',ui-monospace,Consolas,monospace; letter-spacing:.02em; }
+.log-reasoning { min-width:0; }
+.log-reasoning > summary { cursor:pointer; color:#7c8aa0; font-size:12.5px; line-height:1.7; list-style-position:inside; }
+.log-reasoning[open] > summary { color:#9aa8bd; }
 .log-line-error pre { color:#ffb6b6; }.log-line-error .log-line-type { color:#f87171; }.log-line-success pre { color:#92f0b4; }.log-line-success .log-line-type { color:#4ade80; }
 .dialog-meta { display:flex; align-items:center; gap:8px; margin-bottom:10px; color:#909399; font:12px ui-monospace,monospace; }.source-view { margin:0; max-height:70vh; overflow:auto; background:#1f2937; color:#d1d5db; border-radius:6px; padding:16px; white-space:pre-wrap; word-break:break-word; font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; }.dialog-loading { min-height:300px; display:grid; place-items:center; color:#909399; }
 .heal-view { max-height:70vh; overflow:auto; }

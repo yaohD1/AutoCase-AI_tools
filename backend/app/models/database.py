@@ -38,7 +38,8 @@ def migrate_db(app: Flask):
             cols = [r[1] for r in cur.fetchall()]
             for name, definition in (
                 ('opencode_model', "VARCHAR(200) DEFAULT ''"),
-                ('max_heal_attempts', 'INTEGER DEFAULT 3')
+                ('max_heal_attempts', 'INTEGER DEFAULT 3'),
+                ('seed_file', "VARCHAR(255) DEFAULT 'tests/seed.spec.ts'")
             ):
                 if name not in cols:
                     cur.execute(f"ALTER TABLE automation_configs ADD COLUMN {name} {definition}")

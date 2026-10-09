@@ -7,7 +7,6 @@
 - 不修改 `storage/` 中的运行数据、上传文件和导出文件。
 - 修改后端模型时同步检查 `backend/app/models/__init__.py`、数据库初始化和删除级联。
 - 修改 API 时同步检查对应的前端 API 封装和调用页面。
-- 不把 API Key 写入源码、日志或生成脚本。
 
 ## 项目地图
 
@@ -43,7 +42,7 @@
 ## 核心业务流
 
 - 用例生成：上传文件 → AI 分析模块 → 模块审批 → 生成待审用例 → 用例审批 → 已审批用例。
-- 自动化脚本：输入自然语言需求 → OpenCode orchestrator 调度 → planner 探索和规划 → generator 生成并验证 Playwright → healer 首次执行测试并修复 → 写入服务端 Git 工作区。
+- 自动化脚本：输入自然语言需求 → Python 按顺序驱动三个 OpenCode 会话：planner 探索和规划（校验 Seed 行和用例标题）→ generator 生成 spec → healer 执行测试并修复 → 写入服务端 Git 工作区。阶段间的文件衔接和占位符替换由 `opencode_runner.py` 完成，不再有 orchestrator agent。
 - 图片审批：`TestCase.image_id/image_source` 和 `PendingModule.image_id` 负责原型图关联；“附带原图”只决定是否把图片送给 AI，不应影响审批页展示。
 
 ## 自动化脚本约定
@@ -54,17 +53,17 @@
 - 工作区路径必须位于 `AUTOMATION_WORKSPACE_ROOT` 内；Agent 产物按批次写入 `autocase/runs/<run_key>/`，默认拒绝覆盖已有文件。
 - 工作区必须是后端可访问的 Git + Playwright 项目；脚本会保持未提交状态。
 - OpenCode 配置由服务端 `OPENCODE_CONFIG` 固定，前端不能传任意命令、配置或 prompt 路径。
-- `storageState` 必须存在且位于工作区内；不要把账号密码或 API Key 写入需求、manifest、日志或脚本。
+- `storageState` 必须存在且位于工作区内。凭据可由 agent 从 `.env*` 读取；生成的脚本通过 `process.env` 取值，不写死在脚本里。
 - 生成接口返回任务后在后台运行，OpenCode 超时由 `OPENCODE_TIMEOUT` 控制；状态和事件写入 `AutomationGeneration`。
 - 自动化详情页展示 planner 文档、生成脚本、healer 记录和 Git 变更；本地 commit 只提交当前 `run_key` 批次文件，不自动 push。
 
 ## 自动化实时日志机制
 
-- 不用 `opencode run --attach`（IDE/沙箱里会死锁）；改起 headless `opencode serve` + HTTP 驱动：`POST /session`（agent=orchestrator+model）建会话 → `POST /session/{id}/prompt_async` 派发需求 → 订阅 `/event` SSE 旁观全部 agent 活动。子 agent（planner/generator/healer）仍由 orchestrator 在 OpenCode runtime 内用 `task` 工具驱动；测试执行是 healer 内部的 `test_run` 工具动作。
+- 不用 `opencode run --attach`（IDE/沙箱里会死锁）；改起 headless `opencode serve` + HTTP 驱动：每个阶段 `POST /session`（agent=planner/generator/healer+model）建会话 → `POST /session/{id}/prompt_async` 派发该阶段的 dispatch 行（agent 必须写在 prompt 请求里）→ 订阅 `/event` SSE 旁观活动。阶段顺序由 `run()` 里的 `run_phase` 调用决定；测试执行是 healer 内部的 `test_run` 工具动作。
 - `opencode_runner.py` 把 SSE 事件映射成前端日志三元组 `(stage, event_type, message)`（`_map_bus_event`/`_map_part`/`_map_delta`）。约定：`session.idle` 只表示“本轮结束”、措辞不得暗示任务成功；`patch`/`step-*`/`file` 等内部 part 过滤不入日志。
 - 前端 `AutomationGenerationDetail.vue` 按 agent 分组渲染（总控 orchestrator + planner/generator/healer），每组一个 sticky 标签、组内日志持续追加，不逐条重复 agent 名（仿 OpenCode TUI）；测试执行日志归入 healer 组。事件存 `AutomationGeneration.event_log`，前端按 `event_cursor` 轮询增量拉取。
 - 时间：后端统一存 UTC（`datetime.utcnow()`），前端 `parseUtc` 补 `Z` 再转本地（北京）显示；勿把 UTC 当本地直接 `new Date()`。
-- 判定都在 runner 主循环：orchestrator `session.idle`（busy 后）=完成；`OPENCODE_TIMEOUT`（默认 3600s）是全局共享总时长（所有 agent 共用一份，非每个各算）；启动 180s 无活动=未启动；运行中 busy 且 180s 无新事件=停滞（`stalled`）提前中止。
+- 判定都在 runner 的 `run_phase` 等待循环：当前阶段会话 `session.idle`（busy 后）=本阶段完成；`OPENCODE_TIMEOUT`（默认 3600s）是全局共享总时长（所有 agent 共用一份，非每个各算）；启动 180s 无活动=未启动；运行中 busy 且 180s 无新事件=停滞（`stalled`）提前中止。
 
 ## API 快速索引
 

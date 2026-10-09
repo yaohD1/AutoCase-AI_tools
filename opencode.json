@@ -19,6 +19,19 @@
       "description": "Use this agent when you need to create automated browser tests using Playwright",
       "mode": "subagent",
       "prompt": "{file:.opencode/prompts/playwright-test-generator.md}",
+      "permission": {
+        "edit": {
+          "*": "deny",
+          "autocase/**": "allow"
+        },
+        "write": {
+          "*": "deny",
+          "autocase/**": "allow"
+        },
+        "bash": {
+          "*": "deny"
+        }
+      },
       "tools": {
         "ls": true,
         "glob": true,
@@ -42,7 +55,8 @@
         "playwright-test*browser_wait_for": true,
         "playwright-test*generator_read_log": true,
         "playwright-test*generator_setup_page": true,
-        "playwright-test*generator_write_test": true
+        "edit": true,
+        "write": true
       }
     },
     "playwright-test-healer": {
@@ -81,6 +95,17 @@
       "description": "Use this agent when you need to create comprehensive test plan for a web application or website",
       "mode": "subagent",
       "prompt": "{file:.opencode/prompts/playwright-test-planner.md}",
+      "permission": {
+        "edit": {
+          "*": "deny"
+        },
+        "write": {
+          "*": "deny"
+        },
+        "bash": {
+          "*": "deny"
+        }
+      },
       "tools": {
         "ls": true,
         "glob": true,
@@ -108,31 +133,6 @@
         "playwright-test*planner_setup_page": true,
         "playwright-test*planner_save_plan": true
       }
-    },
-        "playwright-test-orchestrator": {
-      "description": "Orchestrate the complete Playwright test workflow",
-      "mode": "primary",
-      "prompt": "{file:.opencode/prompts/playwright-test-orchestrator.md}",
-      "permission": {
-        "edit": {
-          "*": "deny"
-        },
-        "write": {
-          "*": "deny"
-        },
-        "bash": {
-          "*": "deny",
-          "git status*": "allow",
-          "git diff*": "allow",
-          "git rev-parse*": "allow",
-          "node *_probe*.cjs": "ask",
-          "node *_dbg*.cjs": "ask"
-        },
-        "task": {
-          "*": "deny",
-          "playwright-test-*": "allow"
-        }
-      }
-}
+    }
   }
 }

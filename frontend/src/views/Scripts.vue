@@ -62,6 +62,10 @@
               <el-input v-model="form.auth_state_path" placeholder=".auth/user.json" />
             </el-form-item>
           </div>
+          <el-form-item label="Seed 文件">
+            <el-input v-model="form.seed_file" placeholder="tests/seed.spec.ts" />
+            <div class="field-hint">planner 探索页面时使用的种子测试，相对工作区路径，必须是 .spec.ts 文件。</div>
+          </el-form-item>
           <div class="form-grid">
             <el-form-item label="OpenCode 模型（可选）">
               <el-select
@@ -181,7 +185,7 @@ let modelsLoaded = false
 const emptyForm = () => ({
   project_id: '', framework: 'playwright', language: 'typescript', workspace_path: '', specs_path: 'autocase/tests',
   base_url: '', environment_name: 'test', browser: 'chromium', auth_state_path: '', opencode_model: '',
-  max_heal_attempts: 3, overwrite_policy: 'reject'
+  max_heal_attempts: 3, overwrite_policy: 'reject', seed_file: 'tests/seed.spec.ts'
 })
 const form = ref(emptyForm())
 const canGenerate = computed(() => Boolean(selectedProject.value && form.value.requirement?.trim() && form.value.base_url && form.value.workspace_path))

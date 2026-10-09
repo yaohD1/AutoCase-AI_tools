@@ -15,7 +15,6 @@ from queue import Empty, Full, Queue
 
 import requests
 
-from app.utils.sensitive import redact_sensitive_text
 
 
 class WorkspaceBusyError(ValueError):
@@ -613,18 +612,16 @@ class OpenCodeRunner:
 
     @staticmethod
     def _agent_to_stage(agent):
-        value = (agent or '').lower()
-        if 'heal' in value or 'fix' in value or 'debug' in value:
-            return 'healer'
-        if 'generat' in value or 'write' in value:
-            return 'generator'
-        if 'plan' in value or 'explor' in value:
+        # 只认我们自己的三个 agent；explore/general 等内置子 agent 不属于任何阶段，返回 None，
+        # 由调用方继承父会话的阶段（否则 explore 会被误标成 planner）。
+        value = (agent or '').strip().lower()
+        if value.endswith('planner'):
             return 'planner'
-        # Playwright's three-agent loop has no standalone test-runner agent:
-        # test_run is a healer tool action and should stay in the healer group.
-        if 'test' in value and 'run' in value:
+        if value.endswith('generator'):
+            return 'generator'
+        if value.endswith('healer'):
             return 'healer'
-        return 'orchestrator'
+        return None
 
     @staticmethod
     def _info_session(properties):
@@ -661,15 +658,16 @@ class OpenCodeRunner:
             return stage
         return state.get('current_stage') or 'orchestrator'
 
-    def _register_task_session(self, state, tool_state):
+    def _register_task_session(self, state, tool_state, parent_stage):
         metadata = tool_state.get('metadata') if isinstance(tool_state.get('metadata'), dict) else {}
         child_id = metadata.get('sessionID') or metadata.get('sessionId')
         if not child_id:
             return
         tool_input = tool_state.get('input') if isinstance(tool_state.get('input'), dict) else {}
-        agent = (tool_input.get('subagent_type') or tool_input.get('subagent')
-                 or tool_input.get('agent') or tool_input.get('description') or '')
-        stage = self._agent_to_stage(str(agent))
+        agent = tool_input.get('subagent_type') or tool_input.get('subagent') or tool_input.get('agent') or ''
+        # 能识别为自己的阶段 agent 才用它的阶段；内置子 agent（explore 等）沿用父会话阶段，
+        # 避免 generator 调用 explore 时被误标成 planner。
+        stage = self._agent_to_stage(str(agent)) or parent_stage
         state['session_stage'].setdefault(child_id, stage)
         if stage == 'healer':
             state['healer_sessions'].add(child_id)
@@ -740,7 +738,7 @@ class OpenCodeRunner:
             tool_state = part.get('state') if isinstance(part.get('state'), dict) else {}
             status = tool_state.get('status') or 'unknown'
             if tool == 'task':
-                self._register_task_session(state, tool_state)
+                self._register_task_session(state, tool_state, stage)
                 stage = self._stage_for(state, session_id)
             if status not in ('running', 'completed', 'error'):
                 return None
@@ -855,6 +853,9 @@ class OpenCodeRunner:
             # 这是框架运行时产物而非本任务的测试产物；忽略它们，避免误判越界并污染归档/提交。
             if normalized.startswith('.claude/agents/') or normalized.startswith('.github/agents/'):
                 continue
+            # Playwright MCP 每次操作都会往工作区写 page-*.yml 快照，是运行噪声，不算测试产物。
+            if normalized.startswith('.playwright-mcp/'):
+                continue
             old = before.get(path, {}).get('hash')
             new = after.get(path, {}).get('hash')
             if old == new:
@@ -866,6 +867,35 @@ class OpenCodeRunner:
                 'kind': OpenCodeRunner._artifact_kind(path)
             })
         return changed
+
+    @staticmethod
+    def _new_files_in(workspace, before, extra_roots, root, suffixes):
+        # 阶段衔接：只取本阶段新增（不在 before 快照里）且位于 root 下的文件。
+        prefix = Path(root or '').as_posix().rstrip('/') + '/'
+        return [
+            item['path'] for item in OpenCodeRunner._changed_files(workspace, before, extra_roots)
+            if item['path'] not in before
+            and item['path'].replace('\\', '/').startswith(prefix)
+            and item['path'].endswith(tuple(suffixes))
+        ]
+
+    @staticmethod
+    def _newest_new_file(workspace, before, extra_roots, root, suffix):
+        found = OpenCodeRunner._new_files_in(workspace, before, extra_roots, root, (suffix,))
+        if not found:
+            return None
+        return max(found, key=lambda relative: (workspace / relative).stat().st_mtime)
+
+    @staticmethod
+    def _plan_problems(path):
+        # 计划必须带 Seed 行和至少一个用例标题，否则不进入 generator。
+        text = path.read_text(encoding='utf-8', errors='replace')
+        problems = []
+        if not re.search(r'^\*\*Seed:\*\*', text, re.M):
+            problems.append('缺少 **Seed:** 行')
+        if not re.search(r'^#{4}\s', text, re.M):
+            problems.append('缺少 #### 用例标题')
+        return problems
 
     @staticmethod
     def _artifact_kind(path):
@@ -932,9 +962,6 @@ class OpenCodeRunner:
                     archive.write(target, relative.as_posix())
         return archive_path
 
-    @staticmethod
-    def _redact_output(output):
-        return redact_sensitive_text(output)[-200000:]
 
     @staticmethod
     def _heal_roots(manifest):
@@ -998,7 +1025,7 @@ class OpenCodeRunner:
                 (old or '').splitlines(), (new or '').splitlines(),
                 fromfile='a/' + path, tofile='b/' + path, lineterm=''
             )
-            diff_text = redact_sensitive_text('\n'.join(diff_lines))[:max_diff_chars]
+            diff_text = '\n'.join(diff_lines)[:max_diff_chars]
             changes.append({'path': path, 'status': status, 'diff': diff_text})
         return changes
 
@@ -1013,7 +1040,7 @@ class OpenCodeRunner:
             after = {}
         changes = self._diff_snapshot(entry.get('before') or {}, after)
         reasons = state.get('heal_reasons', {}).get(session_id) or []
-        reason = redact_sensitive_text('\n\n'.join(r for r in reasons if r).strip())[:4000]
+        reason = '\n\n'.join(r for r in reasons if r).strip()[:4000]
         state.setdefault('heal_records', []).append({
             'index': len(state['heal_records']) + 1,
             'reason': reason or '（无文字说明）',
@@ -1045,10 +1072,6 @@ class OpenCodeRunner:
         if not session_id or session_id not in state.get('heal_snapshots', {}) or session_id in state.get('heal_done', set()):
             return
         self._finalize_heal_record(state, session_id, workspace, manifest)
-
-    @staticmethod
-    def redact_sensitive_text(value):
-        return redact_sensitive_text(value)
 
     @staticmethod
     def _file_scope(files, specs_path, plan_path=None):
@@ -1270,7 +1293,7 @@ class OpenCodeRunner:
                     event_callback({
                         'event_type': event_type,
                         'stage': stage,
-                        'message': self._redact_output(str(message))[:4000]
+                        'message': str(message)[:4000]
                     }, artifact_cache['items'])
                 except Exception:
                     pass
@@ -1313,11 +1336,6 @@ class OpenCodeRunner:
             manifest_path = task_dir / f'automation-request-{generation_id}.json'
             cancel_path = self._cancel_path(generation_id)
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
-            prompt = (
-                f'Read exactly .autocase/{manifest_path.name} and execute the complete AutoCase Playwright workflow. '
-                'Treat the manifest as the source of truth. Do not ask the user questions. '
-                'Return a concise final summary with stages, files, test results, warnings, and healing attempts.'
-            )
             config_path = self._config_path()
             emit('orchestrator', 'started', f'OpenCode workflow started for {workspace.name}.')
 
@@ -1347,92 +1365,131 @@ class OpenCodeRunner:
             model_ref = self._split_model(model)
             return_code = 0
             try:
-                session_body = {
-                    'title': f'AutoCase {generation_id}',
-                    'agent': 'playwright-test-orchestrator',
-                }
-                if model_ref:
-                    session_body['model'] = model_ref
-                try:
-                    create = requests.post(f'{base_url}/session', json=session_body, timeout=30)
-                except requests.RequestException as exc:
-                    raise RuntimeError(f'Failed to create OpenCode orchestrator session: {exc}')
-                if create.status_code not in (200, 201):
-                    raise RuntimeError(
-                        f'OpenCode session creation failed ({create.status_code}): {create.text[:500]}'
-                    )
-                try:
-                    session_payload = create.json()
-                except ValueError:
-                    session_payload = {}
-                session_id = session_payload.get('id') if isinstance(session_payload, dict) else None
-                if not session_id:
-                    raise RuntimeError('OpenCode session creation returned no session id')
-                driver['sid'] = session_id
-                map_state['session_stage'][session_id] = 'orchestrator'
-                emit('orchestrator', 'process_started',
-                     f'OpenCode orchestrator session {session_id} created on server {base_url}.')
-
-                # 关键：opencode serve 的 POST /session 会忽略 body 里的 agent 字段，真正生效的
-                # agent 必须在每轮 prompt_async 指定。缺了它，会话会退回默认 build agent，导致
-                # orchestrator 的 system prompt（中文输出 + 委派 planner/generator/healer）完全不
-                # 生效——表现为纯英文、零 task 委派、用 build 的 read/glob/grep/apply_patch 乱跑。
-                prompt_body = {
-                    'parts': [{'type': 'text', 'text': prompt}],
-                    'agent': 'playwright-test-orchestrator',
-                }
-                if model_ref:
-                    prompt_body['model'] = {'providerID': model_ref['providerID'], 'modelID': model_ref['id']}
-                try:
-                    send = requests.post(
-                        f'{base_url}/session/{session_id}/prompt_async', json=prompt_body, timeout=60
-                    )
-                except requests.RequestException as exc:
-                    raise RuntimeError(f'Failed to dispatch orchestrator prompt: {exc}')
-                if send.status_code not in (200, 202, 204):
-                    raise RuntimeError(
-                        f'OpenCode prompt dispatch failed ({send.status_code}): {send.text[:500]}'
-                    )
-                emit('orchestrator', 'server',
-                     'Orchestrator prompt dispatched; streaming agent activity from the server event bus.')
-
+                # 总超时在三个阶段之间共享；每个阶段内部的启动/停滞判定各自独立计时。
                 deadline = time.monotonic() + timeout
-                busy_deadline = time.monotonic() + 180
-                while not driver['done'].is_set():
-                    if active_run['cancel_event'].is_set() or cancel_path.exists():
-                        interrupted = True
-                        emit(live_stage(), 'interrupted', 'OpenCode workflow cancellation requested by the user.')
-                        self._abort_sessions(base_url, map_state['session_stage'])
-                        break
-                    if serve_process.poll() is not None:
-                        return_code = serve_process.returncode or 1
-                        emit(live_stage(), 'error', f'OpenCode server exited unexpectedly with code {return_code}.')
-                        break
-                    if time.monotonic() > deadline:
-                        timed_out = True
-                        emit(live_stage(), 'error', f'OpenCode workflow timed out after {timeout} seconds.')
-                        self._abort_sessions(base_url, map_state['session_stage'])
-                        break
-                    if not driver['busy'] and time.monotonic() > busy_deadline:
+
+                def run_phase(agent, stage, text):
+                    # 每个阶段一个新会话，由 Python 直接驱动（不再经过 orchestrator LLM）。
+                    # 关键：agent 必须在每轮 prompt_async 指定，POST /session 会忽略 body 里的 agent。
+                    nonlocal return_code, interrupted, timed_out, stalled
+                    driver['sid'] = None
+                    driver['busy'] = False
+                    driver['fatal'] = None
+                    driver['done'].clear()
+                    driver['last_activity'] = time.monotonic()
+                    session_body = {'title': f'AutoCase {generation_id} {stage}', 'agent': agent}
+                    if model_ref:
+                        session_body['model'] = model_ref
+                    try:
+                        create = requests.post(f'{base_url}/session', json=session_body, timeout=30)
+                    except requests.RequestException as exc:
+                        raise RuntimeError(f'Failed to create OpenCode {stage} session: {exc}')
+                    if create.status_code not in (200, 201):
+                        raise RuntimeError(
+                            f'OpenCode {stage} session creation failed ({create.status_code}): {create.text[:500]}'
+                        )
+                    try:
+                        session_payload = create.json()
+                    except ValueError:
+                        session_payload = {}
+                    session_id = session_payload.get('id') if isinstance(session_payload, dict) else None
+                    if not session_id:
+                        raise RuntimeError(f'OpenCode {stage} session creation returned no session id')
+                    map_state['session_stage'][session_id] = stage
+                    map_state['current_stage'] = stage
+                    if stage == 'healer':
+                        map_state['healer_sessions'].add(session_id)
+                    driver['sid'] = session_id
+                    emit(stage, 'process_started', f'OpenCode {agent} session {session_id} created on server {base_url}.')
+
+                    prompt_body = {'parts': [{'type': 'text', 'text': text}], 'agent': agent}
+                    if model_ref:
+                        prompt_body['model'] = {'providerID': model_ref['providerID'], 'modelID': model_ref['id']}
+                    try:
+                        send = requests.post(
+                            f'{base_url}/session/{session_id}/prompt_async', json=prompt_body, timeout=60
+                        )
+                    except requests.RequestException as exc:
+                        raise RuntimeError(f'Failed to dispatch {stage} prompt: {exc}')
+                    if send.status_code not in (200, 202, 204):
+                        raise RuntimeError(
+                            f'OpenCode {stage} prompt dispatch failed ({send.status_code}): {send.text[:500]}'
+                        )
+                    emit(stage, 'server', f'{stage} prompt dispatched; streaming agent activity from the server event bus.')
+
+                    busy_deadline = time.monotonic() + 180
+                    while not driver['done'].is_set():
+                        if active_run['cancel_event'].is_set() or cancel_path.exists():
+                            interrupted = True
+                            emit(stage, 'interrupted', 'OpenCode workflow cancellation requested by the user.')
+                            self._abort_sessions(base_url, map_state['session_stage'])
+                            return False
+                        if serve_process.poll() is not None:
+                            return_code = serve_process.returncode or 1
+                            emit(stage, 'error', f'OpenCode server exited unexpectedly with code {return_code}.')
+                            return False
+                        if time.monotonic() > deadline:
+                            timed_out = True
+                            emit(stage, 'error', f'OpenCode workflow timed out after {timeout} seconds.')
+                            self._abort_sessions(base_url, map_state['session_stage'])
+                            return False
+                        if not driver['busy'] and time.monotonic() > busy_deadline:
+                            return_code = 1
+                            emit(stage, 'error', f'OpenCode {stage} did not start processing the prompt within 180 seconds.')
+                            self._abort_sessions(base_url, map_state['session_stage'])
+                            return False
+                        if driver['busy'] and (time.monotonic() - driver['last_activity']) > stall_timeout:
+                            # 运行中停滞检测：某工具/会话卡死时提前中止，并明确报“疑似卡死”。
+                            stalled = True
+                            emit(stage, 'error',
+                                 f'OpenCode workflow stalled: no activity for {stall_timeout} seconds; aborting early.')
+                            self._abort_sessions(base_url, map_state['session_stage'])
+                            return False
+                        driver['done'].wait(0.3)
+                    if driver['fatal']:
                         return_code = 1
-                        emit(live_stage(), 'error',
-                             'OpenCode orchestrator did not start processing the prompt within 180 seconds.')
-                        self._abort_sessions(base_url, map_state['session_stage'])
-                        break
-                    if driver['busy'] and (time.monotonic() - driver['last_activity']) > stall_timeout:
-                        # 运行中停滞检测：某工具/会话卡死（如 browser_snapshot 挂起）导致事件总线长时间静默时，
-                        # 不再干等满硬超时，提前中止并明确报“疑似卡死”，让失败更快更清晰。
-                        stalled = True
-                        emit(live_stage(), 'error',
-                             f'OpenCode workflow stalled: no activity for {stall_timeout} seconds; aborting early.')
-                        self._abort_sessions(base_url, map_state['session_stage'])
-                        break
-                    driver['done'].wait(0.3)
-                if driver['fatal'] and not interrupted and not timed_out and not stalled and return_code == 0:
-                    return_code = 1
-                    emit(live_stage(), 'error', f"OpenCode orchestrator reported an error: {driver['fatal']}")
+                        emit(stage, 'error', f"OpenCode {stage} reported an error: {driver['fatal']}")
+                        return False
+                    return True
+
+                dispatch = manifest.get('dispatch') or {}
+                plan_file = None
+                generated_files = []
+                scope_violations = []
+                stage_error = None
+                planned = run_phase('playwright-test-planner', 'planner', '\n'.join(dispatch.get('planner') or []))
+                if planned:
+                    plan_file = self._newest_new_file(workspace, before, extra_roots, plan_path, '.md')
+                    problems = self._plan_problems(workspace / plan_file) if plan_file else ['planner 未保存计划文件']
+                    if problems:
+                        stage_error = '计划校验未通过：' + '；'.join(problems)
+                        emit('planner', 'error', stage_error)
+                    # 阶段结束即检查范围：越界文件不等到收尾才发现，并且阻止后续阶段。
+                    scope_violations = self._file_scope(self._changed_files(workspace, before, extra_roots), specs_path, plan_path)
+                    if scope_violations:
+                        emit('planner', 'error', 'planner 修改了范围外的文件：' + ', '.join(scope_violations))
+                    planned = not stage_error and not scope_violations
+                generated = planned and run_phase(
+                    'playwright-test-generator', 'generator',
+                    '\n'.join(line.replace('<PLAN_FILE>', plan_file) for line in dispatch.get('generator') or [])
+                )
+                if generated:
+                    generated_files = self._new_files_in(workspace, before, extra_roots, specs_path, ('.spec.ts', '.spec.js'))
+                    scope_violations = self._file_scope(self._changed_files(workspace, before, extra_roots), specs_path, plan_path)
+                    if scope_violations:
+                        emit('generator', 'error', 'generator 写入了 specs_path 之外的文件：' + ', '.join(scope_violations))
+                    elif not generated_files:
+                        stage_error = 'generator 没有在 specs_path 下生成任何测试文件。'
+                        emit('generator', 'error', stage_error)
+                    generated = not stage_error and not scope_violations
+                if generated and (manifest.get('max_heal_attempts') or 0) > 0:
+                    run_phase(
+                        'playwright-test-healer', 'healer',
+                        '\n'.join(line.replace('<GENERATED_FILES>', ', '.join(generated_files))
+                                  for line in dispatch.get('healer') or [])
+                    )
                 if return_code == 0 and not interrupted and not timed_out and not stalled:
-                    emit(live_stage(), 'process_exit', 'OpenCode orchestrator session completed.')
+                    emit('orchestrator', 'process_exit', 'OpenCode 工作流顺序执行结束。')
             finally:
                 if sse_stop is not None:
                     sse_stop.set()
@@ -1462,12 +1519,14 @@ class OpenCodeRunner:
             violations = ['OpenCode process cleanup failed'] if cleanup_failed else []
             if not cleanup_failed:
                 violations.extend(self._overwrite_violations(files, before, manifest.get('overwrite_policy', 'reject')))
+                violations.extend(self._file_scope(files, specs_path, plan_path))
             violations = sorted(set(violations))
             archive_path = self._archive(
                 workspace, files, manifest.get('run_key') or generation_id
             ) if files and not violations else None
             output = '\n'.join(output_lines)
-            success = return_code == 0 and bool(files) and not violations and not interrupted and not timed_out and not stalled
+            success = (return_code == 0 and bool(files) and not violations and not stage_error
+                       and not interrupted and not timed_out and not stalled)
             if not files:
                 output += '\nOpenCode completed without workspace changes.'
             # 兜底：若某 healer 会话没有收到 session.idle（异常中止等），run 收尾时补记一次。
@@ -1483,7 +1542,7 @@ class OpenCodeRunner:
                 'return_code': return_code,
                 'return_code_hex': self._exit_code_details(return_code)['hex'],
                 'return_code_name': self._exit_code_details(return_code)['name'],
-                'output': self._redact_output(output),
+                'output': output[-200000:],
                 'files': files,
                 'artifacts': [] if cleanup_failed else self._artifact_index(
                     workspace, manifest.get('specs_path'), before, manifest.get('plan_path')
@@ -1492,7 +1551,7 @@ class OpenCodeRunner:
                 'heal_attempts': heal_attempts,
                 'heal_records': map_state['heal_records'],
                 'scope_violations': violations,
-                'secret_violations': [],
+                'stage_error': stage_error,
                 'timed_out': timed_out,
                 'timeout_seconds': timeout if timed_out else None,
                 'stalled': stalled,

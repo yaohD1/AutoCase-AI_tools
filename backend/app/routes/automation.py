@@ -13,7 +13,6 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 
 from app.models import AutomationConfig, AutomationGeneration, Project, db
 from app.services.opencode_runner import OpenCodeRunner, WorkspaceBusyError
-from app.utils.sensitive import redact_sensitive_text
 
 
 automation_bp = Blueprint('automation', __name__)
@@ -64,7 +63,7 @@ def _append_generation_event(app, generation_id, event, artifacts):
             generation.event_cursor = (generation.event_cursor or 0) + 1
             if generation.status not in ('completed', 'failed', 'interrupted'):
                 generation.stage = _advance_stage(generation.stage, event.get('stage'))
-            generation.event_log = json.dumps(events[-500:], ensure_ascii=False)
+            generation.event_log = json.dumps(events, ensure_ascii=False)
             generation.artifact_index = json.dumps(artifacts or [], ensure_ascii=False)
             generation.updated_at = datetime.utcnow()
             try:
@@ -175,6 +174,9 @@ def _run_generation(app, generation_id, workspace, manifest, model, timeout):
             generation.process_id = result.get('process_id') if result.get('cleanup_failed') else None
             if result.get('interrupted') or cancellation_won:
                 generation.error = '任务已被用户中止。'
+                if result.get('scope_violations'):
+                    # 中止前已写到范围外的文件，也要告诉用户，否则它们会悄悄留在工作区。
+                    generation.error += f"中止前已有范围外文件：{', '.join(result['scope_violations'])}。"
                 final_message = result.get('output') or generation.error
             elif result.get('stalled'):
                 generation.error = f"OpenCode 在 {result.get('idle_timeout_seconds')} 秒内没有任何新活动，疑似卡死，已提前中止。"
@@ -199,14 +201,14 @@ def _run_generation(app, generation_id, workspace, manifest, model, timeout):
                 generation.error = '模型 API 流式请求失败，OpenCode 未能完成本次工作流。'
                 generation.error += ' 建议：检查 AI 配置的模型名称、API Key、Base URL 是否有效及额度是否充足，然后重试。'
                 final_message = f"{generation.error}\n{result.get('output') or ''}"
-            elif result.get('secret_violations'):
-                generation.error = '生成的产物包含敏感信息（如明文凭据），已阻止发布。'
-                generation.error += ' 建议：将账号密码等凭据改为从目标项目环境变量引用，不要写入需求或脚本，然后重试。'
-                final_message = f"{generation.error}\n涉及文件：{', '.join(result['secret_violations'])}"
             elif result.get('scope_violations'):
                 generation.error = 'Agent 试图修改自动化测试范围之外的文件，已判失败。'
                 generation.error += ' 建议：确认涉及文件是否为框架运行产物（如 .playwright-mcp/ 快照），若是可将其加入服务端文件白名单后重试。'
                 final_message = f"{generation.error}\n涉及文件：{', '.join(result['scope_violations'])}"
+            elif result.get('stage_error'):
+                generation.error = result['stage_error']
+                generation.error += ' 建议：展开对应 Agent 的执行日志查看输出，修正需求、Seed 或测试目录配置后重试。'
+                final_message = f"{generation.error}\n{result.get('output') or ''}"
             elif result.get('return_code') not in (0, None):
                 code = result.get('return_code')
                 code_hex = result.get('return_code_hex') or 'unknown hex code'
@@ -236,7 +238,7 @@ def _run_generation(app, generation_id, workspace, manifest, model, timeout):
                 'created_at': datetime.utcnow().isoformat()
             })
             generation.event_cursor = (generation.event_cursor or 0) + 1
-            generation.event_log = json.dumps(events[-500:], ensure_ascii=False)
+            generation.event_log = json.dumps(events, ensure_ascii=False)
             db.session.commit()
     except Exception as exc:
         app.logger.exception('Automation generation failed: %s', exc)
@@ -260,7 +262,7 @@ def _run_generation(app, generation_id, workspace, manifest, model, timeout):
                     return
                 generation.status = 'failed'
                 generation.stage = _advance_stage(generation.stage, 'orchestrator')
-                error_message = '自动化任务执行异常：' + (OpenCodeRunner._redact_output(str(exc))[:2000] or '未知错误')
+                error_message = '自动化任务执行异常：' + (str(exc)[:2000] or '未知错误')
                 generation.error = error_message
                 generation.test_result = json.dumps({
                     'success': False,
@@ -282,7 +284,7 @@ def _run_generation(app, generation_id, workspace, manifest, model, timeout):
                     'created_at': datetime.utcnow().isoformat()
                 })
                 generation.event_cursor = (generation.event_cursor or 0) + 1
-                generation.event_log = json.dumps(events[-500:], ensure_ascii=False)
+                generation.event_log = json.dumps(events, ensure_ascii=False)
                 try:
                     db.session.commit()
                 except Exception:
@@ -311,6 +313,7 @@ def _default_config(project_id):
         'opencode_model': '',
         'max_heal_attempts': 3,
         'overwrite_policy': 'reject',
+        'seed_file': 'tests/seed.spec.ts',
     }
 
 
@@ -318,7 +321,7 @@ def _apply_config(config, data):
     allowed = {
         'framework', 'language', 'workspace_path', 'specs_path', 'base_url',
         'environment_name', 'browser', 'auth_state_path', 'opencode_model',
-        'max_heal_attempts', 'overwrite_policy'
+        'max_heal_attempts', 'overwrite_policy', 'seed_file'
     }
     for key in allowed:
         if key in data:
@@ -340,12 +343,15 @@ def _normalise_config(config):
         config.max_heal_attempts = 3
     if not config.overwrite_policy:
         config.overwrite_policy = 'reject'
+    if not config.seed_file:
+        config.seed_file = 'tests/seed.spec.ts'
 
 
 def _validate_config(config, require_generation=False):
     for field, maximum in (
         ('workspace_path', 500), ('specs_path', 255), ('base_url', 500),
-        ('environment_name', 100), ('auth_state_path', 500), ('opencode_model', 200)
+        ('environment_name', 100), ('auth_state_path', 500), ('opencode_model', 200),
+        ('seed_file', 255)
     ):
         value = getattr(config, field, '') or ''
         if not isinstance(value, str) or len(value) > maximum:
@@ -359,6 +365,9 @@ def _validate_config(config, require_generation=False):
     specs_path = Path(config.specs_path or 'tests')
     if specs_path.is_absolute() or '..' in specs_path.parts:
         return 'specs_path must be a relative directory without ..'
+    seed_path = Path(config.seed_file or 'tests/seed.spec.ts')
+    if seed_path.is_absolute() or '..' in seed_path.parts or not seed_path.name.endswith('.spec.ts'):
+        return 'seed_file must be a relative .spec.ts path without ..'
     if require_generation and not (config.workspace_path or '').strip():
         return 'workspace_path is required for generation'
     if config.base_url:
@@ -462,14 +471,29 @@ def _clean_requirement(requirement, base_url):
     return ' '.join(text.split())
 
 
-def _build_dispatch(requirement, base_url, specs_path, plan_path, max_heal_attempts):
-    """代码定死的子 agent 字段行；orchestrator 只允许填 <PLAN_FILE>/<GENERATED_FILES>，不得增删字段。"""
+def _build_dispatch(requirement, base_url, specs_path, plan_path, max_heal_attempts, seed_file, project):
+    """代码定死的子 agent 字段行；Python 负责替换 <PLAN_FILE>/<GENERATED_FILES>，不得增删字段。"""
     runtime = [f'requirement: {requirement}']
     if base_url:
         runtime.append(f'base_url: {base_url}')
     runtime.append(f'specs_path: {specs_path}')
     runtime.append(f'plan_path: {plan_path}')
-    generator = runtime + [
+    # 让前端日志可读：各阶段的过程说明默认用中文，代码、命令、路径、选择器保持原文。
+    runtime.append(
+        'output_language: Simplified Chinese for progress notes, summaries and explanations; '
+        'keep code, commands, paths, selectors and identifiers unchanged.'
+    )
+    # 运行环境写死进派发行，避免 agent 猜 shell（此前在 Windows 上反复用错命令）。
+    is_windows = os.name == 'nt'
+    runtime.append(
+        f'os: {"Windows" if is_windows else "POSIX"}; shell: {"PowerShell" if is_windows else "sh"}; '
+        'prefer Playwright MCP tools over shell commands.'
+    )
+    seeded = runtime + [
+        f'seed_file: {seed_file}',
+        f'project: {project}',
+    ]
+    generator = seeded + [
         'plan_file: <PLAN_FILE>',
         'For every page.goto use the complete base_url above; never use a relative path such as "/login".',
     ]
@@ -479,7 +503,7 @@ def _build_dispatch(requirement, base_url, specs_path, plan_path, max_heal_attem
         'Run the tests against the complete base_url above.',
     ]
     return {
-        'planner': list(runtime),
+        'planner': list(seeded),
         'generator': generator,
         'healer': healer,
     }
@@ -503,7 +527,10 @@ def _build_manifest(project, config, requirement, storage_state, workspace, run_
         'run_key': run_key,
         'max_heal_attempts': max_heal_attempts,
         'overwrite_policy': config.overwrite_policy or 'reject',
-        'dispatch': _build_dispatch(clean_requirement, base_url, specs_path, plan_path, max_heal_attempts),
+        'dispatch': _build_dispatch(
+            clean_requirement, base_url, specs_path, plan_path, max_heal_attempts,
+            config.seed_file or 'tests/seed.spec.ts', config.browser or 'chromium'
+        ),
     }
     if storage_state:
         manifest['storage_state'] = str(storage_state.relative_to(workspace)).replace('\\', '/')
@@ -705,7 +732,7 @@ def _mark_generation_interrupted(generation, message):
         'created_at': datetime.utcnow().isoformat()
     })
     generation.event_cursor = (generation.event_cursor or 0) + 1
-    generation.event_log = json.dumps(events[-500:], ensure_ascii=False)
+    generation.event_log = json.dumps(events, ensure_ascii=False)
 
 
 def _cleanup_residual_generation(app, generation_id, process_id, workspace):
@@ -865,14 +892,10 @@ def get_generation_artifact(generation_id):
         content = target.read_text(encoding='utf-8', errors='replace')
     except OSError:
         return jsonify({'error': 'Artifact is unavailable'}), 404
-    safe_content = redact_sensitive_text(content)
-    # 不再因命中脱敏就整体 403：返回打码后的内容，登录脚本等含 username/password 字样的
-    # 测试脚本也能正常查看；真正的敏感文件（.env/.auth/.key/.pem）已在上方硬阻断。
     return jsonify({
         'path': relative_path,
         'kind': matching.get('kind'),
-        'content': safe_content,
-        'redacted': safe_content != content
+        'content': content
     }), 200
 
 
@@ -1020,7 +1043,7 @@ def revert_generation(generation_id):
         'created_at': datetime.utcnow().isoformat()
     })
     generation.event_cursor = (generation.event_cursor or 0) + 1
-    generation.event_log = json.dumps(events[-500:], ensure_ascii=False)
+    generation.event_log = json.dumps(events, ensure_ascii=False)
     db.session.commit()
     return jsonify({'success': True, 'result': result, 'generation': generation.to_dict()}), 200
 

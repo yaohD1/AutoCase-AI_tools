@@ -3,7 +3,6 @@ import uuid
 from datetime import datetime
 
 from app.models.database import db
-from app.utils.sensitive import redact_sensitive_text
 
 
 class AutomationConfig(db.Model):
@@ -22,6 +21,7 @@ class AutomationConfig(db.Model):
     opencode_model = db.Column(db.String(200), default='')
     max_heal_attempts = db.Column(db.Integer, default=3)
     overwrite_policy = db.Column(db.String(50), default='reject')
+    seed_file = db.Column(db.String(255), default='tests/seed.spec.ts')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -33,7 +33,7 @@ class AutomationConfig(db.Model):
             'language': self.language,
             'workspace_path': self.workspace_path or '',
             'specs_path': self.specs_path or 'autocase/tests',
-            'base_url': redact_sensitive_text(self.base_url or ''),
+            'base_url': self.base_url or '',
             'environment_name': self.environment_name or 'test',
             'browser': self.browser or 'chromium',
             'auth_state_path': self.auth_state_path or '',
@@ -90,30 +90,8 @@ class AutomationGeneration(db.Model):
         heal_records = parse(self.heal_records, [])
         if not isinstance(heal_records, list):
             heal_records = []
-        # 采集时已脱敏，这里再做一次防御：避免旧数据或意外写入的凭据外泄。
-        for record in heal_records:
-            if not isinstance(record, dict):
-                continue
-            if isinstance(record.get('reason'), str):
-                record['reason'] = redact_sensitive_text(record['reason'])
-            changes = record.get('changes')
-            if isinstance(changes, list):
-                for change in changes:
-                    if isinstance(change, dict) and isinstance(change.get('diff'), str):
-                        change['diff'] = redact_sensitive_text(change['diff'])
         config = parse(self.config_snapshot, {})
-        if isinstance(config, dict):
-            config = {
-                key: redact_sensitive_text(value) if isinstance(value, str) else value
-                for key, value in config.items()
-            }
-        safe_events = []
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            safe_event = dict(event)
-            safe_event['message'] = redact_sensitive_text(safe_event.get('message', ''))
-            safe_events.append(safe_event)
+        safe_events = [event for event in events if isinstance(event, dict)]
         return {
             'id': self.id,
             'run_key': self.run_key or (self.id[:8] if self.id else ''),
@@ -136,7 +114,7 @@ class AutomationGeneration(db.Model):
             'commit_hash': self.commit_hash,
             'commit_message': self.commit_message,
             'committed_files': parse(self.committed_files, []),
-            'error': redact_sensitive_text(self.error or '') if self.error else None,
+            'error': self.error or None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'started_at': self.started_at.isoformat() if self.started_at else None,
             'process_id': self.process_id,
