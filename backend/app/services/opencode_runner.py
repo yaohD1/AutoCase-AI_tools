@@ -1457,8 +1457,14 @@ class OpenCodeRunner:
                 generated_files = []
                 scope_violations = []
                 stage_error = None
-                planned = run_phase('playwright-test-planner', 'planner', '\n'.join(dispatch.get('planner') or []))
-                if planned:
+                cases_mode = manifest.get('mode') == 'cases'
+                if cases_mode:
+                    # 按用例模式：用例已由后端解析并规范化，planner 不运行，直接进入 generator。
+                    planned = True
+                    plan_file = manifest.get('cases_file')
+                else:
+                    planned = run_phase('playwright-test-planner', 'planner', '\n'.join(dispatch.get('planner') or []))
+                if planned and not cases_mode:
                     plan_file = self._newest_new_file(workspace, before, extra_roots, plan_path, '.md')
                     problems = self._plan_problems(workspace / plan_file) if plan_file else ['planner 未保存计划文件']
                     if problems:
@@ -1471,7 +1477,7 @@ class OpenCodeRunner:
                     planned = not stage_error and not scope_violations
                 generated = planned and run_phase(
                     'playwright-test-generator', 'generator',
-                    '\n'.join(line.replace('<PLAN_FILE>', plan_file) for line in dispatch.get('generator') or [])
+                    '\n'.join(line.replace('<PLAN_FILE>', plan_file or '') for line in dispatch.get('generator') or [])
                 )
                 if generated:
                     generated_files = self._new_files_in(workspace, before, extra_roots, specs_path, ('.spec.ts', '.spec.js'))

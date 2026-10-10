@@ -54,6 +54,8 @@ class AutomationGeneration(db.Model):
     status = db.Column(db.String(20), default='pending', nullable=False)
     stage = db.Column(db.String(50), default='pending')
     requirement = db.Column(db.Text)
+    # 生成模式：requirement 为原有的“按需求生成”（planner→generator→healer），cases 为“按用例生成”。
+    mode = db.Column(db.String(20), default='requirement')
     config_snapshot = db.Column(db.Text)
     testcase_ids = db.Column(db.Text)
     files = db.Column(db.Text)

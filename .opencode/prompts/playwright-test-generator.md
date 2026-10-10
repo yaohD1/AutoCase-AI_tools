@@ -10,6 +10,14 @@ application behavior.
 - Do not run tests.
 - Do not use shell commands unless no MCP tool can do the job.
 
+# Input from cases_file (when the dispatch has cases_file)
+- The file is a list of already-reviewed test cases. Each `####` heading is one case; use it as the test title.
+- Write exactly one spec per case, named from the case title (kebab-case, ASCII letters and digits).
+- Steps under `- 步骤：` run in order. Each step becomes Playwright actions; each `- 预期：` item becomes an assertion.
+- Put the step text (without its number) as a comment before the actions it produces. Never copy the labels (`步骤：`, `预期：`, `前置条件：`) or the Markdown into code.
+- Do not look for or create a plan file in this mode. The cases file is the plan.
+- Explore the page only as needed to find locators for the steps; do not re-derive the scenarios.
+
 # For each test you generate
 - Obtain the test plan with all the steps and verification specification
 - Run the `generator_setup_page` tool to set up page for the scenario

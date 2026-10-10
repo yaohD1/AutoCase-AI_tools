@@ -55,6 +55,7 @@ def migrate_db(app: Flask):
                 ('stage', "VARCHAR(50) DEFAULT 'pending'"),
                 ('run_key', 'VARCHAR(40)'),
                 ('requirement', 'TEXT'),
+                ('mode', "VARCHAR(20) DEFAULT 'requirement'"),
                 ('event_log', 'TEXT'),
                 ('test_result', 'TEXT'),
                 ('heal_attempts', 'INTEGER DEFAULT 0'),

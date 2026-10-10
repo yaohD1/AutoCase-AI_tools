@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.routes.automation import _build_dispatch
 from app.services.opencode_runner import OpenCodeRunner
+from app.utils.case_markdown import parse_cases, render_cases
 
 
 class PlanProblemsTest(unittest.TestCase):
@@ -73,6 +74,74 @@ class StageMappingTest(unittest.TestCase):
         }
         OpenCodeRunner({})._register_task_session(state, tool_state, 'generator')
         self.assertEqual(state['session_stage']['child-x'], 'generator')
+
+
+class CasesModeDispatchTest(unittest.TestCase):
+    def test_cases_mode_has_no_planner_and_uses_cases_file(self):
+        dispatch = _build_dispatch('按用例', 'http://x', 'autocase/runs/r/tests', 'autocase/runs/r/test-plans', 3,
+                                   'tests/seed.spec.ts', 'chromium', cases_file='autocase/runs/r/cases/cases.md')
+        self.assertNotIn('planner', dispatch)
+        self.assertIn('cases_file: autocase/runs/r/cases/cases.md', dispatch['generator'])
+        self.assertFalse(any('<PLAN_FILE>' in line for line in dispatch['generator']))
+        self.assertIn('generated_files: <GENERATED_FILES>', dispatch['healer'])
+
+    def test_requirement_mode_is_unchanged_without_cases_file(self):
+        dispatch = _build_dispatch('登录', 'http://x', 'autocase/runs/r/tests', 'autocase/runs/r/test-plans', 3,
+                                   'tests/seed.spec.ts', 'chromium')
+        self.assertIn('planner', dispatch)
+        self.assertIn('plan_file: <PLAN_FILE>', dispatch['generator'])
+        self.assertFalse(any(line.startswith('cases_file:') for line in dispatch['generator']))
+
+
+class CaseMarkdownTest(unittest.TestCase):
+    def test_labels_and_suffixes_are_stripped(self):
+        seed, cases, errors = parse_cases(
+            '**Seed:** tests/seed.spec.ts\n\n'
+            '#### 验证码错误提示 #P0\n'
+            '- 优先级：P0\n- 模块：登录页\n- 测试点：验证码\n'
+            '- 前置条件：\n  1. 打开登录页\n'
+            '- 步骤：\n  1. 步骤：输入用户名\n  2. 点击登录\n'
+            '- 预期：\n  - 预期：提示验证码错误\n'
+        )
+        self.assertEqual((seed, errors), ('tests/seed.spec.ts', []))
+        case = cases[0]
+        self.assertEqual(case['title'], '验证码错误提示')
+        self.assertEqual(case['steps'], ['输入用户名', '点击登录'])
+        self.assertEqual(case['expected'], ['提示验证码错误'])
+        self.assertEqual(case['preconditions'], ['打开登录页'])
+
+    def test_plain_items_without_labels_are_accepted(self):
+        _, cases, errors = parse_cases(
+            '**Seed:** tests/seed.spec.ts\n\n#### 登录\n- 步骤：\n  1. 点击登录\n- 预期：\n  - 进入首页\n'
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(cases[0]['steps'], ['点击登录'])
+
+    def test_missing_seed_is_reported(self):
+        _, _, errors = parse_cases('#### 登录\n- 步骤：\n  1. 点击\n- 预期：\n  - 成功\n')
+        self.assertTrue(any('Seed' in e for e in errors))
+
+    def test_missing_steps_is_reported(self):
+        _, _, errors = parse_cases('**Seed:** tests/seed.spec.ts\n\n#### 登录\n- 预期：\n  - 成功\n')
+        self.assertTrue(any('缺少步骤' in e for e in errors))
+
+    def test_invalid_priority_is_reported(self):
+        _, _, errors = parse_cases(
+            '**Seed:** tests/seed.spec.ts\n\n#### 登录\n- 优先级：P9\n- 步骤：\n  1. 点击\n- 预期：\n  - 成功\n'
+        )
+        self.assertTrue(any('P0–P3' in e for e in errors))
+
+    def test_no_cases_is_reported(self):
+        _, _, errors = parse_cases('**Seed:** tests/seed.spec.ts\n\n只有一段说明\n')
+        self.assertTrue(any('没有找到任何用例' in e for e in errors))
+
+    def test_render_then_parse_round_trips(self):
+        original = [{'title': '登录', 'priority': 'P1', 'module': 'm', 'test_point': 'p',
+                     'preconditions': ['打开页面'], 'steps': ['点击'], 'expected': ['成功']}]
+        _, cases, errors = parse_cases(render_cases('tests/seed.spec.ts', original))
+        self.assertEqual(errors, [])
+        self.assertEqual(cases[0]['steps'], ['点击'])
+        self.assertEqual(cases[0]['expected'], ['成功'])
 
 
 class ScopeTest(unittest.TestCase):

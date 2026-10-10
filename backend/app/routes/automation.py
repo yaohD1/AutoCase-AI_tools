@@ -1,6 +1,7 @@
 import json
 import hashlib
 import os
+import re
 import subprocess
 import threading
 import time
@@ -11,8 +12,9 @@ from urllib.parse import urlparse
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 
-from app.models import AutomationConfig, AutomationGeneration, Project, db
+from app.models import AutomationConfig, AutomationGeneration, Project, TestCase, db
 from app.services.opencode_runner import OpenCodeRunner, WorkspaceBusyError
+from app.utils.case_markdown import parse_cases, render_cases
 
 
 automation_bp = Blueprint('automation', __name__)
@@ -471,8 +473,9 @@ def _clean_requirement(requirement, base_url):
     return ' '.join(text.split())
 
 
-def _build_dispatch(requirement, base_url, specs_path, plan_path, max_heal_attempts, seed_file, project):
-    """代码定死的子 agent 字段行；Python 负责替换 <PLAN_FILE>/<GENERATED_FILES>，不得增删字段。"""
+def _build_dispatch(requirement, base_url, specs_path, plan_path, max_heal_attempts, seed_file, project, cases_file=None):
+    """代码定死的子 agent 字段行；Python 负责替换 <PLAN_FILE>/<GENERATED_FILES>，不得增删字段。
+    cases_file 只在“按用例生成”模式下传入：此时没有 planner，generator 直接拿用例文件。"""
     runtime = [f'requirement: {requirement}']
     if base_url:
         runtime.append(f'base_url: {base_url}')
@@ -493,23 +496,34 @@ def _build_dispatch(requirement, base_url, specs_path, plan_path, max_heal_attem
         f'seed_file: {seed_file}',
         f'project: {project}',
     ]
+    if cases_file:
+        # 按用例模式：没有 planner，generator 直接以规范化用例文件为依据逐条写脚本。
+        generator = seeded + [
+            f'cases_file: {cases_file}',
+            'Write one spec per case in cases_file. Keep the case title as the test title.',
+            'For every page.goto use the complete base_url above; never use a relative path such as "/login".',
+        ]
+        return {'generator': generator, 'healer': _healer_dispatch(runtime, max_heal_attempts)}
     generator = seeded + [
         'plan_file: <PLAN_FILE>',
         'For every page.goto use the complete base_url above; never use a relative path such as "/login".',
     ]
-    healer = runtime + [
+    return {
+        'planner': list(seeded),
+        'generator': generator,
+        'healer': _healer_dispatch(runtime, max_heal_attempts),
+    }
+
+
+def _healer_dispatch(runtime, max_heal_attempts):
+    return runtime + [
         f'max_heal_attempts: {max_heal_attempts}',
         'generated_files: <GENERATED_FILES>',
         'Run the tests against the complete base_url above.',
     ]
-    return {
-        'planner': list(seeded),
-        'generator': generator,
-        'healer': healer,
-    }
 
 
-def _build_manifest(project, config, requirement, storage_state, workspace, run_key):
+def _build_manifest(project, config, requirement, storage_state, workspace, run_key, mode='requirement', cases_file=None):
     artifact_root = f'autocase/runs/{run_key}' if run_key else 'autocase'
     base_url = config.base_url or ''
     specs_path = f'{artifact_root}/tests'
@@ -518,18 +532,21 @@ def _build_manifest(project, config, requirement, storage_state, workspace, run_
     clean_requirement = _clean_requirement(requirement, base_url)
     manifest = {
         'version': 1,
+        'mode': mode,
         'project_id': project.id,
         'project_name': project.name,
         'requirement': clean_requirement,
         'base_url': base_url,
         'specs_path': specs_path,
         'plan_path': plan_path,
+        'cases_file': cases_file,
         'run_key': run_key,
         'max_heal_attempts': max_heal_attempts,
         'overwrite_policy': config.overwrite_policy or 'reject',
         'dispatch': _build_dispatch(
             clean_requirement, base_url, specs_path, plan_path, max_heal_attempts,
-            config.seed_file or 'tests/seed.spec.ts', config.browser or 'chromium'
+            config.seed_file or 'tests/seed.spec.ts', config.browser or 'chromium',
+            cases_file=cases_file if mode == 'cases' else None,
         ),
     }
     if storage_state:
@@ -598,6 +615,138 @@ def generate_automation_scripts():
     db.session.commit()
 
     manifest = _build_manifest(project, config, requirement, storage_state, workspace, generation.run_key)
+    generation.stage = 'queued'
+    db.session.commit()
+    app = current_app._get_current_object()
+    runner.register_run(generation.id)
+    thread = threading.Thread(
+        target=_run_generation,
+        args=(app, generation.id, workspace, manifest, config.opencode_model or None, app.config.get('OPENCODE_TIMEOUT', 3600)),
+        daemon=True
+    )
+    thread.start()
+    response = generation.to_dict()
+    response['location'] = f'/scripts/generations/{generation.id}'
+    return jsonify({'success': True, 'generation': response}), 202
+
+
+def _cases_input(data, seed_file):
+    """Accept either Markdown text or a list of approved testcase ids; return (markdown, error)."""
+    markdown = data.get('cases_markdown')
+    case_ids = data.get('case_ids')
+    if isinstance(markdown, str) and markdown.strip():
+        return markdown, None
+    if isinstance(case_ids, list) and case_ids:
+        cases = TestCase.query.filter(TestCase.id.in_(case_ids), TestCase.status == 'approved').all()
+        if len(cases) != len(set(case_ids)):
+            return None, '部分用例不存在或尚未审批通过'
+        return _render_approved_cases(cases, seed_file), None
+    return None, '需要提供 cases_markdown 或已审批的 case_ids'
+
+
+def _render_approved_cases(cases, seed_file):
+    """Turn stored testcases into the canonical Markdown, stripping the stored label prefixes."""
+    rendered = []
+    for case in cases:
+        steps = json.loads(case.steps) if case.steps and case.steps.strip().startswith('[') else []
+        rendered.append({
+            'title': case.title,
+            'priority': case.priority or 'P2',
+            'module': _strip_label(case.module, '模块'),
+            'test_point': _strip_label(case.test_point, '测试点'),
+            'preconditions': [s for s in (case.preconditions or '').split('\n') if s.strip()],
+            'steps': steps,
+            'expected': [case.expected] if case.expected else [],
+        })
+    return render_cases(seed_file, rendered)
+
+
+def _strip_label(value, label):
+    return re.sub(rf'^{label}[：:]\s*', '', (value or '').strip())
+
+
+@automation_bp.route('/automation/cases/preview', methods=['POST'])
+def preview_cases():
+    """Parse and validate cases without starting a run, so the UI can show errors first."""
+    data = request.get_json() or {}
+    config = AutomationConfig.query.filter_by(project_id=data.get('project_id')).first()
+    seed = (config.seed_file if config else None) or 'tests/seed.spec.ts'
+    markdown, error = _cases_input(data, seed)
+    if error:
+        return jsonify({'error': error}), 400
+    seed_file, cases, errors = parse_cases(markdown)
+    return jsonify({'success': not errors, 'seed_file': seed_file, 'case_count': len(cases), 'errors': errors}), 200
+
+
+@automation_bp.route('/automation/generate-from-cases', methods=['POST'])
+def generate_from_cases():
+    """按用例生成：没有 planner，用例直接作为 generator 的输入。与 /automation/generate 并存。"""
+    data = request.get_json() or {}
+    project_id = data.get('project_id')
+    if not project_id:
+        return jsonify({'error': 'project_id is required'}), 400
+    seed = (data.get('config') or {}).get('seed_file') if isinstance(data.get('config'), dict) else None
+    existing = AutomationConfig.query.filter_by(project_id=project_id).first()
+    seed = seed or (existing.seed_file if existing else None) or 'tests/seed.spec.ts'
+    markdown, error = _cases_input(data, seed)
+    if error:
+        return jsonify({'error': error}), 400
+    seed_file, cases, errors = parse_cases(markdown)
+    if errors:
+        return jsonify({'error': '用例格式有误', 'errors': errors}), 400
+
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({'error': 'Project not found'}), 404
+
+    config = AutomationConfig.query.filter_by(project_id=project_id).first()
+    if not config:
+        config = AutomationConfig(project_id=project_id)
+        db.session.add(config)
+    if isinstance(data.get('config'), dict):
+        _apply_config(config, data['config'])
+    _normalise_config(config)
+    validation_error = _validate_config(config, require_generation=True)
+    if validation_error:
+        return jsonify({'error': validation_error}), 400
+
+    runner = OpenCodeRunner(current_app.config)
+    try:
+        _, workspace = runner.resolve_workspace(config.workspace_path)
+        runner.validate_workspace(workspace)
+        storage_state = runner.resolve_storage_state(workspace, config.auth_state_path)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    run_key = _new_run_key()
+    # 用例以规范化 Markdown 写进批次目录，generator 只读这一份，原始输入不动。
+    cases_dir = workspace / 'autocase' / 'runs' / run_key / 'cases'
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    cases_file = f'autocase/runs/{run_key}/cases/cases.md'
+    (workspace / cases_file).write_text(render_cases(seed_file, cases), encoding='utf-8')
+
+    generation = AutomationGeneration(
+        project_id=project_id,
+        run_key=run_key,
+        mode='cases',
+        status='pending',
+        stage='starting',
+        requirement=f'按用例生成：{len(cases)} 条用例',
+        config_snapshot=json.dumps(config.to_dict(), ensure_ascii=False),
+        testcase_ids=json.dumps(data.get('case_ids') or [], ensure_ascii=False),
+        event_log=json.dumps([], ensure_ascii=False),
+        artifact_index=json.dumps([], ensure_ascii=False),
+        heal_attempts=0,
+        commit_status='uncommitted',
+        started_at=datetime.utcnow(),
+        process_id=None,
+        updated_at=datetime.utcnow()
+    )
+    db.session.add(generation)
+    db.session.commit()
+
+    manifest = _build_manifest(project, config, generation.requirement, storage_state, workspace, run_key,
+                               mode='cases', cases_file=cases_file)
     generation.stage = 'queued'
     db.session.commit()
     app = current_app._get_current_object()
