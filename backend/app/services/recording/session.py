@@ -11,6 +11,7 @@ import queue
 import threading
 import time
 import uuid
+from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -24,6 +25,20 @@ PUMP_MS = 150
 COMMAND_TIMEOUT = 60
 PICK_OFF_TAGS = ('select', 'label')
 NON_TEXT_INPUT_TYPES = ('button', 'submit', 'reset', 'checkbox', 'radio')
+# 被录制页面里的浮层：只显示最近几步，避免面板过高挡住应用。
+HUD_RECENT_STEPS = 3
+STEP_TITLES = {'goto': '打开', 'click': '点击', 'fill': '输入', 'select': '选择',
+               'new_page': '标签页', 'assert': '断言', 'wait': '等待', 'sleep': '等待'}
+STATUS_LABELS = {'unique': '唯一定位', 'fragile': '结构定位', 'ambiguous': '定位不唯一', 'stale': '定位已变化'}
+STATUS_TONES = {'unique': 'ok', 'fragile': 'warn', 'ambiguous': 'bad'}
+# 就地编辑允许改的字段：只改「值」，不动定位（换元素走拾取）。
+EDITABLE_FIELDS = {
+    'fill': ('value',),
+    'select': ('value', 'label'),
+    'goto': ('url',),
+    'sleep': ('seconds',),
+}
+MAX_VALUE_LENGTH = 500
 
 
 class RecordingError(Exception):
@@ -38,7 +53,8 @@ class RecordingSession(object):
     _current = None
     _current_lock = threading.Lock()
 
-    def __init__(self, base_url, headless=False, driver=None):
+    def __init__(self, base_url, headless=False, driver=None, panel_url=None,
+                 panel_ratio=0.45, hud_panel=False, embed_url=None):
         self.id = uuid.uuid4().hex
         self.base_url = base_url
         self.status = 'starting'
@@ -46,6 +62,18 @@ class RecordingSession(object):
         self._headless = headless
         # 仅供测试：在录制线程内、进入循环前调用 driver(session, page) 模拟用户操作。
         self._driver = driver
+        # 嵌入模式：主页面是 AutoCase 外壳页，被测系统在它的 iframe 里。
+        # 此时不再开第二个窗口，左侧宽度 = 窗口宽度 - 面板宽度。
+        self._embed_url = embed_url
+        self._embed = bool(embed_url)
+        self._app_origin = '{0.scheme}://{0.netloc}'.format(urlparse(base_url))
+        # 并排模式：额外开一个窗口加载前端录制页，与被测页面左右摆开。
+        self._panel_url = panel_url
+        self._panel_ratio = panel_ratio if 0.2 <= panel_ratio <= 0.8 else 0.45
+        self._panel_context = None
+        self._panel_page = None
+        # 页面内悬浮面板默认关闭，只保留操作点的即时徽标。
+        self._hud_panel = hud_panel
         self._lock = threading.RLock()
         self._ready = threading.Event()
         self._commands = queue.Queue()
@@ -67,12 +95,14 @@ class RecordingSession(object):
     # ---- 会话管理（Flask 线程调用）----
 
     @classmethod
-    def start_new(cls, base_url, headless=False, driver=None):
+    def start_new(cls, base_url, headless=False, driver=None, panel_url=None,
+                  panel_ratio=0.45, hud_panel=False, embed_url=None):
         with cls._current_lock:
             current = cls._current
             if current is not None and current.status in ('starting', 'recording'):
                 raise RecordingBusy('已有正在进行的录制，请先停止或取消')
-            session = cls(base_url, headless=headless, driver=driver)
+            session = cls(base_url, headless=headless, driver=driver, panel_url=panel_url,
+                          panel_ratio=panel_ratio, hud_panel=hud_panel, embed_url=embed_url)
             cls._current = session
         session._thread.start()
         session._ready.wait(COMMAND_TIMEOUT)
@@ -94,6 +124,10 @@ class RecordingSession(object):
 
     def cancel(self):
         return self._call('cancel')
+
+    def relayout(self):
+        """把被测页面和面板窗口重新摆成左右并排。"""
+        return self._call('relayout')
 
     def _call(self, name, **kwargs):
         # 先看状态而不是线程：停止后线程还要一会儿才退出，命令放进队列也没人取，会白等超时。
@@ -122,6 +156,8 @@ class RecordingSession(object):
                 'steps': steps,
                 'picks': picks,
                 'aliases': self.aliases(),
+                # 面板窗口是否开着，前端据此显示「重新并排」按钮。
+                'panel': self._panel_page is not None,
             }
 
     def ir(self):
@@ -167,6 +203,7 @@ class RecordingSession(object):
                 drop.add(idx + 1)
             self._steps = [s for i, s in enumerate(self._steps) if i not in drop]
             self._renumber()
+        self._schedule_hud()
         return self.snapshot()
 
     def move_step(self, no, direction):
@@ -179,6 +216,76 @@ class RecordingSession(object):
                 raise RecordingError('这一步与标签页切换绑定，不能移动')
             self._steps[idx], self._steps[target] = self._steps[target], self._steps[idx]
             self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def move_step_to(self, no, position):
+        """拖拽排序：把步骤（含绑定的标签页切换）移动到 position（0 基，含自身的列表）。
+
+        position 用「移除自身之后的列表下标」，与前端拖拽库的 newIndex 语义一致。
+        """
+        try:
+            to = int(position)
+        except (TypeError, ValueError):
+            raise RecordingError('位置必须是整数')
+        with self._lock:
+            idx = self._index_of(no)
+            if self._steps[idx]['type'] == 'new_page':
+                raise RecordingError('标签页切换随前一步一起移动')
+            block = [idx]
+            if idx + 1 < len(self._steps) and self._steps[idx + 1]['type'] == 'new_page':
+                block.append(idx + 1)
+            moving = [self._steps[i] for i in block]
+            rest = [step for i, step in enumerate(self._steps) if i not in block]
+            pos = max(0, min(len(rest), to))
+            # 不能插到「点击 → 标签页切换」之间，否则绑定就断了。
+            if 0 < pos < len(rest) and rest[pos]['type'] == 'new_page':
+                pos -= 1
+            self._steps = rest[:pos] + moving + rest[pos:]
+            self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def update_step(self, no, changes):
+        """就地修改一步的可编辑字段，不动定位（换元素请用拾取）。"""
+        if not isinstance(changes, dict):
+            raise RecordingError('请求体必须是对象')
+        with self._lock:
+            idx = self._index_of(no)
+            step = self._steps[idx]
+            kind = step['type']
+            allowed = EDITABLE_FIELDS.get(kind)
+            if not allowed:
+                raise RecordingError('这一步没有可编辑的内容')
+            unexpected = sorted(set(changes) - set(allowed))
+            if unexpected:
+                raise RecordingError('这一步不支持修改：%s' % '、'.join(unexpected))
+            if kind == 'goto':
+                url = (changes.get('url') or '').strip()
+                parsed = urlparse(url)
+                if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+                    raise RecordingError('地址必须是 http 或 https')
+                step['url'] = url
+            elif kind == 'sleep':
+                try:
+                    seconds = float(changes.get('seconds'))
+                except (TypeError, ValueError):
+                    raise RecordingError('等待时间必须是数字')
+                if not 0.1 <= seconds <= 600:
+                    raise RecordingError('等待时间需在 0.1 ~ 600 秒之间')
+                step['intent'] = dict(step.get('intent') or {'type': 'sleep'}, seconds=seconds)
+                step['text'] = '固定等待 %s 秒' % seconds
+            else:  # fill / select
+                value = changes.get('value')
+                if not isinstance(value, str):
+                    raise RecordingError('值必须是字符串')
+                if len(value) > MAX_VALUE_LENGTH:
+                    raise RecordingError('值最长 %d 个字符' % MAX_VALUE_LENGTH)
+                step['value'] = value
+                if 'label' in changes:
+                    label = changes.get('label')
+                    step['label'] = (label or '').strip() or None
+        self._schedule_hud()
         return self.snapshot()
 
     def add_intent_step(self, intent, text=None, after_no=None):
@@ -204,6 +311,7 @@ class RecordingSession(object):
                 pos = idx + 2 if self._tied(idx) and self._steps[idx + 1]['type'] == 'new_page' else idx + 1
                 self._steps.insert(pos, step)
             self._renumber()
+        self._schedule_hud()
         return self.snapshot()
 
     def _find_target(self, alias):
@@ -225,13 +333,34 @@ class RecordingSession(object):
         try:
             with sync_playwright() as p:
                 self._browser = p.chromium.launch(headless=self._headless)
-                self._context = self._browser.new_context()
+                # no_viewport：页面跟随真实窗口大小。Playwright 默认会给 1280×720 的
+                # viewport（用 CDP 覆盖渲染尺寸），窗口最大化后页面仍按 1280 渲染，
+                # 右边就会空一大块，录制到的也不是用户看到的尺寸。
+                self._context = self._browser.new_context(no_viewport=True)
+                # 悬浮面板开关要在 recorder.js 之前写进页面。
+                self._context.add_init_script(
+                    script='window.__AUTOCASE_HUD_PANEL = %s;' % ('true' if self._hud_panel else 'false')
+                )
+                # 嵌入模式下外壳页（AutoCase 自己）不参与录制，按 origin 告诉注入脚本跳过它。
+                if self._embed:
+                    shell_origin = '{0.scheme}://{0.netloc}'.format(urlparse(self._embed_url))
+                    self._context.add_init_script(
+                        script='window.__AUTOCASE_SKIP_ORIGIN = %s;' % json.dumps(shell_origin)
+                    )
                 self._context.add_init_script(path=RECORDER_JS)
                 self._context.on('page', self._on_new_page)
                 page = self._context.new_page()
                 self._wire(page)
                 self._opened = True
-                page.goto(self.base_url, wait_until='domcontentloaded')
+                if self._embed:
+                    # 先最大化再加载：被测页面按最终宽度完成首次布局，
+                    # 否则它会按浏览器默认窗口（约 1280）渲染，全屏后右侧空一大块。
+                    self._maximize(page)
+                page.goto(self._embed_url or self.base_url, wait_until='domcontentloaded')
+                if self._embed:
+                    # 外壳页很快，真正要等的是 iframe 里的被测系统。
+                    self._wait_app_frame(page)
+                self._open_panel()
                 self.status = 'recording'
                 if self._driver is not None:
                     self._driver(self, page)
@@ -291,6 +420,8 @@ class RecordingSession(object):
                 elif name == 'set_pick':
                     self._set_pick(kwargs['on'])
                     result = {'pick': self._pick}
+                elif name == 'relayout':
+                    result = {'laid_out': self.layout_windows()}
                 else:
                     raise RecordingError('未知命令：%s' % name)
                 reply.put((True, result))
@@ -305,6 +436,14 @@ class RecordingSession(object):
             self.status = 'stopping'
         if revalidate:
             self._revalidate_all()
+        try:
+            # 面板窗口是独立 context，先关它再关浏览器。
+            if self._panel_context is not None:
+                self._panel_context.close()
+        except Exception:
+            pass
+        self._panel_page = None
+        self._panel_context = None
         try:
             if self._browser is not None:
                 self._browser.close()
@@ -321,12 +460,227 @@ class RecordingSession(object):
         self._pick = on
         for page in list(self._context.pages):
             self._apply_pick(page)
+        self._push_hud()
 
     def _apply_pick(self, page):
+        # 嵌入模式下被测页面在 iframe 里，拾取开关要发给每个 frame。
+        for frame in page.frames:
+            try:
+                frame.evaluate('window.__pwSetPick(%s)' % ('true' if self._pick else 'false'))
+            except Exception:
+                pass
+
+    # ---- 编排面板窗口（独立 context，与被测页面左右并排）----
+
+    def _open_panel(self):
+        """额外开一个窗口加载前端录制页。打不开就退回单窗口录制，不影响录制本身。"""
+        if not self._panel_url or self._browser is None:
+            return
         try:
-            page.evaluate('window.__pwSetPick(%s)' % ('true' if self._pick else 'false'))
+            # no_viewport：让页面跟随窗口大小，而不是被固定 viewport 框住。
+            self._panel_context = self._browser.new_context(no_viewport=True)
+            page = self._panel_context.new_page()
+            page.goto(self._panel_url, wait_until='domcontentloaded', timeout=15000)
+            self._panel_page = page
+        except Exception:
+            self._panel_page = None
+            try:
+                if self._panel_context is not None:
+                    self._panel_context.close()
+            except Exception:
+                pass
+            self._panel_context = None
+            return
+        self.layout_windows()
+
+    def layout_windows(self):
+        """把被测页面与面板窗口左右并排；用户挪过窗口后可再次调用。"""
+        if self._context is None or self._embed:
+            # 嵌入模式只有一个窗口，不需要并排。
+            return False
+        try:
+            main = self._context.pages[0]
+            size = main.evaluate('() => ({ w: screen.availWidth, h: screen.availHeight })')
+            total_w = int(size.get('w') or 0)
+            total_h = int(size.get('h') or 0)
+            if total_w <= 0 or total_h <= 0:
+                return False
+            gap = 8
+            panel_w = max(360, int(total_w * self._panel_ratio))
+            main_w = max(480, total_w - panel_w - gap)
+            panel_w = total_w - main_w - gap
+            self._set_window_bounds(main, {'left': 0, 'top': 0, 'width': main_w, 'height': total_h})
+            if self._panel_page is not None:
+                self._set_window_bounds(
+                    self._panel_page,
+                    {'left': main_w + gap, 'top': 0, 'width': max(320, panel_w), 'height': total_h}
+                )
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _set_window_bounds(page, bounds):
+        try:
+            cdp = page.context.new_cdp_session(page)
+            info = cdp.send('Browser.getWindowForTarget')
+            cdp.send('Browser.setWindowBounds', {
+                'windowId': info['windowId'],
+                'bounds': dict(bounds, windowState='normal')
+            })
+            cdp.detach()
         except Exception:
             pass
+
+    @staticmethod
+    def _maximize(page):
+        """嵌入模式是单窗口，直接最大化，让被测页面拿到整屏宽度。"""
+        try:
+            cdp = page.context.new_cdp_session(page)
+            info = cdp.send('Browser.getWindowForTarget')
+            cdp.send('Browser.setWindowBounds', {
+                'windowId': info['windowId'],
+                'bounds': {'windowState': 'maximized'}
+            })
+            cdp.detach()
+        except Exception:
+            pass
+
+    # ---- 被录制页面里的浮层（面板 + 即时徽标）----
+
+    def _schedule_hud(self):
+        """把「推浮层」排进录制线程；Flask 线程（增删步骤）也可以安全调用。"""
+        if self._context is None:
+            return
+        try:
+            self._inbox.put(self._push_hud)
+        except Exception:
+            pass
+
+    def _push_hud(self):
+        """只在录制线程里执行：把最近几步与整体状态刷到被录制页面。"""
+        if self._context is None or not self._hud_panel:
+            return
+        payload = json.dumps(self._hud_payload(), ensure_ascii=False)
+        for page in list(self._context.pages):
+            try:
+                page.evaluate('window.__pwHudUpdate(%s)' % payload)
+            except Exception:
+                # 页面正在导航或已关闭，下一次推送会补上。
+                pass
+
+    def _hud_payload(self):
+        with self._lock:
+            steps = list(self._steps)
+            recent = [self._hud_item(step) for step in steps[-HUD_RECENT_STEPS:]]
+            ambiguous = sum(1 for step in steps if (step.get('target') or {}).get('status') == 'ambiguous')
+            return {
+                'status': self.status,
+                'pick': self._pick,
+                'total': len(steps),
+                'ambiguous': ambiguous,
+                'steps': recent,
+            }
+
+    @staticmethod
+    def _hud_item(step):
+        """给浮层用的精简视图：只带编号、类型、一句标题和主定位。"""
+        target = step.get('target') or {}
+        primary = target.get('primary') or {}
+        alias = (target.get('alias') or '').strip()
+        kind = step.get('type')
+        if kind in ('goto', 'new_page'):
+            title = step.get('url') or ('新标签页' if kind == 'new_page' else '')
+        elif kind == 'sleep':
+            title = '固定等待'
+        elif kind in ('assert', 'wait'):
+            title = alias or (step.get('text') or '')
+        else:
+            title = alias or (step.get('value') or '')
+        return {
+            'no': step.get('no'),
+            'type': kind,
+            'title': str(title)[:60],
+            'locator': primary.get('desc') or '',
+            'status': target.get('status') or 'none',
+        }
+
+    @staticmethod
+    def _push_badge_frame(frame, tone, text):
+        payload = json.dumps({'tone': tone, 'text': text}, ensure_ascii=False)
+        try:
+            frame.evaluate('window.__pwHudBadge(%s)' % payload)
+        except Exception:
+            pass
+
+    def _schedule_badge(self, frame, status, kind, alias=None, no=None):
+        try:
+            self._inbox.put(lambda: self._push_badge(frame, status, kind, alias, no))
+        except Exception:
+            pass
+
+    def _push_badge(self, frame, status, kind, alias=None, no=None):
+        """在某一步被记录后，于操作点弹一个 1.7 秒的小徽标说明定位结果。"""
+        tone = STATUS_TONES.get(status, 'warn')
+        label = STATUS_LABELS.get(status) or ''
+        name = ('「%s」' % alias[:12]) if alias else ''
+        if kind == 'pick':
+            text = '已拾取%s · %s' % (name or '元素', label)
+        else:
+            text = '#%s %s%s · %s' % (no, STEP_TITLES.get(kind, kind), name, label)
+        self._push_badge_frame(frame, tone, text)
+
+    def _on_hud_action(self, source, payload):
+        # binding 回调：只入队。
+        self._inbox.put(lambda: self._handle_hud_action(payload))
+
+    def _handle_hud_action(self, payload):
+        action = payload if isinstance(payload, str) else (payload or {}).get('action')
+        if action != 'undo':
+            return
+        with self._lock:
+            if not self._steps:
+                return
+            idx = len(self._steps) - 1
+            drop = {idx}
+            # 「点击 → 标签页切换」是绑定的，撤销时一起删，保持结构合法。
+            if self._steps[idx]['type'] == 'new_page' and idx > 0:
+                drop.add(idx - 1)
+            self._steps = [step for i, step in enumerate(self._steps) if i not in drop]
+            self._renumber()
+        self._touch()
+        self._push_hud()
+        if self._context is not None:
+            for page in list(self._context.pages):
+                self._push_badge_frame(page.main_frame, 'warn', '已撤销上一步')
+
+    def _is_app_frame(self, frame):
+        """哪个 frame 算「被测页面」：普通模式是顶层页面；嵌入模式按 origin 判断——
+        外壳页（AutoCase 自己）不算，iframe 里的应用、以及它 target=_blank 打开的新标签页都算。"""
+        try:
+            if self._embed:
+                return frame.url.startswith(self._app_origin)
+            return frame.parent_frame is None
+        except Exception:
+            return False
+
+    def _wait_app_frame(self, page, timeout=25):
+        """嵌入模式启动时等 iframe 里的被测系统就绪，避免第一屏操作还没加载完。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for frame in page.frames:
+                if frame is page.main_frame or not self._is_app_frame(frame):
+                    continue
+                try:
+                    frame.wait_for_load_state('domcontentloaded', timeout=2000)
+                    return True
+                except Exception:
+                    continue
+            try:
+                page.wait_for_timeout(200)
+            except Exception:
+                return False
+        return False
 
     # ---- 页面与事件 ----
 
@@ -347,7 +701,9 @@ class RecordingSession(object):
                 last = self._steps[-1] if self._steps else None
                 if last and last['type'] == 'new_page' and last.get('url') is None:
                     last['url'] = url
-                    self._last_url[id(page)] = url
+                    self._last_url[id(page.main_frame)] = url
+        # 新标签页的文档是新的，浮层需要按当前步骤重画一次。
+        self._schedule_hud()
 
     def _wire(self, page):
         if id(page) in self._wired:
@@ -357,32 +713,39 @@ class RecordingSession(object):
             page.expose_binding('__pwEmit', self._on_event)
         except Exception:
             pass
+        try:
+            # 浮层上的「撤销上一步」走独立 binding，和录制事件分开。
+            page.expose_binding('__pwHudAction', self._on_hud_action)
+        except Exception:
+            pass
         page.on('framenavigated', lambda frame, pg=page: self._on_navigated(pg, frame))
         if self._pick:
             self._apply_pick(page)
+        self._push_hud()
 
     def _on_navigated(self, page, frame):
         self._inbox.put(lambda: self._handle_navigated(page, frame))
 
     def _handle_navigated(self, page, frame):
-        if frame.parent_frame is not None:
+        # 嵌入模式下被测页面是外壳里的 iframe，也要按「页面跳转」记录。
+        if not self._is_app_frame(frame):
             return
         url = frame.url
         if not url or url.startswith('about:'):
             return
-        if self._last_url.get(id(page)) == url:
+        if self._last_url.get(id(frame)) == url:
             return
-        self._last_url[id(page)] = url
+        self._last_url[id(frame)] = url
         with self._lock:
             prev = self._steps[-1] if self._steps else None
             # 点击触发的跳转不单独记为 goto；新标签页的第一次跳转只补全 url。
             if prev and prev['type'] == 'new_page' and prev.get('url') is None:
                 prev['url'] = url
-                return
-            if prev and prev['type'] == 'click':
-                return
-            self._steps.append(ir.make_step('goto', no=0, url=url, page_index=self._page_index(page)))
-            self._renumber()
+            elif not (prev and prev['type'] == 'click'):
+                self._steps.append(ir.make_step('goto', no=0, url=url, page_index=self._page_index(page)))
+                self._renumber()
+        # 导航后文档是新的，浮层得按当前步骤重画一次。
+        self._schedule_hud()
 
     def _page_index(self, page):
         try:
@@ -432,6 +795,8 @@ class RecordingSession(object):
 
             if kind == 'pick':
                 self._picks.append({'seq': seq, 'target': target, '_frame': frame})
+                self._schedule_badge(frame, status, 'pick', target.get('alias'))
+                self._schedule_hud()
                 return
 
             key = (snap.get('css'), id(frame))
@@ -440,6 +805,7 @@ class RecordingSession(object):
                 prev['value'] = data.get('value')
                 prev['target'] = target
                 prev['_frame'] = frame
+                self._schedule_hud()
                 return
 
             step = ir.make_step(kind, no=0, target=target, value=data.get('value'),
@@ -448,6 +814,10 @@ class RecordingSession(object):
             step['_frame'] = frame
             self._steps.append(step)
             self._renumber()
+            no = step['no']
+        # 徽标要读计数结果，`_count` 已经算完；这里排进队列，避免在锁里做 Playwright 调用。
+        self._schedule_badge(frame, status, kind, target.get('alias'), no)
+        self._schedule_hud()
 
     def _revalidate_all(self):
         # 同一个目标可能被多个步骤引用（例如点击后又被断言引用），只能按目标去重；

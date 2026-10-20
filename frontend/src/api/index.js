@@ -166,8 +166,17 @@ batchDeleteTestcases(ids) {
   getRecordingCurrent() {
     return api.get('/automation/recording/current')
   },
-  startRecording(baseUrl) {
-    return api.post('/automation/recording/start', { base_url: baseUrl })
+  startRecording(baseUrl, extra = {}) {
+    return api.post('/automation/recording/start', { base_url: baseUrl, ...extra })
+  },
+  relayoutRecordingPanel() {
+    return api.post('/automation/recording/panel/relayout')
+  },
+  updateRecordingStep(no, payload) {
+    return api.patch(`/automation/recording/steps/${no}`, payload)
+  },
+  reorderRecordingStep(no, position) {
+    return api.post(`/automation/recording/steps/${no}/order`, { position })
   },
   setRecordingPick(on) {
     return api.post('/automation/recording/pick', { on })

@@ -2,6 +2,7 @@ import unittest
 
 from app.services.recording import intent, ir
 from app.services.recording.locators import build_specs, rank, stale_check, status_of
+from app.services.recording.session import HUD_RECENT_STEPS, RecordingError, RecordingSession
 
 
 class LocatorRankingTest(unittest.TestCase):
@@ -112,6 +113,144 @@ class IntentTest(unittest.TestCase):
     def test_empty_description_rejected(self):
         with self.assertRaises(intent.IntentError):
             intent.parse_intent('   ', self.ALIASES, lambda system, prompt: '{}')
+
+
+class HudTest(unittest.TestCase):
+    """被录制页面里的浮层：数据裁剪与「撤销上一步」，不需要启动浏览器。"""
+
+    def _session(self):
+        return RecordingSession('http://example.test/')
+
+    @staticmethod
+    def _target(alias, status, desc='role=button[name="提交"]'):
+        snap = {'tag': 'button', 'name': alias, 'text': alias}
+        primary = {'kind': 'role', 'desc': desc, 'count': 1} if status != 'ambiguous' else None
+        return ir.make_target(snap, [], primary, status)
+
+    def test_payload_carries_recent_steps_and_ambiguous_count(self):
+        session = self._session()
+        session._steps = [
+            ir.make_step('click', no=1, target=self._target('提交', 'unique')),
+            ir.make_step('click', no=2, target=self._target('更多', 'ambiguous', desc='')),
+        ]
+        payload = session._hud_payload()
+        self.assertEqual(payload['total'], 2)
+        self.assertEqual(payload['ambiguous'], 1)
+        self.assertEqual(payload['steps'][-1]['no'], 2)
+        self.assertEqual(payload['steps'][-1]['locator'], '')
+        self.assertEqual(payload['steps'][0]['locator'], 'role=button[name="提交"]')
+
+    def test_payload_only_keeps_recent_steps(self):
+        session = self._session()
+        session._steps = [ir.make_step('click', no=i + 1, target=self._target('步骤', 'unique'))
+                          for i in range(HUD_RECENT_STEPS + 2)]
+        payload = session._hud_payload()
+        self.assertEqual(payload['total'], HUD_RECENT_STEPS + 2)
+        self.assertEqual(len(payload['steps']), HUD_RECENT_STEPS)
+        self.assertEqual(payload['steps'][-1]['no'], HUD_RECENT_STEPS + 2)
+
+    def test_payload_titles_by_step_type(self):
+        session = self._session()
+        session._steps = [ir.make_step('goto', no=1, url='http://example.test/login')]
+        item = session._hud_payload()['steps'][0]
+        self.assertEqual(item['title'], 'http://example.test/login')
+        self.assertEqual(item['status'], 'none')
+
+    def test_undo_drops_last_step(self):
+        session = self._session()
+        session._steps = [
+            ir.make_step('click', no=1, target=self._target('提交', 'unique')),
+            ir.make_step('fill', no=2, target=self._target('用户名', 'unique'), value='admin'),
+        ]
+        session._handle_hud_action('undo')
+        self.assertEqual([step['no'] for step in session._steps], [1])
+
+    def test_undo_drops_new_page_together_with_previous_step(self):
+        session = self._session()
+        session._steps = [
+            ir.make_step('click', no=1, target=self._target('提交', 'unique')),
+            ir.make_step('new_page', no=2, page_index=1),
+        ]
+        session._handle_hud_action('undo')
+        self.assertEqual(session._steps, [])
+
+    def test_unknown_action_is_ignored(self):
+        session = self._session()
+        session._steps = [ir.make_step('click', no=1, target=self._target('提交', 'unique'))]
+        session._handle_hud_action('clear')
+        self.assertEqual(len(session._steps), 1)
+
+
+class StepEditTest(unittest.TestCase):
+    """就地编辑值与拖拽排序（不需要浏览器）。"""
+
+    def _session(self):
+        session = RecordingSession('http://example.test/')
+        target = ir.make_target(
+            {'tag': 'input', 'name': '密码'}, [],
+            {'kind': 'role', 'desc': "getByRole('textbox', name='密码')", 'count': 1}, 'unique')
+        session._steps = [
+            ir.make_step('goto', no=1, url='http://example.test/login'),
+            ir.make_step('fill', no=2, target=target, value='Du1103159086'),
+            ir.make_step('click', no=3, target=target),
+        ]
+        return session
+
+    def test_update_fill_value(self):
+        session = self._session()
+        session.update_step(2, {'value': 'Du11031'})
+        self.assertEqual(session._steps[1]['value'], 'Du11031')
+
+    def test_update_is_limited_to_editable_fields(self):
+        session = self._session()
+        with self.assertRaises(RecordingError):
+            session.update_step(2, {'url': 'http://evil.test'})
+
+    def test_update_rejects_step_without_editable_fields(self):
+        session = self._session()
+        with self.assertRaises(RecordingError):
+            session.update_step(3, {'value': 'x'})
+
+    def test_update_goto_requires_http_url(self):
+        session = self._session()
+        with self.assertRaises(RecordingError):
+            session.update_step(1, {'url': 'javascript:alert(1)'})
+        session.update_step(1, {'url': 'https://example.test/home'})
+        self.assertEqual(session._steps[0]['url'], 'https://example.test/home')
+
+    def test_update_sleep_seconds(self):
+        session = RecordingSession('http://example.test/')
+        session._steps = [ir.make_step('sleep', no=1)]
+        session.update_step(1, {'seconds': 2.5})
+        self.assertEqual(session._steps[0]['intent']['seconds'], 2.5)
+        self.assertIn('2.5', session._steps[0]['text'])
+        with self.assertRaises(RecordingError):
+            session.update_step(1, {'seconds': 0})
+
+    def test_move_to_reorders_by_position(self):
+        session = self._session()
+        session.move_step_to(3, 0)
+        self.assertEqual([step['type'] for step in session._steps], ['click', 'goto', 'fill'])
+        self.assertEqual([step['no'] for step in session._steps], [1, 2, 3])
+
+    def test_move_keeps_click_and_new_page_together(self):
+        session = RecordingSession('http://example.test/')
+        session._steps = [
+            ir.make_step('click', no=1),
+            ir.make_step('new_page', no=2, page_index=1),
+            ir.make_step('fill', no=3, value='x'),
+        ]
+        session.move_step_to(1, 1)
+        self.assertEqual([step['type'] for step in session._steps], ['fill', 'click', 'new_page'])
+
+    def test_move_rejects_new_page_step(self):
+        session = RecordingSession('http://example.test/')
+        session._steps = [
+            ir.make_step('click', no=1),
+            ir.make_step('new_page', no=2, page_index=1),
+        ]
+        with self.assertRaises(RecordingError):
+            session.move_step_to(2, 0)
 
 
 if __name__ == '__main__':

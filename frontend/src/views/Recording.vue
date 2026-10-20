@@ -1,16 +1,55 @@
 <template>
-  <div class="recording-page">
-    <div class="page-header">
+  <div :class="['recording-page', { 'is-panel': panelMode, 'is-embed': embedMode, 'is-collapsed': panelCollapsed, 'is-resizing': resizing }]">
+    <!-- 嵌入模式：左 iframe 是被测系统（占用剩余全部宽度），右侧是可收起的编排面板 -->
+    <iframe v-if="embedMode" class="embed-frame" :src="targetUrl" title="被测系统"></iframe>
+
+    <button
+      v-if="embedMode && panelCollapsed"
+      type="button"
+      class="embed-rail"
+      title="展开编排面板"
+      @click="panelCollapsed = false"
+    >
+      <span class="rail-caret">‹</span>
+      <span class="rail-count">{{ steps.length }}</span>
+      <span :class="['rail-dot', { live: isRecording }]"></span>
+    </button>
+
+    <div v-if="embedMode && !panelCollapsed" class="embed-resizer" title="拖动调整面板宽度" @pointerdown="startResize"></div>
+
+    <div
+      v-show="!embedMode || !panelCollapsed"
+      class="page-col"
+      :class="{ 'is-panel': embedMode }"
+      :style="embedMode ? { width: panelWidth + 'px' } : null"
+    >
+      <!-- 面板窗口（录制时自动弹出的右侧编排栏）：紧凑标题条，把空间都留给步骤 -->
+      <div v-if="compactMode" class="panel-head">
+        <span :class="['panel-dot', session && session.status === 'recording' ? 'is-live' : '']"></span>
+        <span class="panel-title">{{ panelTitle }}</span>
+        <span v-if="steps.length" class="panel-count">{{ steps.length }} 步</span>
+        <span v-if="blockers.length" class="panel-warn">{{ blockers.length }} 处不唯一</span>
+        <div class="panel-actions">
+          <el-button v-if="session?.panel" text size="small" :icon="Connection" @click="relayoutPanel">并排</el-button>
+          <el-button text size="small" @click="configExpanded = !configExpanded">{{ configExpanded ? '收起配置' : '配置' }}</el-button>
+          <button v-if="embedMode" type="button" class="panel-collapse" title="收起面板，把宽度还给页面" @click="panelCollapsed = true">
+            <span class="collapse-arrow">›</span>
+          </button>
+        </div>
+      </div>
+
+      <div v-if="!compactMode" class="page-header">
       <div>
         <div class="eyebrow">RECORDING · CODE GENERATOR</div>
         <h1>自动化工具</h1>
         <p>在真实浏览器里操作，记录步骤与唯一定位。插入断言或等待后，按目标工作区的框架生成脚本并写入指定文件；写入后可以预览，再提交或撤销。</p>
+        <p class="page-hint">录制时会自动打开一个并排的编排面板：左侧操作真实页面，右侧实时显示步骤与定位，可以直接插入断言、删除或排序。</p>
       </div>
       <el-button @click="$router.push('/')">返回首页</el-button>
     </div>
 
     <!-- 目标与配置 -->
-    <el-card class="panel-card config-card">
+    <el-card v-show="!compactMode || configExpanded" class="panel-card config-card">
       <template #header>
         <div class="section-header">
           <span class="card-title">目标与配置</span>
@@ -143,28 +182,75 @@
           :image-size="90"
         />
 
-        <ol v-if="steps.length" class="timeline">
+        <ol v-if="steps.length" ref="timelineEl" class="timeline">
           <li
             v-for="step in steps"
             :key="step.no"
             :class="['step', { 'is-blocked': effectiveStatus(step) === 'ambiguous' }]"
           >
-            <div class="step-no">{{ step.no }}</div>
+            <div class="step-no" :title="canEdit ? '按住拖动可排序' : ''">{{ step.no }}</div>
             <div class="step-body">
-              <div class="step-main">
-                <span :class="['kind-tag', 'kind-' + stepTone(step.type)]">{{ stepKindLabel(step.type) }}</span>
-                <span class="step-text">{{ stepDescription(step) }}</span>
+              <!-- 就地编辑：只改值，不动定位 -->
+              <div v-if="editing && editing.no === step.no" class="step-editor">
+                <el-input
+                  v-if="step.type === 'fill'"
+                  v-model="editing.value"
+                  size="small"
+                  placeholder="输入值"
+                  @keyup.enter="saveEdit"
+                  @keyup.esc="cancelEdit"
+                />
+                <template v-else-if="step.type === 'select'">
+                  <el-input v-model="editing.value" size="small" placeholder="选项值（value）" @keyup.enter="saveEdit" />
+                  <el-input v-model="editing.label" size="small" placeholder="选项文本（可选）" @keyup.enter="saveEdit" />
+                </template>
+                <el-input
+                  v-else-if="step.type === 'goto'"
+                  v-model="editing.url"
+                  size="small"
+                  placeholder="http(s)://..."
+                  @keyup.enter="saveEdit"
+                  @keyup.esc="cancelEdit"
+                />
+                <el-input-number
+                  v-else-if="step.type === 'sleep'"
+                  v-model="editing.seconds"
+                  :min="0.1"
+                  :max="600"
+                  :step="0.5"
+                  :precision="1"
+                  size="small"
+                  controls-position="right"
+                />
+                <div class="step-editor-actions">
+                  <el-button size="small" type="primary" :loading="editing.saving" @click="saveEdit">保存</el-button>
+                  <el-button size="small" @click="cancelEdit">取消</el-button>
+                </div>
               </div>
-              <div v-if="step.text" class="step-note">{{ step.text }}</div>
-              <div v-if="step.target" class="step-locator">
-                <span class="step-alias">{{ step.target.alias || '未命名元素' }}</span>
-                <code class="locator-code">{{ locatorText(step.target) }}</code>
-                <el-tag size="small" :type="statusTone(effectiveStatus(step))" effect="light">
-                  {{ statusLabel(effectiveStatus(step)) }}
-                </el-tag>
-              </div>
+              <template v-else>
+                <div class="step-main">
+                  <span :class="['kind-tag', 'kind-' + stepTone(step.type)]">{{ stepKindLabel(step.type) }}</span>
+                  <span class="step-text">{{ stepDescription(step) }}</span>
+                </div>
+                <div v-if="step.text" class="step-note">{{ step.text }}</div>
+                <div v-if="step.target" class="step-locator">
+                  <span class="step-alias">{{ step.target.alias || '未命名元素' }}</span>
+                  <code class="locator-code">{{ locatorText(step.target) }}</code>
+                  <el-tag size="small" :type="statusTone(effectiveStatus(step))" effect="light">
+                    {{ statusLabel(effectiveStatus(step)) }}
+                  </el-tag>
+                </div>
+              </template>
             </div>
             <div class="step-actions">
+              <el-button
+                v-if="editableFields(step).length"
+                text
+                :icon="EditPen"
+                :disabled="!canEdit"
+                title="编辑这一步的值"
+                @click="startEdit(step)"
+              />
               <el-button text :icon="ArrowUp" :disabled="!canEdit" title="上移" @click="moveStep(step.no, 'up')" />
               <el-button text :icon="ArrowDown" :disabled="!canEdit" title="下移" @click="moveStep(step.no, 'down')" />
               <el-button
@@ -260,8 +346,8 @@
         </div>
       </el-card>
 
-      <!-- 生成 -->
-      <el-card class="panel-card generate-card">
+      <!-- 生成：面板模式下录制中就藏起来，停止后再出现（面板空间留给步骤） -->
+      <el-card v-if="!compactMode || isStopped" class="panel-card generate-card">
         <template #header>
           <div class="section-header">
             <span class="card-title">生成</span>
@@ -316,8 +402,8 @@
       </el-card>
     </div>
 
-    <!-- 生成记录 -->
-    <el-card class="panel-card records-card">
+    <!-- 生成记录：面板模式不显示，完整记录回主页面看 -->
+    <el-card v-if="!compactMode" class="panel-card records-card">
       <template #header>
         <div class="section-header">
           <span class="card-title">生成记录</span>
@@ -411,23 +497,26 @@
       </div>
     </el-card>
 
-    <PathPickerDialog
-      v-model="picker.visible"
-      :mode="picker.mode"
-      :workspace="config.workspace.trim()"
-      :framework="config.framework"
-      :start-path="picker.start"
-      :default-name="suggestedFileName"
-      @loaded="onRootLoaded"
-      @select="onPathSelected"
-    />
+      <PathPickerDialog
+        v-model="picker.visible"
+        :mode="picker.mode"
+        :workspace="config.workspace.trim()"
+        :framework="config.framework"
+        :start-path="picker.start"
+        :default-name="suggestedFileName"
+        @loaded="onRootLoaded"
+        @select="onPathSelected"
+      />
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowUp, ArrowDown, Delete, Close, Document, FolderOpened } from '@element-plus/icons-vue'
+import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, FolderOpened } from '@element-plus/icons-vue'
+import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
 
@@ -462,9 +551,95 @@ const RF_ORDER = ['rf_id', 'rf_name', 'rf_xpath', 'rf_css']
 const FRAGILE_KINDS = ['css', 'rf_css']
 
 const config = reactive(loadConfig())
+// 两种「围绕录制」的布局：
+// - panel=1：split 模式下的独立面板窗口，后端用 CDP 和被测页面左右并排；
+// - embed=1：嵌入模式，本页就是唯一窗口，左边 iframe 加载 target，右边是编排面板。
+const route = useRoute()
+const panelMode = computed(() => route.query.panel === '1')
+const embedMode = computed(() => route.query.embed === '1')
+const compactMode = computed(() => panelMode.value || embedMode.value)
+const targetUrl = computed(() => (typeof route.query.target === 'string' ? route.query.target : ''))
+const configExpanded = ref(false)
+const panelTitle = computed(() => {
+  if (!compactMode.value) return ''
+  const base = STATE_LABELS[session.value?.status || 'idle'] || '录制'
+  return targetUrl.value ? `${base} · ${shortHost(targetUrl.value)}` : base
+})
 const modelOptions = ref([])
 const detect = ref(null)
 const detecting = ref(false)
+
+// 面板宽度可拖拽调整；收起后 left iframe 吃掉几乎整个窗口。
+const PANEL_WIDTH_KEY = 'autocase.recording.panelWidth'
+const panelCollapsed = ref(false)
+const panelWidth = ref(loadPanelWidth())
+const resizing = ref(false)
+
+function loadPanelWidth() {
+  try {
+    const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY))
+    if (saved >= 340 && saved <= 900) return saved
+  } catch {
+    // 隐私模式下读不到，用默认值。
+  }
+  return 600
+}
+
+function startResize(event) {
+  event.preventDefault()
+  const handle = event.currentTarget
+  // 指针一旦移到 iframe 上方，事件就进了 iframe 的文档，父窗口收不到。
+  // 所以用 pointer capture 把 pointermove 固定在手柄上，并在拖动期间禁用 iframe 的命中测试。
+  try {
+    handle.setPointerCapture(event.pointerId)
+  } catch {
+    // 拿不到 capture 时靠下面的 pointer-events 兜底
+  }
+  resizing.value = true
+  const move = (e) => {
+    // 面板最宽 900，同时保证被测页面至少还剩 900（页面优先，面板让位）。
+    const room = Math.max(340, Math.min(900, window.innerWidth - 900))
+    panelWidth.value = Math.min(Math.max(window.innerWidth - e.clientX, 340), room)
+  }
+  const stop = () => {
+    resizing.value = false
+    handle.removeEventListener('pointermove', move)
+    handle.removeEventListener('pointerup', stop)
+    handle.removeEventListener('pointercancel', stop)
+    try {
+      localStorage.setItem(PANEL_WIDTH_KEY, String(panelWidth.value))
+    } catch {
+      // 忽略持久化失败
+    }
+  }
+  handle.addEventListener('pointermove', move)
+  handle.addEventListener('pointerup', stop)
+  handle.addEventListener('pointercancel', stop)
+}
+
+function shortHost(url) {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
+}
+
+function applyPanelQuery() {
+  if (!compactMode.value) return
+  const query = route.query
+  // 外壳/面板可能是新的浏览器 profile，localStorage 为空，只能靠后端带过来的参数预填。
+  if (typeof query.model === 'string' && query.model) config.model = query.model
+  if (typeof query.workspace === 'string' && query.workspace) config.workspace = query.workspace
+  if (typeof query.framework === 'string' && FRAMEWORKS.some(item => item.value === query.framework)) {
+    config.framework = query.framework
+  }
+  const startUrl = typeof query.base_url === 'string' ? query.base_url : ''
+  const target = typeof query.target === 'string' ? query.target : ''
+  const filled = startUrl || target
+  if (filled) config.baseUrl = filled
+}
+applyPanelQuery()
 
 const session = ref(null)
 const starting = ref(false)
@@ -612,6 +787,8 @@ function applySession(data) {
     draft.value.picking = false
     if (data.pick) togglePick(false, true)
   }
+  // 列表结构变了，拖拽实例要跟着（重）建。
+  nextTick(initSortable)
 }
 
 async function loadCurrent() {
@@ -634,7 +811,8 @@ function stopPolling() {
 }
 
 watch(() => session.value?.status, (status) => {
-  if (status === 'recording') startPolling()
+  // starting 也要轮询：并排面板窗口是在录制启动过程中打开的，抓不到主页面那次状态跳变。
+  if (status === 'recording' || status === 'starting') startPolling()
   else stopPolling()
 })
 
@@ -648,7 +826,11 @@ async function startRecording() {
   genResult.value = null
   genError.value = null
   try {
-    const { data } = await api.startRecording(url)
+    const { data } = await api.startRecording(url, {
+      model: config.model,
+      workspace: config.workspace.trim(),
+      framework: config.framework
+    })
     draft.value = null
     applySession(data)
   } catch (error) {
@@ -716,6 +898,99 @@ async function moveStep(no, direction) {
   }
 }
 
+// ---- 就地编辑（只改值，不动定位）----
+const editing = ref(null)
+const EDITABLE = { fill: ['value'], select: ['value', 'label'], goto: ['url'], sleep: ['seconds'] }
+
+function editableFields(step) {
+  if (!canEdit.value) return []
+  return EDITABLE[step.type] || []
+}
+
+function startEdit(step) {
+  editing.value = {
+    no: step.no,
+    type: step.type,
+    saving: false,
+    value: step.value ?? '',
+    label: step.label ?? '',
+    url: step.url ?? '',
+    seconds: step.intent && step.intent.seconds != null ? Number(step.intent.seconds) : 1
+  }
+}
+
+function cancelEdit() {
+  editing.value = null
+}
+
+async function saveEdit() {
+  const current = editing.value
+  if (!current || current.saving) return
+  const payload = {}
+  if (current.type === 'fill') payload.value = current.value
+  else if (current.type === 'select') {
+    payload.value = current.value
+    payload.label = current.label
+  } else if (current.type === 'goto') payload.url = (current.url || '').trim()
+  else if (current.type === 'sleep') payload.seconds = current.seconds
+  else {
+    editing.value = null
+    return
+  }
+  current.saving = true
+  try {
+    const { data } = await api.updateRecordingStep(current.no, payload)
+    editing.value = null
+    applySession(data)
+  } catch (error) {
+    current.saving = false
+    ElMessage.error(errorText(error))
+  }
+}
+
+// ---- 拖拽排序（sortablejs）：拖动步骤编号 ----
+const timelineEl = ref(null)
+let sortable = null
+
+function initSortable() {
+  if (!timelineEl.value) return
+  // `.timeline` 是 v-if 渲染的，元素变化时重建实例。
+  if (sortable && sortable.el === timelineEl.value) {
+    sortable.option('disabled', !canEdit.value)
+    return
+  }
+  if (sortable) {
+    sortable.destroy()
+    sortable = null
+  }
+  sortable = Sortable.create(timelineEl.value, {
+    animation: 150,
+    handle: '.step-no',
+    ghostClass: 'step-ghost',
+    chosenClass: 'step-chosen',
+    disabled: !canEdit.value,
+    onEnd: async (evt) => {
+      const { oldIndex, newIndex, from, item } = evt
+      if (oldIndex === newIndex || oldIndex == null || newIndex == null) return
+      // 先把 DOM 还原：顺序以后端返回的数据为准，避免 Vue 的 keyed diff 和 sortable 打架。
+      // 注意 item 已经被 sortable 移动过，要先把它排除再取 oldIndex 位置，否则会错一位。
+      const siblings = Array.from(from.children).filter((el) => el !== item)
+      from.insertBefore(item, siblings[oldIndex] || null)
+      // sortable 加的临时类不会自动清掉，残留会让某一行一直带阴影。
+      from.querySelectorAll('.step-chosen, .step-ghost, .step-drag')
+        .forEach((el) => el.classList.remove('step-chosen', 'step-ghost', 'step-drag'))
+      const moved = steps.value[oldIndex]
+      if (!moved) return
+      try {
+        const { data } = await api.reorderRecordingStep(moved.no, newIndex)
+        applySession(data)
+      } catch (error) {
+        ElMessage.warning(errorText(error))
+      }
+    }
+  })
+}
+
 // ---- 断言 / 等待 模板 ----
 function draftKindTypes(kind) {
   if (kind === 'wait') return WAIT_TYPES
@@ -741,6 +1016,16 @@ function openDraft(kind) {
     picking: false,
     pickBaseline: 0
   }
+  // 面板窄栏里草稿在列表下方，打开后滚到底，避免点了「添加断言」却看不到表单。
+  nextTick(() => {
+    const body = document.querySelector('.steps-card .el-card__body')
+    if (body && body.scrollHeight > body.clientHeight) {
+      body.scrollTop = body.scrollHeight
+      return
+    }
+    const card = document.querySelector('.draft-card')
+    if (card && card.scrollIntoView) card.scrollIntoView({ block: 'nearest' })
+  })
 }
 
 function closeDraft() {
@@ -1024,9 +1309,30 @@ function errorText(error) {
   return (error && error.message) || '操作失败'
 }
 
+// 用户把两个窗口挪乱后，点「并排」重新摆一次。
+async function relayoutPanel() {
+  try {
+    const { data } = await api.relayoutRecordingPanel()
+    if (data.laid_out) ElMessage.success('已重新并排')
+    else ElMessage.warning('无法调整窗口位置（可能已被关闭或系统拒绝）')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
 // ---- 生命周期 ----
+// 窗口变窄（多屏切换、退出全屏）时收一下面板，别把被测页面挤没。
+function clampPanelWidth() {
+  if (!embedMode.value) return
+  const room = Math.max(340, Math.min(900, window.innerWidth - 900))
+  if (panelWidth.value > room) panelWidth.value = room
+}
+
 onMounted(async () => {
   loadCurrent()
+  clampPanelWidth()
+  nextTick(initSortable)
+  window.addEventListener('resize', clampPanelWidth)
   try {
     const { data } = await api.getAutomationModels()
     modelOptions.value = data.models || []
@@ -1041,18 +1347,88 @@ onMounted(async () => {
 // 页面被 keep-alive 缓存：回到页面时刷新会话状态，离开时停止轮询。
 onActivated(() => loadCurrent())
 onDeactivated(() => stopPolling())
-onUnmounted(() => stopPolling())
+onUnmounted(() => {
+  stopPolling()
+  window.removeEventListener('resize', clampPanelWidth)
+  if (sortable) {
+    sortable.destroy()
+    sortable = null
+  }
+})
 </script>
 
 <style scoped>
 .recording-page { max-width:1440px; margin:0 auto; animation: page-enter .32s ease both; }
 @keyframes page-enter { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
 
+/* ===== 嵌入模式：单窗口，左边被测系统、右边可收起的编排面板 ===== */
+.recording-page.is-embed {
+  max-width:none; padding:0; height:100vh; display:flex; flex-direction:row;
+  animation:none; background:#eef1f5; overflow:hidden;
+}
+.embed-frame { flex:1; min-width:0; height:100vh; border:0; background:#fff; display:block; }
+.is-embed .page-col { flex:none; height:100vh; overflow:hidden; background:#f5f7fa; border-left:1px solid #e2e6ec; }
+.is-embed .page-col.is-panel { display:flex; flex-direction:column; gap:10px; padding:10px 12px 12px; box-sizing:border-box; }
+/* 拖拽手柄要 position: relative，否则 z-index 不生效、会被 iframe 盖住点不到 */
+.embed-resizer { flex:none; position:relative; width:6px; margin-left:-4px; z-index:6; cursor:col-resize; }
+.embed-resizer::after { content:''; position:absolute; inset:0 2px; border-radius:2px; background:transparent; transition:background .15s ease; }
+.embed-resizer:hover::after { background:#9fc0ee; }
+/* 拖动期间让 iframe 不参与命中测试，避免 pointermove 被 iframe 吃掉 */
+.is-embed.is-resizing .embed-frame { pointer-events:none; }
+.is-embed.is-resizing .embed-resizer { cursor:col-resize; }
+.embed-rail {
+  flex:none; width:36px; height:100vh; border:0; border-left:1px solid #e2e6ec; background:#fff;
+  display:flex; flex-direction:column; align-items:center; gap:12px; padding:14px 0; cursor:pointer; color:#6e6e73;
+}
+.embed-rail:hover { background:#f4f8ff; color:#0071e3; }
+.rail-caret { font-size:16px; line-height:1; }
+.rail-count { font-size:11.5px; font-weight:700; font-variant-numeric:tabular-nums; color:#8a8f99; }
+.rail-dot { width:7px; height:7px; border-radius:50%; background:#c7ccd6; margin-top:auto; }
+.rail-dot.live { background:#34c759; box-shadow:0 0 0 3px rgba(52,199,89,.18); }
+.panel-collapse { border:0; background:transparent; color:#8a8f99; cursor:pointer; padding:2px 4px; border-radius:6px; line-height:1; }
+.panel-collapse:hover { background:#eef1f5; color:#0071e3; }
+.collapse-arrow { font-size:16px; }
+
+/* 面板模式：录制时并排的右侧编排栏 =====
+   只有一列，步骤列表吃掉剩余高度；配置默认收起，靠顶部「配置」按钮展开。 */
+.recording-page.is-panel {
+  max-width:none; height:100vh; padding:10px 12px 12px; display:flex; flex-direction:column; gap:10px;
+  animation:none; box-sizing:border-box;
+}
+.panel-head { flex:none; display:flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid #e6e9ef; border-radius:10px; background:#fff; box-shadow:0 1px 2px rgba(16,24,40,.05); }
+.panel-dot { width:8px; height:8px; border-radius:50%; background:#c7ccd6; flex:none; }
+.panel-dot.is-live { background:#34c759; box-shadow:0 0 0 3px rgba(52,199,89,.18); animation:panel-pulse 1.8s ease-in-out infinite; }
+@keyframes panel-pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
+.panel-title { font-size:13px; font-weight:700; color:#1d1d1f; }
+.panel-count { font-size:11.5px; color:#6e6e73; background:#f2f4f7; border-radius:999px; padding:1px 8px; }
+.panel-warn { font-size:11.5px; color:#b45309; background:#fff4e6; border-radius:999px; padding:1px 8px; }
+.panel-actions { margin-left:auto; display:flex; gap:2px; }
+.is-panel .main-layout { display:flex; flex-direction:column; gap:10px; flex:1; min-height:0; }
+.is-panel .panel-card { margin-bottom:0; border-radius:10px; }
+.is-panel .panel-card :deep(.el-card__header) { padding:10px 14px; }
+.is-panel .panel-card :deep(.el-card__body) { padding:12px; }
+.is-panel .steps-card { flex:1; min-height:0; display:flex; flex-direction:column; }
+/* 整个卡片内容区作为唯一的滚动容器：列表和草稿一起滚，工具栏吸顶。
+   之前列表自己滚、草稿另算，窄栏里草稿会被卡片裁掉。 */
+.is-panel .steps-card :deep(.el-card__body) { flex:1; min-height:0; display:flex; flex-direction:column; overflow-y:auto; }
+.is-panel .generate-card { flex:none; }
+.is-panel .timeline { flex:none; overflow:visible; margin-top:12px; padding-right:2px; }
+/* 顶栏已经有状态和步数，卡片头里的重复信息收起来 */
+.is-panel .steps-card .state-pill { display:none; }
+/* 工具栏在窄栏里收小一号，尽量一行放完；滚动时吸顶 */
+.is-panel .toolbar {
+  flex-wrap:wrap; gap:6px; position:sticky; top:-12px; z-index:2;
+  background:#fff; padding:12px 0 8px; margin:-12px 0 0;
+}
+.is-panel .toolbar :deep(.el-button) { padding:6px 10px; font-size:12.5px; height:30px; }
+.is-panel .config-card :deep(.el-card__body) { padding:14px; }
+
 /* 页头：与「自动化脚本」页保持一致 */
 .page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:22px; }
 .eyebrow { color:#0071e3; font-size:11px; font-weight:700; letter-spacing:1.4px; margin-bottom:8px; text-transform:uppercase; }
 h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.3px; }
 .page-header p { margin:8px 0 0; color:#6e6e73; font-size:14px; line-height:1.55; max-width:760px; }
+.page-header .page-hint { margin-top:6px; color:#8a8f99; font-size:12.5px; }
 
 /* 卡片 */
 .panel-card { border:1px solid #ebedf0; border-radius:14px; overflow:hidden; box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 30px rgba(16,24,40,.05); margin-bottom:20px; }
@@ -1122,6 +1498,17 @@ h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.
 .step-alias { color:#303133; font-size:12.5px; font-weight:600; }
 .locator-code { color:#6e6e73; font-size:11.5px; background:#f7f9fc; border:1px solid #eef0f4; border-radius:6px; padding:2px 6px; word-break:break-all; }
 .step-actions { display:flex; flex-direction:row; align-items:center; gap:2px; flex-shrink:0; }
+
+/* 拖拽排序（sortablejs）：按住编号拖动 */
+.step-no { cursor:grab; }
+.step-no:active { cursor:grabbing; }
+.step-ghost { opacity:.45; background:#f5f9ff; border-style:dashed; border-color:#9fc0ee; }
+.step-chosen { box-shadow:0 8px 22px rgba(16,24,40,.12); }
+.step-drag { opacity:.95; }
+
+/* 就地编辑 */
+.step-editor { display:flex; flex-direction:column; gap:8px; }
+.step-editor-actions { display:flex; justify-content:flex-end; gap:8px; }
 .kind-tag { flex-shrink:0; display:inline-flex; align-items:center; height:22px; padding:0 9px; border-radius:6px; font-size:12px; font-weight:700; }
 .kind-primary { background:#eaf3ff; color:#0071e3; }
 .kind-success { background:#eaf7ef; color:#1e7a46; }

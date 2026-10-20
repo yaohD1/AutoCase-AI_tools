@@ -3,7 +3,7 @@
 录制会话全局只有一个，不绑定项目；项目、工作区与目标路径在「生成」时才确定。
 """
 import os
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -41,13 +41,67 @@ def start_recording():
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return _error('base_url 必须是 http 或 https 地址', 400)
     headless = bool(current_app.config.get('RECORDING_HEADLESS', os.environ.get('RECORDING_HEADLESS') == '1'))
+    layout = (current_app.config.get('RECORDING_LAYOUT') or 'embed').strip().lower()
     try:
-        session = RecordingSession.start_new(base_url, headless=headless)
+        session = RecordingSession.start_new(
+            base_url,
+            headless=headless,
+            embed_url=_embed_url(body, base_url) if layout == 'embed' else None,
+            panel_url=_panel_url(body, base_url) if layout == 'split' else None,
+            panel_ratio=current_app.config.get('RECORDING_PANEL_RATIO', 0.45),
+            hud_panel=bool(current_app.config.get('RECORDING_HUD_PANEL', False)),
+        )
     except RecordingBusy as exc:
         return _error(str(exc), 409)
     except RecordingError as exc:
         return _error('无法启动录制：%s' % exc, 500)
     return jsonify(session.snapshot()), 201
+
+
+def _frontend_url(params):
+    """拼前端录制页地址；地址本身可能已经带 query。"""
+    base = (current_app.config.get('RECORDING_PANEL_URL') or '').strip()
+    if not base:
+        return None
+    separator = '&' if '?' in base else '?'
+    return base + separator + urlencode(params)
+
+
+def _prefill(body):
+    """把用户当前选的模型/工作区/框架带给前端，独立 profile 里 localStorage 是空的。"""
+    values = {}
+    for key in ('model', 'workspace', 'framework'):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            values[key] = value.strip()
+    return values
+
+
+def _embed_url(body, base_url):
+    """嵌入模式：外壳页把被测系统放进 iframe，左边页面、右边编排。"""
+    params = {'embed': '1', 'target': base_url}
+    params.update(_prefill(body))
+    return _frontend_url(params)
+
+
+def _panel_url(body, base_url):
+    """并排模式：额外开一个面板窗口。"""
+    params = {'panel': '1', 'base_url': base_url}
+    params.update(_prefill(body))
+    return _frontend_url(params)
+
+
+@recording_bp.route('/automation/recording/panel/relayout', methods=['POST'])
+def relayout_panel():
+    """把被测浏览器与编排面板重新并排（用户挪动窗口后用）。"""
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    try:
+        result = session.relayout()
+    except RecordingError as exc:
+        return _error(str(exc), 409)
+    return jsonify({'laid_out': bool(result.get('laid_out'))}), 200
 
 
 @recording_bp.route('/automation/recording/current', methods=['GET'])
@@ -91,6 +145,22 @@ def cancel_recording():
 @recording_bp.route('/automation/recording/steps/<int:no>', methods=['DELETE'])
 def delete_recording_step(no):
     return _mutate(lambda session: session.remove_step(no))
+
+
+@recording_bp.route('/automation/recording/steps/<int:no>', methods=['PATCH'])
+def update_recording_step(no):
+    """就地修改一步的值（输入值 / 选项 / 地址 / 等待秒数），不动定位。"""
+    body = request.get_json(silent=True) or {}
+    return _mutate(lambda session: session.update_step(no, body))
+
+
+@recording_bp.route('/automation/recording/steps/<int:no>/order', methods=['POST'])
+def reorder_recording_step(no):
+    """拖拽排序：position 是「移除自身之后」的 0 基下标（与前端拖拽库一致）。"""
+    body = request.get_json(silent=True) or {}
+    if 'position' not in body:
+        return _error('缺少 position', 400)
+    return _mutate(lambda session: session.move_step_to(no, body.get('position')))
 
 
 @recording_bp.route('/automation/recording/steps', methods=['POST'])

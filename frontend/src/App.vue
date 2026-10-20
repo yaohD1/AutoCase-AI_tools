@@ -1,7 +1,7 @@
 <template>
-  <div id="app">
+  <div id="app" :class="{ 'is-panel-mode': panelMode }">
     <el-container>
-      <el-header>
+      <el-header v-if="!panelMode">
         <div class="header-content">
           <div class="brand" @click="$router.push('/')">
             <svg class="brand-logo" viewBox="0 0 32 32" width="32" height="32">
@@ -30,7 +30,18 @@
 </template>
 
 <script setup>
+import { computed, watchEffect } from 'vue'
+import { useRoute } from 'vue-router'
 import { Setting } from '@element-plus/icons-vue'
+
+// 录制编排面板（?panel=1）与嵌入外壳（?embed=1）都是全屏工作区：去掉顶部导航和页面留白。
+const route = useRoute()
+const panelMode = computed(() => route.query.panel === '1' || route.query.embed === '1')
+
+// body 默认有 8px margin，全屏时会造成 16px 溢出并出现滚动条（右侧多一条空白）。
+watchEffect(() => {
+  document.body.classList.toggle('immersive', panelMode.value)
+})
 </script>
 
 <style>
@@ -109,6 +120,17 @@ import { Setting } from '@element-plus/icons-vue'
   padding: 36px 32px;
   min-height: calc(100vh - 72px);
 }
+
+/* 编排面板窗口：无顶部导航、无留白、高度锁死一屏 */
+#app.is-panel-mode .el-main {
+  padding: 0;
+  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 全屏工作区：body 默认 8px margin 会造成 16px 溢出（右侧多一条空白 + 滚动条） */
+body.immersive { margin: 0; overflow: hidden; }
 
 /* ========== 全局 Element Plus 组件样式统一 ========== */
 

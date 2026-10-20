@@ -46,6 +46,22 @@
 - 自动化脚本：输入自然语言需求 → Python 按顺序驱动三个 OpenCode 会话：planner 探索和规划（校验 Seed 行和用例标题）→ generator 生成 spec → healer 执行测试并修复 → 写入服务端 Git 工作区。阶段间的文件衔接和占位符替换由 `opencode_runner.py` 完成，不再有 orchestrator agent。
 - 图片审批：`TestCase.image_id/image_source` 和 `PendingModule.image_id` 负责原型图关联；“附带原图”只决定是否把图片送给 AI，不应影响审批页展示。
 
+## 录制（自动化工具）
+
+- 入口 `frontend/src/views/Recording.vue`（`/recording`），接口 `backend/app/routes/recording.py`，会话 `backend/app/services/recording/session.py`。
+- 默认 `RECORDING_LAYOUT=embed`：录制浏览器只开**一个窗口**并最大化，主页面是前端外壳页 `?embed=1&target=<被测地址>`，左边 iframe 是被测系统（占满剩余宽度），右边是可收起/可拖拽的编排面板。外壳页是 AutoCase 自己，靠 init script 传入 `__AUTOCASE_SKIP_ORIGIN` 让 recorder 跳过（否则点面板会被录成步骤）。
+- `RECORDING_LAYOUT=split` 是兜底：独立 context 开面板窗口，用 CDP `Browser.setWindowBounds` 与被测页面按 `RECORDING_PANEL_RATIO` 左右并排；面板窗口不注入 recorder、不记为 `new_page`。
+- 嵌入模式下「被测页面」的判定是 `_is_app_frame`：按 `base_url` 的 origin 过滤，外壳页（AutoCase 前端）会被排除，`target=_blank` 打开的新标签页仍算应用页面。`goto` / `new_page` 步骤都依赖它。
+- 拾取模式（`_apply_pick`）要遍历 `page.frames`——嵌入模式下被测页面在 iframe 里，只对主 frame 执行会失效。
+- 面板宽度由前端拖拽决定（localStorage `autocase.recording.panelWidth`），收起后 iframe 占约 97%。拖拽必须 `setPointerCapture` + 拖动期间禁用 iframe 命中测试，否则 pointermove 会被 iframe 吞掉。
+- 被录制页面内的悬浮面板默认关闭（`RECORDING_HUD_PANEL=0`），只保留操作点即时徽标。HUD 在 closed shadow root 里：open 形态会被 Playwright 的 text 引擎穿透，把面板文字算成同名候选。
+- 目标站若禁止 iframe（`X-Frame-Options` / CSP `frame-ancestors`），可先用 `page.route` 拦 document 响应改 header；仍不行就切 `RECORDING_LAYOUT=split`。
+
+- 步骤可就地编辑（铅笔按钮）与拖拽排序（sortablejs，按住编号拖）：
+  - `PATCH /api/automation/recording/steps/<no>` 只允许改「值」：`fill→value`、`select→value/label`、`goto→url`、`sleep→seconds`；断言/等待/点击不可编辑（换元素走拾取）。白名单在 `session.EDITABLE_FIELDS`。
+  - `POST /api/automation/recording/steps/<no>/order` 收 `position`（**移除自身之后**的 0 基下标，与 sortable 的 `newIndex` 一致），「点击 → 标签页切换」成对移动。
+  - 前端 sortable 的 `onEnd` 必须先把 DOM 还原（`siblings = children.filter(el => el !== item)` 再按 `oldIndex` 插入，直接用 `children[oldIndex]` 会错一位），并清掉 `step-chosen/step-ghost/step-drag` 残留类。
+
 ## 自动化脚本约定
 
 - 当前只支持 Playwright + TypeScript；自动化入口直接调用 OpenCode，不依赖 AutoCase 已生成用例。
