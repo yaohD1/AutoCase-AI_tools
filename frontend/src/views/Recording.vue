@@ -24,9 +24,13 @@
           </el-form-item>
           <el-form-item label="工作区（Git 目录）">
             <el-input v-model="config.workspace" placeholder="点击「浏览」选择，或填写相对 AUTOMATION_WORKSPACE_ROOT 的路径" clearable>
+              <!-- 两个按钮要包一层：Element Plus 会给 append 里的 .el-button 加 margin:0 -20px，并排时会重叠 -->
               <template #append>
-                <el-button :icon="FolderOpened" @click="openWorkspacePicker">浏览</el-button>
-                <el-button :loading="detecting" @click="detectWorkspace">检测</el-button>
+                <div class="append-group">
+                  <el-button :icon="FolderOpened" @click="openWorkspacePicker">浏览</el-button>
+                  <span class="append-sep"></span>
+                  <el-button :loading="detecting" @click="detectWorkspace">检测</el-button>
+                </div>
               </template>
             </el-input>
             <div class="field-hint">
@@ -1059,6 +1063,17 @@ h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.
 .card-title::before { content:''; position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:15px; border-radius:3px; background:linear-gradient(180deg,#0a84ff,#0071e3); }
 .field-hint { color:#909399; font-size:12px; line-height:1.5; margin-top:6px; }
 .root-hint { margin-left:6px; color:#a8abb2; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11.5px; }
+
+/* 覆盖 Element Plus 对 append 内按钮的 margin:0 -20px + flex:1，否则并排按钮会叠在一起。
+   两个按钮固定同高、文字居中，中间加一条竖线，避免看起来像一个按钮。 */
+:deep(.el-input-group__append) { padding:0 6px; }
+:deep(.el-input-group__append) .append-group { display:flex; align-items:center; }
+:deep(.el-input-group__append) .append-group .el-button {
+  flex:0 0 auto; margin:0; height:26px; padding:0 8px; border-radius:6px;
+  font-weight:500; line-height:1;
+}
+:deep(.el-input-group__append) .append-group .el-button:hover { background:#eaf3ff; color:#0071e3; }
+.append-sep { flex:0 0 auto; width:1px; height:14px; margin:0 4px; background:#dfe3e9; }
 
 /* 配置 */
 .config-grid { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(280px,.9fr); gap:24px; }
