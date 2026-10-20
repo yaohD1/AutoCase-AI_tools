@@ -3,8 +3,10 @@ import json
 import hashlib
 import os
 import re
+import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import zipfile
@@ -19,6 +21,13 @@ import requests
 
 class WorkspaceBusyError(ValueError):
     pass
+
+
+# 一次性文本调用时关闭的内置工具，避免模型在解析意图时去读写文件。
+ASK_NO_TOOLS = {
+    'bash': False, 'edit': False, 'write': False, 'read': False, 'glob': False,
+    'grep': False, 'list': False, 'webfetch': False, 'task': False, 'todowrite': False,
+}
 
 
 class OpenCodeRunner:
@@ -1249,6 +1258,130 @@ class OpenCodeRunner:
                     failed.append(path)
         return {'mode': 'working_tree', 'deleted': deleted, 'restored': restored, 'skipped': skipped,
                 'failed': failed, 'drifted': drifted, 'revert_commit': None}
+
+    def ask_text(self, model, system, text, timeout=120):
+        """一次性、无工具的文本调用：临时 serve、一个会话、同步取回回复后立即结束。
+
+        用于意图解析这类不需要读写文件的短任务。工作目录是临时目录，不加载项目 agent，
+        但沿用项目的 OpenCode 配置，模型与 provider 的解析方式和正式运行一致。
+        """
+        model_ref = self._split_model(model)
+        if model_ref is None:
+            raise ValueError('模型格式应为 providerID/modelID')
+        config_path = self._config_path()
+        port = self._free_port()
+        base_url = f'http://{self._serve_host()}:{port}'
+        workdir = tempfile.mkdtemp(prefix='autocase-ask-')
+        process = None
+        try:
+            process = self._start_serve(Path(workdir), config_path, port)
+            self._wait_serve_healthy(base_url, process, 60)
+            created = requests.post(f'{base_url}/session', json={'title': 'AutoCase ask'}, timeout=30)
+            if created.status_code not in (200, 201):
+                raise RuntimeError(f'OpenCode 会话创建失败（{created.status_code}）')
+            session_id = (created.json() or {}).get('id')
+            if not session_id:
+                raise RuntimeError('OpenCode 没有返回会话 id')
+            body = {
+                'parts': [{'type': 'text', 'text': text}],
+                'system': system,
+                'tools': dict(ASK_NO_TOOLS),
+                'format': {'type': 'text'},
+                'model': {'providerID': model_ref['providerID'], 'modelID': model_ref['id']},
+            }
+            reply = requests.post(f'{base_url}/session/{session_id}/message', json=body, timeout=timeout)
+            if reply.status_code != 200:
+                raise RuntimeError(f'OpenCode 调用失败（{reply.status_code}）：{reply.text[:300]}')
+            payload = reply.json() or {}
+            error = (payload.get('info') or {}).get('error')
+            if error:
+                raise RuntimeError(f'OpenCode 返回错误：{str(error)[:300]}')
+            return ''.join(
+                part.get('text', '') for part in payload.get('parts', []) if part.get('type') == 'text'
+            ).strip()
+        except requests.RequestException as exc:
+            raise RuntimeError(f'OpenCode 请求失败：{exc}')
+        finally:
+            self._terminate_process(process)
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    def emit_recording(self, workspace, model, prompt, timeout=600):
+        """录制生成专用：在目标工作区内运行 recording-emitter，等它结束后返回最后的文本回复。
+
+        与 run() 不同，这里只有一个 agent、一个会话，不写 manifest，也不做 heal 记录。
+        serve 的工作目录就是目标工作区，agent 能读到项目里已有的文件与库。
+        """
+        model_ref = self._split_model(model)
+        if model_ref is None:
+            raise ValueError('模型格式应为 providerID/modelID')
+        config_path = self._config_path()
+        port = self._free_port()
+        base_url = f'http://{self._serve_host()}:{port}'
+        process = None
+        session_id = None
+        try:
+            process = self._start_serve(Path(workspace), config_path, port)
+            self._wait_serve_healthy(base_url, process, 60)
+            created = requests.post(
+                f'{base_url}/session',
+                json={'title': 'AutoCase recording emit', 'agent': 'recording-emitter', 'model': model_ref},
+                timeout=30,
+            )
+            if created.status_code not in (200, 201):
+                raise RuntimeError(f'OpenCode 会话创建失败（{created.status_code}）')
+            session_id = (created.json() or {}).get('id')
+            if not session_id:
+                raise RuntimeError('OpenCode 没有返回会话 id')
+            body = {
+                'parts': [{'type': 'text', 'text': prompt}],
+                'agent': 'recording-emitter',
+                'model': {'providerID': model_ref['providerID'], 'modelID': model_ref['id']},
+            }
+            sent = requests.post(f'{base_url}/session/{session_id}/prompt_async', json=body, timeout=60)
+            if sent.status_code not in (200, 202, 204):
+                raise RuntimeError(f'OpenCode 派发失败（{sent.status_code}）：{sent.text[:300]}')
+            deadline = time.monotonic() + timeout
+            # prompt_async 是异步派发：刚派发时状态可能还没变成 busy，不能把"没有 busy"当成"已结束"。
+            # 先等它进入 busy（与 run() 的 busy_deadline 一致），再等它离开 busy。
+            busy_deadline = time.monotonic() + 60
+            seen_busy = False
+            while True:
+                if process.poll() is not None:
+                    raise RuntimeError(f'OpenCode 服务提前退出（{process.returncode}）')
+                now = time.monotonic()
+                if now > deadline:
+                    raise RuntimeError(f'录制生成超过 {timeout} 秒仍未结束')
+                status = requests.get(f'{base_url}/session/status', timeout=10).json() or {}
+                busy = session_id in status
+                if busy:
+                    seen_busy = True
+                elif seen_busy:
+                    break
+                elif now > busy_deadline:
+                    raise RuntimeError('OpenCode 派发后 60 秒内没有开始处理')
+                time.sleep(1)
+            messages = requests.get(f'{base_url}/session/{session_id}/message', timeout=30).json() or []
+            return self._last_text(messages)
+        except requests.RequestException as exc:
+            raise RuntimeError(f'OpenCode 请求失败：{exc}')
+        finally:
+            if session_id and process is not None and process.poll() is None:
+                try:
+                    requests.post(f'{base_url}/session/{session_id}/abort', timeout=5)
+                except requests.RequestException:
+                    pass
+            self._terminate_process(process)
+
+    @staticmethod
+    def _last_text(messages):
+        for message in reversed(messages if isinstance(messages, list) else []):
+            info = message.get('info') or {}
+            if info.get('role') != 'assistant':
+                continue
+            text = ''.join(p.get('text', '') for p in message.get('parts', []) if p.get('type') == 'text').strip()
+            if text:
+                return text
+        return ''
 
     def run(self, workspace, manifest, generation_id, model=None, timeout=3600, event_callback=None, process_callback=None):
         active_run = self._register_active_run(generation_id)

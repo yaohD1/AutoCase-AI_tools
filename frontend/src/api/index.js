@@ -162,6 +162,62 @@ batchDeleteTestcases(ids) {
      return api.delete(`/knowledge/files/${id}`)
    },
 
+  // 自动化工具（录制生成，与「自动化脚本」的 generation 完全独立）
+  getRecordingCurrent() {
+    return api.get('/automation/recording/current')
+  },
+  startRecording(baseUrl) {
+    return api.post('/automation/recording/start', { base_url: baseUrl })
+  },
+  setRecordingPick(on) {
+    return api.post('/automation/recording/pick', { on })
+  },
+  stopRecording() {
+    return api.post('/automation/recording/stop')
+  },
+  cancelRecording() {
+    return api.post('/automation/recording/cancel')
+  },
+  deleteRecordingStep(no) {
+    return api.delete(`/automation/recording/steps/${no}`)
+  },
+  moveRecordingStep(no, direction) {
+    return api.post(`/automation/recording/steps/${no}/move`, { direction })
+  },
+  addRecordingStep(payload) {
+    return api.post('/automation/recording/steps', payload)
+  },
+  parseRecordingIntent(text, model) {
+    return api.post('/automation/recording/intent', { text, model }, { timeout: 180000 })
+  },
+  detectRecordingWorkspace(workspacePath, python) {
+    const params = { workspace_path: workspacePath }
+    if (python) params.python = python
+    return api.get('/automation/recording/detect', { params })
+  },
+  generateRecording(data) {
+    return api.post('/automation/recording/generate', data, { timeout: 1900000 })
+  },
+  listRecordingGenerations() {
+    return api.get('/automation/recording/generations')
+  },
+  getRecordingGeneration(id) {
+    return api.get(`/automation/recording/generations/${id}`)
+  },
+  commitRecordingGeneration(id, message) {
+    return api.post(`/automation/recording/generations/${id}/commit`, { message })
+  },
+  revertRecordingGeneration(id) {
+    return api.post(`/automation/recording/generations/${id}/revert`)
+  },
+  // 目录浏览（只读）：工作区路径相对 AUTOMATION_WORKSPACE_ROOT，目标文件路径相对工作区
+  browseAutomationDirs(path = '') {
+    return api.get('/automation/browse', { params: { path } })
+  },
+  browseAutomationFiles(workspace, path = '', framework = '') {
+    return api.get('/automation/browse/files', { params: { workspace, path, framework } })
+  },
+
   // 自动化脚本
   getAutomationConfig(projectId) {
     return api.get('/automation/config', { params: { project_id: projectId } })

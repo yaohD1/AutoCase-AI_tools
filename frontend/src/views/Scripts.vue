@@ -164,14 +164,25 @@
             </el-form-item>
           </div>
           <el-form-item label="服务端 Git 工作区" required>
-            <el-input v-model="form.workspace_path" placeholder="例如 project-a" />
-            <div class="field-hint">必须是后端服务器上、AUTOMATION_WORKSPACE_ROOT 下的 Git + Playwright 项目。</div>
+            <el-input v-model="form.workspace_path" placeholder="例如 project-a">
+              <template #append>
+                <el-button :icon="FolderOpened" @click="openWorkspacePicker">浏览</el-button>
+              </template>
+            </el-input>
+            <div class="field-hint">
+              必须是后端服务器上、AUTOMATION_WORKSPACE_ROOT 下的 Git + Playwright 项目。
+              <span v-if="workspaceRoot" class="root-hint">根目录：{{ workspaceRoot }}</span>
+            </div>
           </el-form-item>
           <el-form-item label="测试目录">
             <el-input v-model="form.specs_path" placeholder="tests" />
           </el-form-item>
           <el-form-item label="Seed 文件">
-            <el-input v-model="form.seed_file" placeholder="tests/seed.spec.ts" />
+            <el-input v-model="form.seed_file" placeholder="tests/seed.spec.ts">
+              <template #append>
+                <el-button :icon="Document" :disabled="!form.workspace_path" @click="openSeedPicker">浏览</el-button>
+              </template>
+            </el-input>
             <div class="field-hint">planner 探索页面时使用的种子测试，相对工作区路径，必须是 .spec.ts 文件。</div>
           </el-form-item>
           <div class="form-grid">
@@ -269,14 +280,27 @@
         <el-button v-if="result?.status === 'completed'" type="primary" @click="download(result)">下载 ZIP</el-button>
       </template>
     </el-dialog>
+
+    <PathPickerDialog
+      v-model="picker.visible"
+      :mode="picker.mode"
+      :workspace="(form.workspace_path || '').trim()"
+      framework="playwright-ts"
+      :start-path="picker.start"
+      default-name="seed"
+      @loaded="onRootLoaded"
+      @select="onPathSelected"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Document, FolderOpened } from '@element-plus/icons-vue'
 import api from '../api'
+import PathPickerDialog from '../components/PathPickerDialog.vue'
 
 const projects = ref([])
 const router = useRouter()
@@ -296,6 +320,67 @@ const emptyForm = () => ({
   max_heal_attempts: 3, overwrite_policy: 'reject', seed_file: 'tests/seed.spec.ts'
 })
 const form = ref(emptyForm())
+
+// 路径选择：浏览器拿不到本地绝对路径，由后端在 AUTOMATION_WORKSPACE_ROOT 内列目录，前端只填相对路径。
+const picker = reactive({ visible: false, mode: 'dir', start: '', target: 'workspace' })
+const workspaceRoot = ref('')
+
+function dirnameOf(path) {
+  const parts = String(path || '').trim().split('/')
+  parts.pop()
+  return parts.join('/')
+}
+
+function openWorkspacePicker() {
+  picker.mode = 'dir'
+  picker.target = 'workspace'
+  picker.start = dirnameOf(form.value.workspace_path)
+  picker.visible = true
+}
+
+function openSeedPicker() {
+  if (!(form.value.workspace_path || '').trim()) {
+    ElMessage.warning('请先选择工作区，再选择 Seed 文件')
+    return
+  }
+  picker.mode = 'file'
+  picker.target = 'seed'
+  picker.start = dirnameOf(form.value.seed_file)
+  picker.visible = true
+}
+
+function onRootLoaded({ root }) {
+  workspaceRoot.value = root || ''
+}
+
+function onPathSelected({ path, dirs = [], dirsOf = '' }) {
+  if (picker.target === 'workspace') {
+    form.value.workspace_path = path
+    const seed = (form.value.seed_file || '').trim()
+    // 只在用户没动过 Seed（还是默认值）时才改写，避免覆盖手填的内容。
+    if (!seed || seed === DEFAULT_SEED) autoFillSeedPath(path, dirs, dirsOf)
+    return
+  }
+  form.value.seed_file = path
+}
+
+const DEFAULT_SEED = 'tests/seed.spec.ts'
+
+// 选完工作区后按它是否存在 tests 目录推荐 Seed 路径。
+async function autoFillSeedPath(path, dirs, dirsOf) {
+  let names = dirsOf === path && dirs.length ? dirs : []
+  if (!names.length) {
+    try {
+      const { data } = await api.browseAutomationFiles(path, '', 'playwright-ts')
+      names = (data.dirs || []).map(item => item.name)
+    } catch {
+      names = []
+    }
+  }
+  const current = (form.value.seed_file || '').trim()
+  if (current && current !== DEFAULT_SEED) return
+  form.value.seed_file = names.includes('tests') ? 'tests/seed.spec.ts' : 'seed.spec.ts'
+}
 
 // 两种生成模式共用右侧的 Agent 配置；只有左侧的任务输入不同。
 // requirement：按需求生成（planner → generator → healer）；cases：按用例生成（generator → healer）。
@@ -563,6 +648,7 @@ h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.
 .task-form :deep(.el-form-item__label), .config-form :deep(.el-form-item__label) { font-size:13px; font-weight:600; color:#303133; padding-bottom:6px; }
 .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
 .field-hint { color:#909399; font-size:12px; line-height:1.5; margin-top:6px; }
+.root-hint { margin-left:6px; color:#a8abb2; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11.5px; }
 .task-form :deep(.el-textarea__inner), .config-form :deep(.el-input__wrapper), .config-form :deep(.el-select__wrapper), .config-form :deep(.el-input-number) { border-radius:8px; }
 
 /* Requirement textarea grows so both cards share the same height */

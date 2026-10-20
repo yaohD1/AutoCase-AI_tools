@@ -7,8 +7,10 @@ from app.models.sprint import Sprint
 from app.models.pending_module import PendingModule
 from app.models.knowledge_file import KnowledgeFile
 from app.models.automation import AutomationConfig, AutomationGeneration
+from app.models.recording_generation import RecordingGeneration
 
 __all__ = [
     'db', 'Project', 'TestCase', 'Image', 'AIConfig', 'Sprint',
-    'PendingModule', 'KnowledgeFile', 'AutomationConfig', 'AutomationGeneration'
+    'PendingModule', 'KnowledgeFile', 'AutomationConfig', 'AutomationGeneration',
+    'RecordingGeneration'
 ]

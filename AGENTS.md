@@ -20,6 +20,7 @@
 - `frontend/src/views/Scripts.vue`：Playwright TypeScript 脚本生成工作台。
 - `frontend/src/views/Settings.vue`：AI 配置、项目和迭代管理。
 - `frontend/src/api/index.js`：所有前端 API 封装。
+- `frontend/src/components/PathPickerDialog.vue`：工作区目录/目标文件选择对话框，被 `Recording.vue`、`Scripts.vue` 复用。
 
 ### 后端
 
@@ -74,6 +75,7 @@
 - AI 配置：`/api/ai-configs`。
 - 知识库：`/api/knowledge/*`。
 - 自动化：`/api/automation/config`、`/api/automation/generate`、`/api/automation/generations`、`/api/automation/generations/<id>/artifact`、`/api/automation/generations/<id>/commit`。
+- 录制与路径浏览：`backend/app/routes/recording.py`（`/api/automation/recording/*`）、`backend/app/routes/browse.py`（`/api/automation/browse` 列工作区目录、`/api/automation/browse/files` 列工作区内目标文件）。两者都是只读，且只能浏览 `AUTOMATION_WORKSPACE_ROOT` 内；前端 `PathPickerDialog.vue` 复用这两个接口，避免手填绝对路径。
 
 ## 常用命令
 

@@ -42,6 +42,17 @@
       </div>
     </div>
 
+    <div class="tool-entry" role="button" tabindex="0" @click="$router.push('/recording')" @keydown.enter="$router.push('/recording')">
+      <div class="tool-entry-icon">
+        <el-icon :size="20"><Operation /></el-icon>
+      </div>
+      <div class="tool-entry-text">
+        <div class="tool-entry-title">自动化工具</div>
+        <div class="tool-entry-desc">在浏览器里录制操作，插入断言和等待，生成 Playwright 或 Robot Framework 脚本并写入项目</div>
+      </div>
+      <el-icon class="tool-entry-arrow"><ArrowRight /></el-icon>
+    </div>
+
     <el-card v-if="uploadMode !== 'knowledge'" class="upload-card">
       <template #header>
         <div class="card-header">
@@ -668,7 +679,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading, Delete, Close, Collection, Monitor } from '@element-plus/icons-vue'
+import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading, Delete, Close, Collection, Monitor, Operation, ArrowRight } from '@element-plus/icons-vue'
 import api from '../api'
 
 const router = useRouter()
@@ -1743,6 +1754,15 @@ async function deleteKnowledgeFile(row) {
   transition: all 0.25s;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
 }
+
+.tool-entry { display:flex; align-items:center; gap:16px; margin:-4px 0 20px; padding:16px 20px; background:#fff; border:1px solid #e4e7ed; border-radius:14px; cursor:pointer; box-shadow:0 1px 2px rgba(16,24,40,.04); transition:border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.tool-entry:hover, .tool-entry:focus-visible { border-color:#c9dcf8; box-shadow:0 6px 20px rgba(0,113,227,.10); transform:translateY(-1px); outline:none; }
+.tool-entry-icon { flex-shrink:0; width:40px; height:40px; border-radius:11px; background:linear-gradient(135deg,#0a84ff,#0071e3); color:#fff; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 12px rgba(0,113,227,.25); }
+.tool-entry-text { flex:1; min-width:0; }
+.tool-entry-title { font-size:15px; font-weight:700; color:#1d1d1f; }
+.tool-entry-desc { margin-top:3px; font-size:12.5px; color:#6e6e73; line-height:1.5; }
+.tool-entry-arrow { color:#a1a1a6; transition:transform .18s ease, color .18s ease; }
+.tool-entry:hover .tool-entry-arrow { color:#0071e3; transform:translateX(3px); }
 
 .mode-tab:hover {
   border-color: rgba(0, 0, 0, 0.12);

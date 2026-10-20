@@ -99,7 +99,9 @@ def create_app():
     from app.routes.sprint import sprint_bp
     from app.routes.knowledge import knowledge_bp
     from app.routes.automation import automation_bp
-    
+    from app.routes.recording import recording_bp
+    from app.routes.browse import browse_bp
+
     app.register_blueprint(upload_bp, url_prefix='/api')
     app.register_blueprint(testcase_bp, url_prefix='/api')
     app.register_blueprint(export_bp, url_prefix='/api')
@@ -107,5 +109,7 @@ def create_app():
     app.register_blueprint(sprint_bp, url_prefix='/api')
     app.register_blueprint(knowledge_bp, url_prefix='/api')
     app.register_blueprint(automation_bp, url_prefix='/api')
-    
+    app.register_blueprint(recording_bp, url_prefix='/api')
+    app.register_blueprint(browse_bp, url_prefix='/api')
+
     return app
