@@ -38,7 +38,7 @@
       </div>
       <div class="mode-tab" @click="goToAutomation">
         <el-icon><Monitor /></el-icon>
-        <span>自动化脚本</span>
+        <span>Agent探索</span>
       </div>
     </div>
 

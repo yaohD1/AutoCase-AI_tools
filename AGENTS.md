@@ -57,6 +57,7 @@
 - 被录制页面内的悬浮面板默认关闭（`RECORDING_HUD_PANEL=0`），只保留操作点即时徽标。HUD 在 closed shadow root 里：open 形态会被 Playwright 的 text 引擎穿透，把面板文字算成同名候选。
 - 目标站若禁止 iframe（`X-Frame-Options` / CSP `frame-ancestors`），可先用 `page.route` 拦 document 响应改 header；仍不行就切 `RECORDING_LAYOUT=split`。
 
+- 暂停录制（`POST /api/automation/recording/pause` `{paused:true|false}`）：浏览器保持可用但不再记步骤，同 Playwright codegen 的 Pause。前端在 `recorder.js` 里用 `state.paused` 直接拦掉 click/input/change（不产生 IPC），Python 侧 `_handle_event` 还有一层兜底（`pick` 例外，拾取照常）；暂停期间不判 idle 超时。状态在 `snapshot().paused`。
 - 步骤可就地编辑（铅笔按钮）与拖拽排序（sortablejs，按住编号拖）：
   - `PATCH /api/automation/recording/steps/<no>` 只允许改「值」：`fill→value`、`select→value/label`、`goto→url`、`sleep→seconds`；断言/等待/点击不可编辑（换元素走拾取）。白名单在 `session.EDITABLE_FIELDS`。
   - `POST /api/automation/recording/steps/<no>/order` 收 `position`（**移除自身之后**的 0 基下标，与 sortable 的 `newIndex` 一致），「点击 → 标签页切换」成对移动。

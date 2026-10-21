@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from app.services.recording import intent, ir
@@ -251,6 +252,21 @@ class StepEditTest(unittest.TestCase):
         ]
         with self.assertRaises(RecordingError):
             session.move_step_to(2, 0)
+
+
+class PauseTest(unittest.TestCase):
+    """暂停录制：浏览器可用但不记步骤。"""
+
+    def test_paused_defaults_to_false(self):
+        session = RecordingSession('http://example.test/')
+        self.assertFalse(session.snapshot()['paused'])
+
+    def test_paused_event_is_dropped(self):
+        session = RecordingSession('http://example.test/')
+        session._paused = True
+        # 暂停时不应走到计数/建步骤（source 是假对象，一旦继续执行就会抛异常）。
+        session._handle_event(object(), json.dumps({'type': 'click', 'snap': {'tag': 'button'}}))
+        self.assertEqual(session._steps, [])
 
 
 if __name__ == '__main__':

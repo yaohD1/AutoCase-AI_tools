@@ -86,6 +86,8 @@ class RecordingSession(object):
         self._wired = set()
         self._last_url = {}
         self._pick = False
+        # 暂停录制：浏览器照常可用，但操作不再记为步骤（同 Playwright codegen 的 Pause）。
+        self._paused = False
         self._opened = False
         self._last_activity = time.time()
         self._browser = None
@@ -118,6 +120,10 @@ class RecordingSession(object):
 
     def set_pick(self, on):
         return self._call('set_pick', on=bool(on))
+
+    def set_pause(self, on):
+        """暂停 / 继续录制（浏览器保持可用，暂停期间的操作不入库）。"""
+        return self._call('set_pause', on=bool(on))
 
     def stop(self):
         return self._call('stop')
@@ -152,6 +158,8 @@ class RecordingSession(object):
                 'status': self.status,
                 'base_url': self.base_url,
                 'pick': self._pick,
+                # 暂停中：浏览器可用但不记录操作。
+                'paused': self._paused,
                 'error': self.error,
                 'steps': steps,
                 'picks': picks,
@@ -389,7 +397,8 @@ class RecordingSession(object):
             self._process_inbox()
             if self._drain_commands():
                 return
-            if time.time() - self._last_activity > IDLE_SECONDS:
+            if not self._paused and time.time() - self._last_activity > IDLE_SECONDS:
+                # 暂停期间不判超时：用户可能正在页面上查资料或读提示。
                 self._finish('idle_timeout', revalidate=False)
                 return
             try:
@@ -420,6 +429,9 @@ class RecordingSession(object):
                 elif name == 'set_pick':
                     self._set_pick(kwargs['on'])
                     result = {'pick': self._pick}
+                elif name == 'set_pause':
+                    self._set_paused(kwargs['on'])
+                    result = {'paused': self._paused}
                 elif name == 'relayout':
                     result = {'laid_out': self.layout_windows()}
                 else:
@@ -467,6 +479,29 @@ class RecordingSession(object):
         for frame in page.frames:
             try:
                 frame.evaluate('window.__pwSetPick(%s)' % ('true' if self._pick else 'false'))
+            except Exception:
+                pass
+
+    # ---- 暂停录制 ----
+
+    def _set_paused(self, on):
+        self._paused = bool(on)
+        self._touch()
+        for page in list(self._context.pages):
+            self._apply_pause(page)
+        self._push_hud()
+        message = '已暂停录制' if self._paused else '继续录制'
+        for page in list(self._context.pages):
+            for frame in page.frames:
+                if self._is_app_frame(frame):
+                    self._push_badge_frame(frame, 'warn' if self._paused else 'ok', message)
+                    break
+
+    def _apply_pause(self, page):
+        value = 'true' if self._paused else 'false'
+        for frame in page.frames:
+            try:
+                frame.evaluate('window.__pwSetPaused(%s)' % value)
             except Exception:
                 pass
 
@@ -721,6 +756,8 @@ class RecordingSession(object):
         page.on('framenavigated', lambda frame, pg=page: self._on_navigated(pg, frame))
         if self._pick:
             self._apply_pick(page)
+        if self._paused:
+            self._apply_pause(page)
         self._push_hud()
 
     def _on_navigated(self, page, frame):
@@ -769,6 +806,9 @@ class RecordingSession(object):
 
     def _handle_event(self, source, raw):
         data = json.loads(raw)
+        # 暂停期间不记操作；拾取是显式动作，仍然允许。
+        if self._paused and data.get('type') != 'pick':
+            return
         snap = data['snap']
         kind = data['type']
         frame = source['frame']

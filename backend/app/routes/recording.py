@@ -163,6 +163,18 @@ def reorder_recording_step(no):
     return _mutate(lambda session: session.move_step_to(no, body.get('position')))
 
 
+@recording_bp.route('/automation/recording/pause', methods=['POST'])
+def pause_recording():
+    """暂停 / 继续录制：浏览器保持可用，暂停期间的操作不记为步骤。"""
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    if 'paused' not in body:
+        return _error('缺少 paused', 400)
+    return _mutate(lambda s: s.set_pause(bool(body.get('paused'))))
+
+
 @recording_bp.route('/automation/recording/steps', methods=['POST'])
 def add_recording_step():
     """断言 / 等待 / 睡眠。意图可以来自 LLM 解析，也可以来自结构化表单，两者用同一套校验。"""

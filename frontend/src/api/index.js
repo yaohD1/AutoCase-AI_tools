@@ -181,6 +181,9 @@ batchDeleteTestcases(ids) {
   setRecordingPick(on) {
     return api.post('/automation/recording/pick', { on })
   },
+  setRecordingPause(paused) {
+    return api.post('/automation/recording/pause', { paused })
+  },
   stopRecording() {
     return api.post('/automation/recording/stop')
   },

@@ -7,7 +7,9 @@
   } catch (e) { /* 拿不到 location 就算了 */ }
   if (window.__pwRecorderInstalled) return;
   window.__pwRecorderInstalled = true;
-  const state = { pick: false };
+  const state = { pick: false, paused: false };
+  // 暂停：浏览器照常操作，但不再产生步骤（同 Playwright codegen 的 Pause）。
+  window.__pwSetPaused = (v) => { state.paused = !!v; };
   window.__pwSetPick = (v) => {
     state.pick = !!v;
     // 面板上的状态跟着拾取模式走，不用等 Python 再推一轮。
@@ -364,11 +366,13 @@
       emit({ type: 'pick', snap: snap(el) });
       return;
     }
+    if (state.paused) return;
     emit({ type: 'click', snap: snap(el) });
   }, true);
 
   document.addEventListener('input', (e) => {
     if (isHudEvent(e)) return;
+    if (state.paused) return;
     // Browsers fire `input` on <select> too; the `change` handler records selects.
     if (state.pick || e.target.tagName === 'SELECT') return;
     const el = e.target;
@@ -379,6 +383,7 @@
 
   document.addEventListener('change', (e) => {
     if (isHudEvent(e)) return;
+    if (state.paused) return;
     const el = e.target;
     if (state.pick || el.tagName !== 'SELECT') return;
     const opt = el.options[el.selectedIndex];

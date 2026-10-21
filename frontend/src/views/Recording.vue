@@ -25,7 +25,7 @@
     >
       <!-- 面板窗口（录制时自动弹出的右侧编排栏）：紧凑标题条，把空间都留给步骤 -->
       <div v-if="compactMode" class="panel-head">
-        <span :class="['panel-dot', session && session.status === 'recording' ? 'is-live' : '']"></span>
+        <span :class="['panel-dot', session && session.status === 'recording' ? (paused ? 'is-paused' : 'is-live') : '']"></span>
         <span class="panel-title">{{ panelTitle }}</span>
         <span v-if="steps.length" class="panel-count">{{ steps.length }} 步</span>
         <span v-if="blockers.length" class="panel-warn">{{ blockers.length }} 处不唯一</span>
@@ -161,6 +161,16 @@
         <div class="toolbar">
           <el-button v-if="!isRecording" type="primary" :loading="starting" @click="startRecording">开始录制</el-button>
           <el-button v-else type="danger" plain :loading="stopping" @click="stopRecording">停止录制</el-button>
+          <el-button
+            v-if="isRecording"
+            :type="paused ? 'success' : 'default'"
+            :icon="paused ? VideoPlay : VideoPause"
+            :loading="pausing"
+            :title="paused ? '继续把操作记录为步骤' : '浏览器照常可用，但操作不再记为步骤'"
+            @click="togglePause"
+          >
+            {{ paused ? '继续录制' : '暂停录制' }}
+          </el-button>
           <el-button v-if="isRecording" plain @click="cancelRecording">取消</el-button>
           <el-button :type="picking ? 'warning' : 'default'" :disabled="!isRecording" @click="togglePick(!picking)">
             {{ picking ? '退出拾取' : '拾取元素' }}
@@ -169,6 +179,10 @@
           <el-button :disabled="!canEdit" @click="openDraft('assert')">添加断言</el-button>
           <el-button :disabled="!canEdit" @click="openDraft('wait')">添加等待</el-button>
           <el-button :disabled="!canEdit" @click="openDraft('sleep')">固定等待</el-button>
+        </div>
+
+        <div v-if="paused" class="pause-hint">
+          已暂停：可以在浏览器里自由操作（关闭弹层、滚动、试填一遍都不算），这些动作不会被记录。点「继续录制」接着录。
         </div>
 
         <div v-if="picking" class="pick-hint">
@@ -515,7 +529,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, FolderOpened } from '@element-plus/icons-vue'
+import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, FolderOpened, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -562,7 +576,9 @@ const targetUrl = computed(() => (typeof route.query.target === 'string' ? route
 const configExpanded = ref(false)
 const panelTitle = computed(() => {
   if (!compactMode.value) return ''
-  const base = STATE_LABELS[session.value?.status || 'idle'] || '录制'
+  const base = paused.value && isRecording.value
+    ? '已暂停'
+    : (STATE_LABELS[session.value?.status || 'idle'] || '录制')
   return targetUrl.value ? `${base} · ${shortHost(targetUrl.value)}` : base
 })
 const modelOptions = ref([])
@@ -769,7 +785,12 @@ const canEdit = computed(() => isRecording.value || isStopped.value)
 const steps = computed(() => session.value?.steps || [])
 const aliases = computed(() => session.value?.aliases || [])
 const picking = computed(() => !!session.value?.pick)
-const stateLabel = computed(() => STATE_LABELS[session.value?.status || 'idle'] || '未知')
+const paused = computed(() => !!session.value?.paused)
+const pausing = ref(false)
+const stateLabel = computed(() => {
+  if (paused.value && isRecording.value) return '已暂停'
+  return STATE_LABELS[session.value?.status || 'idle'] || '未知'
+})
 
 const blockers = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'ambiguous').map(s => s.no))
 const fragileCount = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'fragile').length)
@@ -877,6 +898,20 @@ async function togglePick(on, quiet = false) {
     if (session.value) session.value = { ...session.value, pick: data.pick }
   } catch (error) {
     if (!quiet) ElMessage.error(errorText(error))
+  }
+}
+
+async function togglePause() {
+  if (pausing.value) return
+  pausing.value = true
+  try {
+    const { data } = await api.setRecordingPause(!paused.value)
+    if (session.value) session.value = { ...session.value, paused: data.paused }
+    ElMessage.success(data.paused ? '已暂停：在浏览器里的操作不会被记录' : '已继续录制')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    pausing.value = false
   }
 }
 
@@ -1398,6 +1433,7 @@ onUnmounted(() => {
 .panel-head { flex:none; display:flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid #e6e9ef; border-radius:10px; background:#fff; box-shadow:0 1px 2px rgba(16,24,40,.05); }
 .panel-dot { width:8px; height:8px; border-radius:50%; background:#c7ccd6; flex:none; }
 .panel-dot.is-live { background:#34c759; box-shadow:0 0 0 3px rgba(52,199,89,.18); animation:panel-pulse 1.8s ease-in-out infinite; }
+.panel-dot.is-paused { background:#ff9f0a; box-shadow:0 0 0 3px rgba(255,159,10,.2); }
 @keyframes panel-pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
 .panel-title { font-size:13px; font-weight:700; color:#1d1d1f; }
 .panel-count { font-size:11.5px; color:#6e6e73; background:#f2f4f7; border-radius:999px; padding:1px 8px; }
@@ -1482,6 +1518,7 @@ h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.
 .toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
 .toolbar-sep { width:1px; height:22px; background:#e4e7ed; margin:0 4px; }
 .pick-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff7e6; color:#ad6800; font-size:12.5px; line-height:1.5; }
+.pause-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff4e6; color:#b45309; border:1px dashed #f3c98b; font-size:12.5px; line-height:1.5; }
 .session-error { margin-top:12px; }
 
 /* 时间线 */
