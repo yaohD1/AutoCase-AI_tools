@@ -95,14 +95,33 @@ def pick_for(framework, counted):
 
     playwright-ts 只看 Playwright 组；robot-selenium 只看 RF 组，并按 RF_PREFERENCE 排序。
     """
+    return next((c for c in pool_for(framework, counted) if c['count'] == 1), None)
+
+
+def pool_for(framework, counted):
+    """目标框架能用的候选，已按该框架的偏好排好序。"""
     if framework == 'robot-selenium':
-        pool = sorted((c for c in counted if c['kind'] in RF_KINDS),
-                      key=lambda c: RF_PREFERENCE.index(c['kind']))
-    else:
-        pool = [c for c in counted if c['kind'] in PW_KINDS]
-        order = {kind: i for i, kind in enumerate(PW_KINDS)}
-        pool.sort(key=lambda c: order[c['kind']])
-    return next((c for c in pool if c['count'] == 1), None)
+        pool = [c for c in counted if c['kind'] in RF_KINDS]
+        return sorted(pool, key=lambda c: RF_PREFERENCE.index(c['kind']))
+    pool = [c for c in counted if c['kind'] in PW_KINDS]
+    order = {kind: i for i, kind in enumerate(PW_KINDS)}
+    pool.sort(key=lambda c: order[c['kind']])
+    return pool
+
+
+def best_effort(framework, counted):
+    """没有唯一候选时的降级选择：返回目标框架下「命中最少」的候选，全都不命中则 None。
+
+    不唯一不代表不能定位——录制时算出的 index 能指出用户点的是第几个匹配，
+    所以降级的原则是「挑最窄的那条，再按 index 索引」，而不是整体拒绝生成。
+    count 相同再比语义优先级：数量一样时用更语义化的那条。
+    """
+    pool = [c for c in pool_for(framework, counted) if c.get('count', -1) > 0]
+    if not pool:
+        return None
+    order = {kind: i for i, kind in enumerate(PRIORITY)}
+    return sorted(pool, key=lambda c: (c['count'], order.get(c['kind'], len(PRIORITY))))[0]
+
 
 
 def status_of(primary):

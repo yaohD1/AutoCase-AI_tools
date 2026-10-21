@@ -56,6 +56,15 @@
     // 下拉框的 innerText 包含全部选项文字，不能作为名称。
     const text = el.tagName === 'SELECT' ? null : ((el.innerText || '').trim().slice(0, 80) || null);
     const label = labelText(el);
+    // Python 侧拿不到 DOM 节点，只能靠一个临时属性认出「用户点的到底是哪一个」，
+    // 它在计数完就被摘掉（session._count 末尾的 CLEAR_MARK_JS），不会留在页面上。
+    let mark = null;
+    try {
+      mark = 'ac' + Math.random().toString(36).slice(2, 10);
+      el.setAttribute('data-autocase-target', mark);
+    } catch (e) {
+      mark = null;
+    }
     const noTextName = ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName);
     const name = el.getAttribute('aria-label') || label || (noTextName ? null : text);
     return {
@@ -70,6 +79,7 @@
       id: el.id || null,
       attr_name: el.getAttribute('name'),
       css: cssPath(el),
+      _mark: mark,
     };
   };
   const emit = (payload) => {

@@ -59,12 +59,24 @@
 
 - 暂停录制（`POST /api/automation/recording/pause` `{paused:true|false}`）：浏览器保持可用但不再记步骤，同 Playwright codegen 的 Pause。前端在 `recorder.js` 里用 `state.paused` 直接拦掉 click/input/change（不产生 IPC），Python 侧 `_handle_event` 还有一层兜底（`pick` 例外，拾取照常）；暂停期间不判 idle 超时。状态在 `snapshot().paused`。
 - 结束录制只有「停止录制」（`POST /api/automation/recording/stop`），**没有**取消按钮：`session.cancel()` 仅作为内部「中止且不重校验定位」的快捷出口（测试 teardown 在用），不再暴露 HTTP 路由。
-- 普通模式（`/recording`，不带 `panel`/`embed`）是**一屏工作区**：左列「目标与配置」（约 400px，超高自己滚），右列「录制步骤 + 生成」（步骤列表吃满剩余高度、内部滚动，生成卡贴底）；整页 `height:calc(100dvh - 116px)`，不出页面级滚动条。「开始录制/停止录制」在 `page-header` 右侧常驻。
+- 普通模式（`/recording`，不带 `panel`/`embed`）是**一屏工作区**：左列「目标与配置」（约 400px，超高自己滚），右列「录制步骤 + 生成」（步骤列表吃满剩余高度、内部滚动，生成卡贴底）；整页 `height:calc(100dvh - 116px)`，不出页面级滚动条。页头只放「生成记录 / 返回首页」，**开始录制 / 停止录制放在步骤卡工具栏最左**（紧跟暂停、拾取），别再加回页头。
   - 高度链必须传到底：root(flex) → `.page-col`(flex:1 min-height:0) → `.recording-body`(grid，**必须 `grid-template-rows:minmax(0,1fr)`**，否则 auto 行会按内容撑破固定高度、把生成卡推出视口)。
   - 配置表单在 400px 窄列里是单列；Python 解释器收进「高级设置」；工作区检测结果内联成一行 chips（`.detect-inline`），不再常驻右栏。
   - 坑：`.el-form-item__content` 默认是横向 flex，输入框后的提示和检测结果会被挤到同一行，需要显式改 `flex-direction:column`。
   - 面板/嵌入模式 600px 宽：`.recording-body` 回落成纵向 flex，配置仍单列；空状态用 `.steps-empty` 一行提示（不要 el-empty 大插画）；未停止录制时「生成」卡用 `.gen-compact` 一行摘要，停止后才展开 `.checklist`。
+  - 窄屏（≤1100px）单列后必须解除 `height:calc(100dvh-116px)` 并把 `grid-template-rows` 改回 `auto`：否则第一行（配置卡）会被 `minmax(0,1fr)` 压成 0 高，配置整块看不见。
+- 「收起」= 面板的精简模式（`stepsCollapsed`，不持久化，默认展开）。只在 `compactMode` 显示，按钮在步骤卡标题右侧（状态标签旁，`Fold`/`Expand` 图标）：
+  - 步骤行只留铅笔，`v-if="!stepsCollapsed"` 掉上移/下移/删除（排序改用拖住编号拖拽，防误删）；`.is-lean .step` 收紧 padding。
+  - 工具栏切 `.toolbar.is-lean`：3 列等宽网格 + 通栏细线分组，录制中 6 个按钮正好 3+3；未录制只有 5 个，主按钮 `.lean-wide` 占两列补齐整行，右边界与下一行「添加等待」对齐。
+  - 嵌入模式下同时把 `panelWidth` 收到 420 并隐藏 `.embed-resizer`（`startResize` 提前返回），展开时还原收起前宽度；只收不放（本来就 <420 保持原宽）。
 - 生成记录独立成页：路由 `/recording/records`，视图 `views/RecordingRecords.vue`（列表 340px + 详情，都内部滚动，默认选中最新一条；带 `?id=` 时选中指定那条）。录制页只留一个跳转按钮（页头 + 生成成功后的「查看生成记录」），相关 state/函数/CSS 全部搬走，不要在 `Recording.vue` 里保留 records 逻辑。
+- 按钮规范统一在 `frontend/src/styles/workspace-buttons.css`，两个页面的根元素挂 `workspace-buttons` 类即可生效：
+  - 尺寸只有三档：标准 32px、图标 30×30（步骤行）、整宽主行动 `.generate-btn` 36px（独占一行，不与任何按钮并排）；内联开关（「高级设置」）26px。圆角 8px、字号 13px、无投影。
+  - 配色三支：主蓝 `#0071e3`（唯一实心）/ 危险 `#e0352b`（描边与文字，实心用 `#ff3b30`）/ 中性描边 `#dfe3e8` + 文字 `#3c4048`。进行中状态（暂停中、拾取中）统一淡蓝 `#eaf3ff`，**不要**用 Element 的金黄 `#e6a23c` 或草绿 `#34c759`。
+  - 禁用一律淡出：主按钮 `#f2f4f7` 底 + `#9ba3ae` 字，次级按钮白底 + `#b6bcc5` 字。**不要**用 Element 默认的浅蓝底白字（`#a0cfff` + white，几乎看不清）。
+  - 坑 1：Element Plus 在 `.el-button` 自身重新定义了 `--el-button-*` 变量，在容器上改这些变量**无效**，必须直接覆盖属性。
+  - 坑 2：次级按钮规则要用 `:where(:not(.el-button--primary)...)` 包排除条件，否则 `:not()` 会抬高特异性，压过后面的 append / text / 图标按钮规则。
+  - 坑 3：输入框 `append` 里的按钮高度要跟随输入框（`height:100%` + `border:0` + 透明底），否则 26px 的小白块会浮在灰底上，和输入框错位。
 - 步骤可就地编辑（铅笔按钮）与拖拽排序（sortablejs，按住编号拖）：
   - `PATCH /api/automation/recording/steps/<no>` 只允许改「值」：`fill→value`、`select→value/label`、`goto→url`、`sleep→seconds`；断言/等待/点击不可编辑（换元素走拾取）。白名单在 `session.EDITABLE_FIELDS`。
   - `POST /api/automation/recording/steps/<no>/order` 收 `position`（**移除自身之后**的 0 基下标，与 sortable 的 `newIndex` 一致），「点击 → 标签页切换」成对移动。

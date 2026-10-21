@@ -61,13 +61,16 @@ def public_step(step):
     out = {k: v for k, v in step.items() if not k.startswith('_')}
     if step.get('target'):
         out['target'] = dict(step['target'])
+        # index：不唯一时用户点的是第几个匹配（降级定位要用），前端据此显示「将取第 2 个」。
         out['target']['candidates'] = [
-            {'kind': c['kind'], 'desc': c['desc'], 'count': c['count']} for c in step['target']['candidates']
+            {'kind': c['kind'], 'desc': c['desc'], 'count': c['count'], 'index': c.get('index')}
+            for c in step['target']['candidates']
         ]
         if step['target'].get('primary'):
             out['target']['primary'] = {
                 'kind': step['target']['primary']['kind'],
                 'desc': step['target']['primary']['desc'],
                 'count': step['target']['primary']['count'],
+                'index': step['target']['primary'].get('index'),
             }
     return out

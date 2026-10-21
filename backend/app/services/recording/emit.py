@@ -6,11 +6,21 @@ import json
 from pathlib import Path
 
 from app.services.recording import detect, guard, toolchain
-from app.services.recording.locators import pick_for
+from app.services.recording.locators import best_effort, pick_for, pool_for
 
 RF_FRAMEWORK = 'robot-selenium'
 PW_FRAMEWORK = 'playwright-ts'
 MAX_REPAIR_ROUNDS = 1
+MAX_CANDIDATES_IN_PROMPT = 5
+PROMPT_RULES = (
+    '要求：\n'
+    '- 只写 target_path 指定的文件，不改其他文件。\n'
+    '- 定位优先用 target.locator；不要自己编造选择器，需要更精确时只能从 target.candidates 里挑或组合。\n'
+    '- target.match_count > 1 表示这条定位在页面上匹配了多个元素，属于「不唯一但仍可用」：\n'
+    '  · 给了 target.nth，就写成 locator.nth(n)（Robot 写成 XPath 的第 n+1 个，例如 (//button[...])[3]）；\n'
+    '  · 没给 nth，就取第一个，并在该行上方加一行注释：匹配 N 个元素，取第 1 个，请确认。\n'
+    '- target.match_count 为 null 时这一步拿不到定位，写一行 TODO 注释说明，不要猜。\n'
+)
 
 
 class EmitError(Exception):
@@ -46,29 +56,63 @@ def _steps_for_prompt(steps, framework):
             item['seconds'] = step['seconds']
         target = step.get('target')
         if target:
+            info = _locator_info(target, framework)
             item['target'] = {
                 'alias': target.get('alias'),
                 'status': target.get('status'),
-                'locator': _locator_for(target, framework),
+                'locator': info['locator'] if info else None,
+                'match_count': info['matches'] if info else None,
+                'nth': info['nth'] if info else None,
+                'candidates': _candidates_for_prompt(target, framework),
             }
         out.append(item)
     return out
 
 
-def _locator_for(target, framework):
-    """按目标框架选定位。返回给 agent 的是可直接使用的写法：RF 为 SeleniumLibrary 语法，TS 为 Playwright 描述。"""
-    chosen = pick_for(framework, target.get('candidates') or [])
-    if chosen is None:
-        return None
+def _fmt(candidate, framework):
+    """把一个候选变成目标框架里可以直接写的定位字符串。"""
     if framework == RF_FRAMEWORK:
-        return chosen['spec']['args'][0]
-    return chosen['desc']
+        return candidate['spec']['args'][0]
+    return candidate['desc']
+
+
+def _locator_info(target, framework):
+    """选定位：有唯一的就用唯一的；没有就降级到「命中最少」的那条 + 录制时的序号。
+
+    返回 {'locator', 'matches', 'nth', 'mode'}；连一条能命中的候选都没有时返回 None。
+    """
+    counted = target.get('candidates') or []
+    chosen = pick_for(framework, counted)
+    if chosen is not None:
+        return {'locator': _fmt(chosen, framework), 'matches': chosen['count'], 'nth': None, 'mode': 'unique'}
+    best = best_effort(framework, counted)
+    if best is None:
+        return None
+    return {
+        'locator': _fmt(best, framework),
+        'matches': best['count'],
+        'nth': best.get('index'),
+        'mode': 'ambiguous',
+    }
+
+
+def _candidates_for_prompt(target, framework):
+    """给 agent 的候选清单：只留有命中的、最多 5 条，避免提示词被撑爆。"""
+    out = []
+    for candidate in pool_for(framework, target.get('candidates') or []):
+        if candidate.get('count', -1) <= 0:
+            continue
+        out.append({'locator': _fmt(candidate, framework), 'count': candidate['count'], 'nth': candidate.get('index')})
+        if len(out) >= MAX_CANDIDATES_IN_PROMPT:
+            break
+    return out
 
 
 def _prompt(payload):
     return (
         '请按下面的录制结果写入一个测试文件。\n'
         '只写 target_path 指定的文件，不写其他文件。\n'
+        + PROMPT_RULES +
         '```json\n' + json.dumps(payload, ensure_ascii=False, indent=2) + '\n```\n'
     )
 
@@ -105,15 +149,30 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         raise EmitError('暂不支持的框架：%s' % framework)
     if not steps:
         raise EmitError('没有可生成的步骤')
-    # 按目标框架检查每一步是否都有唯一定位；有一步不唯一就整体拒绝，不写任何文件。
-    blocked = []
+    # 定位不唯一不再拦整体生成：降级成「最窄候选 + 录制时的序号」，交给 agent 写 nth。
+    # 只有连一条候选都命不中（元素已经不在页面上）才拒绝——那种情况写不出任何定位。
+    blocked, degraded = [], []
     for step in steps:
         target = step.get('target')
-        if target and pick_for(framework, target.get('candidates') or []) is None:
+        if not target:
+            continue
+        info = _locator_info(target, framework)
+        if info is None:
             blocked.append(step['no'])
+        elif info['mode'] == 'ambiguous':
+            degraded.append({
+                'no': step['no'],
+                'alias': target.get('alias'),
+                'locator': info['locator'],
+                'matches': info['matches'],
+                'nth': info['nth'],
+            })
     if blocked:
-        raise EmitError('有定位不唯一的步骤，无法生成：第 %s 步' % '、'.join(str(n) for n in blocked),
-                        details=['ambiguous:%s' % n for n in blocked])
+        raise EmitError(
+            '第 %s 步的目标元素在页面上已经找不到（匹配数为 0），请重新拾取后再生成'
+            % '、'.join(str(n) for n in blocked),
+            details=['missing:%s' % n for n in blocked],
+        )
 
     # 检测结果只作提示（决策 12），与用户选择的框架不一致时也不阻止，由返回值中的 detected 说明。
     detected = detect.detect(root, python=python)
@@ -165,6 +224,8 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         'framework': framework,
         'detected': detected.get('framework'),
         'reply': reply,
+        # 哪些步骤是降级生成的（定位不唯一，按第 n 个匹配写入），前端据此提醒用户回放确认。
+        'degraded': degraded,
     }
 
 

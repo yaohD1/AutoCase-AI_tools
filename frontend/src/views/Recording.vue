@@ -1,5 +1,5 @@
 <template>
-  <div :class="['recording-page', { 'is-panel': panelMode, 'is-embed': embedMode, 'is-collapsed': panelCollapsed, 'is-resizing': resizing }]">
+  <div :class="['recording-page', 'workspace-buttons', { 'is-panel': panelMode, 'is-embed': embedMode, 'is-collapsed': panelCollapsed, 'is-lean': stepsCollapsed, 'is-resizing': resizing }]">
     <!-- 嵌入模式：左 iframe 是被测系统（占用剩余全部宽度），右侧是可收起的编排面板 -->
     <iframe v-if="embedMode" class="embed-frame" :src="targetUrl" title="被测系统"></iframe>
 
@@ -15,7 +15,7 @@
       <span :class="['rail-dot', { live: isRecording }]"></span>
     </button>
 
-    <div v-if="embedMode && !panelCollapsed" class="embed-resizer" title="拖动调整面板宽度" @pointerdown="startResize"></div>
+    <div v-if="embedMode && !panelCollapsed && !stepsCollapsed" class="embed-resizer" title="拖动调整面板宽度" @pointerdown="startResize"></div>
 
     <div
       v-show="!embedMode || !panelCollapsed"
@@ -49,8 +49,6 @@
       </div>
       <div class="page-actions">
         <el-button :icon="Tickets" @click="$router.push('/recording/records')">生成记录</el-button>
-        <el-button v-if="!isRecording" type="primary" size="large" :loading="starting" @click="startRecording">开始录制</el-button>
-        <el-button v-else type="danger" plain size="large" :loading="stopping" @click="stopRecording">停止录制</el-button>
         <el-button @click="$router.push('/')">返回首页</el-button>
       </div>
     </div>
@@ -122,7 +120,11 @@
         <el-form-item label="目标文件（工作区内相对路径）">
           <el-input v-model="config.targetPath" :placeholder="targetPlaceholder" clearable>
             <template #append>
-              <el-button :icon="Document" :disabled="!config.workspace.trim()" @click="openTargetPicker">浏览</el-button>
+              <!-- 包一层 append-group：Element Plus 给 append 内 .el-button 加 margin:0 -20px，
+                   不覆盖会把这个按钮挤成图标宽、文字被裁到卡片外 -->
+              <div class="append-group">
+                <el-button :icon="Document" :disabled="!config.workspace.trim()" @click="openTargetPicker">浏览</el-button>
+              </div>
             </template>
           </el-input>
           <div class="field-hint">
@@ -134,9 +136,14 @@
           <el-input v-model="config.title" placeholder="例如：登录成功" maxlength="200" clearable />
         </el-form-item>
         <div class="span-2 advanced-row">
-          <button type="button" class="advanced-toggle" @click="showAdvanced = !showAdvanced">
+          <el-button
+            class="advanced-toggle"
+            text
+            :icon="showAdvanced ? ArrowUp : ArrowDown"
+            @click="showAdvanced = !showAdvanced"
+          >
             {{ showAdvanced ? '收起高级设置' : '高级设置：Python 解释器' }}
-          </button>
+          </el-button>
         </div>
         <el-form-item v-if="showAdvanced" class="span-2" label="Python 解释器（可选，留空则自动查找项目里的 .venv）">
           <el-input v-model="config.python" placeholder="例如 D:/proj/.venv/Scripts/python.exe" clearable />
@@ -150,12 +157,25 @@
         <template #header>
           <div class="section-header">
             <span class="card-title">录制步骤</span>
-            <span :class="['state-pill', 'state-' + (session ? session.status : 'idle')]">{{ stateLabel }}</span>
+            <div class="steps-head-right">
+              <span :class="['state-pill', 'state-' + (session ? session.status : 'idle')]">{{ stateLabel }}</span>
+              <el-button
+                v-if="compactMode"
+                text
+                class="steps-collapse-btn"
+                :icon="stepsCollapsed ? Expand : Fold"
+                :title="stepsCollapsed ? '展开：恢复上移 / 下移 / 删除，面板回到原来的宽度' : '收起：面板变窄，只留拖拽排序与铅笔编辑，避免误删'"
+                @click="toggleStepsCollapsed"
+              >
+                {{ stepsCollapsed ? '展开' : '收起' }}
+              </el-button>
+            </div>
           </div>
         </template>
 
-        <div class="toolbar">
-          <el-button v-if="!isRecording" :type="compactMode ? 'primary' : 'default'" :loading="starting" @click="startRecording">开始录制</el-button>
+        <div :class="['toolbar', { 'is-lean': stepsCollapsed }]">
+          <!-- 开始/停止紧挨拾取：录制控制都在同一排，页头只留「生成记录 / 返回首页」 -->
+          <el-button v-if="!isRecording" class="lean-wide" type="primary" :loading="starting" @click="startRecording">开始录制</el-button>
           <el-button v-else type="danger" plain :loading="stopping" @click="stopRecording">停止录制</el-button>
           <el-button
             v-if="isRecording"
@@ -194,7 +214,8 @@
           <li
             v-for="step in steps"
             :key="step.no"
-            :class="['step', { 'is-blocked': effectiveStatus(step) === 'ambiguous' }]"
+            :data-step-no="step.no"
+            :class="['step', { 'is-blocked': effectiveStatus(step) === 'ambiguous', 'is-flash': flashingNo === step.no }]"
           >
             <div class="step-no" :title="canEdit ? '按住拖动可排序' : ''">{{ step.no }}</div>
             <div class="step-body">
@@ -251,6 +272,24 @@
               </template>
             </div>
             <div class="step-actions">
+              <!-- 「在这一步之后插入」：hover 才出现，点开选断言/等待/固定等待。
+                  拖拽只能挪已录的步骤，中途补一步才是高频动作，所以入口放在行尾。 -->
+              <el-dropdown
+                v-if="canEdit"
+                class="step-insert-btn"
+                trigger="click"
+                placement="bottom-end"
+                @command="kind => openDraft(kind, step.no)"
+              >
+                <el-button text :icon="Plus" title="在这一步之后插入断言 / 等待" />
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="assert">插入断言</el-dropdown-item>
+                    <el-dropdown-item command="wait">插入条件等待</el-dropdown-item>
+                    <el-dropdown-item command="sleep">插入固定等待</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
               <el-button
                 v-if="editableFields(step).length"
                 text
@@ -259,16 +298,20 @@
                 title="编辑这一步的值"
                 @click="startEdit(step)"
               />
-              <el-button text :icon="ArrowUp" :disabled="!canEdit" title="上移" @click="moveStep(step.no, 'up')" />
-              <el-button text :icon="ArrowDown" :disabled="!canEdit" title="下移" @click="moveStep(step.no, 'down')" />
-              <el-button
-                text
-                type="danger"
-                :icon="Delete"
-                :disabled="!canEdit"
-                title="删除"
-                @click="removeStep(step.no)"
-              />
+              <!-- 收起后只留铅笔：这三个按钮不 v-if 硬切，交给 .is-off 做宽度过渡，
+                   否则整行文字会瞬移一下，看着很生硬 -->
+              <div :class="['step-actions-extra', { 'is-off': stepsCollapsed }]">
+                <el-button text :icon="ArrowUp" :disabled="!canEdit" title="上移" @click="moveStep(step.no, 'up')" />
+                <el-button text :icon="ArrowDown" :disabled="!canEdit" title="下移" @click="moveStep(step.no, 'down')" />
+                <el-button
+                  text
+                  type="danger"
+                  :icon="Delete"
+                  :disabled="!canEdit"
+                  title="删除"
+                  @click="removeStep(step.no)"
+                />
+              </div>
             </div>
           </li>
         </ol>
@@ -277,6 +320,7 @@
         <div v-if="draft" class="draft-card">
           <div class="draft-head">
             <span class="draft-title">{{ draftTitle }}</span>
+            <span v-if="draft.afterNo" class="draft-anchor">插在第 {{ draft.afterNo }} 步之后</span>
             <el-button text :icon="Close" @click="closeDraft" />
           </div>
 
@@ -369,9 +413,9 @@
           <div :class="['check', { ok: isStopped }]">
             <span class="check-dot"></span>录制已停止
           </div>
-          <div :class="['check', { ok: !blockers.length, bad: blockers.length > 0 }]">
+          <div :class="['check', { ok: !blockers.length, warn: blockers.length > 0 }]">
             <span class="check-dot"></span>
-            {{ blockers.length ? `第 ${blockers.join('、')} 步定位不唯一，请删除或重新拾取` : '所有步骤都有唯一定位' }}
+            {{ blockers.length ? `第 ${blockers.join('、')} 步定位不唯一，将按「最窄候选 + 录制时的序号」生成` : '所有步骤都有唯一定位' }}
           </div>
           <div v-if="fragileCount" class="check warn">
             <span class="check-dot"></span>{{ fragileCount }} 个步骤使用结构定位，已标黄，生成后请留意
@@ -389,14 +433,16 @@
         <el-button
           class="generate-btn"
           type="primary"
-          size="large"
           :loading="generating"
           :disabled="!canGenerate"
           @click="generate(false)"
         >
           生成并写入工作区
         </el-button>
-        <div class="field-hint">写入的只有目标文件。校验失败会自动还原，不会留下半成品。</div>
+        <div v-if="!canGenerate && generateBlockReason" class="gen-block-reason">
+          <span class="gen-block-dot"></span>{{ generateBlockReason }}
+        </div>
+        <div v-else class="field-hint">写入的只有目标文件。校验失败会自动还原，不会留下半成品。</div>
 
         <div v-if="genError" class="gen-error">
           <div class="gen-error-title">{{ genError.message }}</div>
@@ -409,6 +455,14 @@
           <div class="gen-result-title">已写入 {{ genResult.path }}</div>
           <div class="field-hint">
             {{ genResult.validated ? '校验通过' : '未校验' }} · 框架 {{ frameworkName(genResult.framework) }}
+          </div>
+          <div v-if="genResult.degraded && genResult.degraded.length" class="gen-degraded">
+            <div class="gen-degraded-title">{{ genResult.degraded.length }} 步使用了降级定位，请回放确认</div>
+            <ul>
+              <li v-for="item in genResult.degraded" :key="item.no">
+                第 {{ item.no }} 步「{{ item.alias }}」：匹配 {{ item.matches }} 个，取第 {{ (item.nth ?? 0) + 1 }} 个
+              </li>
+            </ul>
           </div>
           <div class="gen-result-actions">
             <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: genResult.generation_id } })">
@@ -439,7 +493,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, FolderOpened, Tickets, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, Expand, Fold, FolderOpened, Plus, Tickets, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -503,6 +557,28 @@ const panelCollapsed = ref(false)
 const panelWidth = ref(loadPanelWidth())
 const resizing = ref(false)
 
+// 「收起」：精简步骤行（只留铅笔 + 拖拽排序）并把面板一键收窄，替代手动拖动分栏。
+// 不持久化，每次打开面板默认展开。
+const LEAN_PANEL_WIDTH = 420
+const stepsCollapsed = ref(false)
+let widthBeforeLean = 0
+
+function maxPanelWidth() {
+  return Math.max(340, Math.min(900, window.innerWidth - 900))
+}
+
+function toggleStepsCollapsed() {
+  stepsCollapsed.value = !stepsCollapsed.value
+  if (!embedMode.value) return
+  if (stepsCollapsed.value) {
+    widthBeforeLean = panelWidth.value
+    // 只收不放：本来就比 420 窄的话保持原宽，不能因为「收起」反而变宽。
+    panelWidth.value = Math.min(panelWidth.value, LEAN_PANEL_WIDTH, maxPanelWidth())
+  } else {
+    panelWidth.value = Math.min(widthBeforeLean || 600, maxPanelWidth())
+  }
+}
+
 function loadPanelWidth() {
   try {
     const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY))
@@ -514,6 +590,8 @@ function loadPanelWidth() {
 }
 
 function startResize(event) {
+  // 收起时不允许拖拽：宽度由「收起 / 展开」控制，避免拖到一半元素被挤变形。
+  if (stepsCollapsed.value) return
   event.preventDefault()
   const handle = event.currentTarget
   // 指针一旦移到 iframe 上方，事件就进了 iframe 的文档，父窗口收不到。
@@ -573,6 +651,9 @@ const session = ref(null)
 const starting = ref(false)
 const stopping = ref(false)
 const draft = ref(null)
+// 刚插入的那一步短暂高亮，用来「指认」插入结果
+const flashingNo = ref(0)
+let flashTimer = 0
 const generating = ref(false)
 const genError = ref(null)
 const genResult = ref(null)
@@ -700,9 +781,28 @@ const stateLabel = computed(() => {
 const blockers = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'ambiguous').map(s => s.no))
 const fragileCount = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'fragile').length)
 const canGenerate = computed(() =>
-  isStopped.value && steps.value.length > 0 && blockers.value.length === 0 &&
+  isStopped.value && steps.value.length > 0 &&
   !!config.workspace.trim() && !!config.targetPath.trim() && !!config.model && !generating.value
 )
+// 按钮置灰时，告诉用户第一个不满足的条件是什么（定位不唯一不再是阻断项，见 generate 的确认框）
+const generateBlockReason = computed(() => {
+  if (!isStopped.value) return '' // 未停止时「gen-compact」一行已经说明了原因，不重复
+  if (!steps.value.length) return '还没有录制任何步骤'
+  if (!config.workspace.trim()) return '还没有填写工作区（Git 目录）'
+  if (!config.targetPath.trim()) return '还没有填写目标文件（工作区内相对路径）'
+  if (!config.model) return '还没有选择模型'
+  return ''
+})
+
+// 与后端 best_effort 对齐：目标框架下「命中最少」的那条候选 + 录制时算出的序号。
+// 只用于生成前的确认文案，真正的定位由后端算。
+function degradePlan(step) {
+  const pool = (step.target?.candidates || []).filter(c => c.count > 0)
+  if (!pool.length) return null
+  const order = config.framework === 'robot-selenium' ? RF_ORDER : PW_ORDER
+  const best = pool.slice().sort((a, b) => a.count - b.count || order.indexOf(a.kind) - order.indexOf(b.kind))[0]
+  return { locator: best.desc, count: best.count, index: best.index }
+}
 
 function applySession(data) {
   session.value = data
@@ -924,10 +1024,12 @@ function draftKindTypes(kind) {
 const draftTypes = computed(() => draft.value ? draftKindTypes(draft.value.kind) : [])
 const draftTitle = computed(() => ({ assert: '添加断言', wait: '添加等待', sleep: '固定等待' })[draft.value?.kind] || '')
 
-function openDraft(kind) {
+function openDraft(kind, afterNo = null) {
   const first = draftKindTypes(kind)[0]
   draft.value = {
     kind,
+    // 从某一步的「+」进来时记住锚点；工具栏那三个按钮不传，就是追加到末尾。
+    afterNo: afterNo || null,
     text: '',
     intentType: first,
     target: null,
@@ -956,6 +1058,17 @@ function closeDraft() {
   draft.value = null
 }
 
+// 新插入的步骤：滚进视野 + 高亮 1.2 秒，否则插在中间那一下没有任何反馈
+function revealStep(no) {
+  flashingNo.value = no
+  nextTick(() => {
+    const el = document.querySelector(`.timeline .step[data-step-no="${no}"]`)
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  })
+  clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => { flashingNo.value = 0 }, 1200)
+}
+
 function needsTarget(type) { return NEEDS_TARGET.has(type) }
 function needsValue(type) { return NEEDS_VALUE.has(type) }
 
@@ -975,14 +1088,34 @@ async function parseDraft() {
 async function insertIntent(intent, text) {
   draft.value.inserting = true
   try {
-    const { data } = await api.addRecordingStep({ intent, text: (text || '').trim() || null })
+    const afterNo = draft.value.afterNo
+    const payload = { intent, text: (text || '').trim() || null }
+    if (afterNo) payload.after_no = afterNo
+    const { data } = await api.addRecordingStep(payload)
     draft.value = null
     applySession(data)
+    // 插在中间时草稿卡在列表底部，点了「确认插入」屏幕上看不出变化，
+    // 所以把新步骤滚进视野并闪一下，明确「加在哪了」。
+    revealInserted(afterNo)
   } catch (error) {
     ElMessage.error(errorText(error))
   } finally {
     if (draft.value) draft.value.inserting = false
   }
+}
+
+// 插入位置推算：after_no 为空就是末尾；否则落在锚点后面，
+// 但后端不会插进「点击 → 新标签页」这一对里，遇到就再往后挪一位（与 session.add_intent_step 一致）。
+function revealInserted(afterNo) {
+  const list = steps.value
+  if (!list.length) return
+  let pos = list.length - 1
+  if (afterNo) {
+    const idx = list.findIndex(s => s.no === afterNo)
+    if (idx >= 0) pos = list[idx + 1] && list[idx + 1].type === 'new_page' ? idx + 2 : idx + 1
+  }
+  const step = list[pos] || list[list.length - 1]
+  if (step) revealStep(step.no)
 }
 
 function buildFormIntent(current) {
@@ -1092,7 +1225,8 @@ function statusLabel(status) {
 }
 
 function statusTone(status) {
-  return ({ unique: 'success', fragile: 'warning', ambiguous: 'danger', stale: 'info' })[status] || 'info'
+  // ambiguous 现在会降级生成（不再阻断），所以用警告色而不是红色
+  return ({ unique: 'success', fragile: 'warning', ambiguous: 'warning', stale: 'info' })[status] || 'info'
 }
 
 // ---- 工作区检测 ----
@@ -1114,6 +1248,30 @@ async function detectWorkspace() {
 
 // ---- 生成 ----
 async function generate(overwrite) {
+  if (!overwrite && blockers.value.length) {
+    // 不唯一不再阻断生成，但要让用户知道哪几步会降级、降到什么程度。
+    const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+    const lines = blockers.value.map((no) => {
+      const step = steps.value.find(s => s.no === no)
+      const plan = degradePlan(step)
+      const alias = esc(step?.target?.alias || `第 ${no} 步`)
+      if (!plan) return `第 ${no} 步「${alias}」：页面上已匹配不到，将写 TODO 注释`
+      const nth = plan.index != null ? `取第 ${plan.index + 1} 个` : '取第 1 个'
+      return `第 ${no} 步「${alias}」：匹配 ${plan.count} 个，${nth}`
+    })
+    const html = `${lines.join('<br>')}<br><br>`
+      + '这几步会按「最窄候选 + 录制时的序号」生成，页面结构变了可能指错元素，生成后建议回放确认。是否继续？'
+    try {
+      await ElMessageBox.confirm(html, '有步骤定位不唯一', {
+        dangerouslyUseHTMLString: true,
+        confirmButtonText: '仍然生成',
+        cancelButtonText: '取消',
+        type: 'warning'
+      })
+    } catch {
+      return
+    }
+  }
   generating.value = true
   genError.value = null
   genResult.value = null
@@ -1155,6 +1313,7 @@ async function generate(overwrite) {
 function detailText(item) {
   const text = String(item)
   if (text.startsWith('ambiguous:')) return `第 ${text.split(':')[1]} 步定位不唯一`
+  if (text.startsWith('missing:')) return `第 ${text.split(':')[1]} 步：页面上已找不到目标元素`
   if (text.startsWith('conflict:')) return `目标文件已存在：${text.slice('conflict:'.length)}`
   return text
 }
@@ -1204,6 +1363,7 @@ onDeactivated(() => stopPolling())
 onUnmounted(() => {
   stopPolling()
   window.removeEventListener('resize', clampPanelWidth)
+  clearTimeout(flashTimer)
   if (sortable) {
     sortable.destroy()
     sortable = null
@@ -1213,6 +1373,12 @@ onUnmounted(() => {
 
 <style scoped>
 .recording-page { max-width:1440px; margin:0 auto; animation: page-enter .32s ease both; }
+
+/* 按钮的基础规范见 styles/workspace-buttons.css（本页根元素挂了 workspace-buttons 类）；
+   下面只放本页特有的按钮形态。 */
+
+/* 卡片头两侧的轻量按钮（面板模式的「并排 / 配置」） */
+.is-panel .panel-head :deep(.el-button.is-text) { height: 26px; padding: 0 8px; font-size: 12.5px; }
 @keyframes page-enter { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
 
 /* ===== 嵌入模式：单窗口，左边被测系统、右边可收起的编排面板 ===== */
@@ -1221,7 +1387,10 @@ onUnmounted(() => {
   animation:none; background:#eef1f5; overflow:hidden;
 }
 .embed-frame { flex:1; min-width:0; height:100vh; border:0; background:#fff; display:block; }
-.is-embed .page-col { flex:none; height:100vh; overflow:hidden; background:#f5f7fa; border-left:1px solid #e2e6ec; }
+.is-embed .page-col { flex:none; height:100vh; overflow:hidden; background:#f5f7fa; border-left:1px solid #e2e6ec;
+  /* 「收起 / 展开」时面板宽度平滑过渡，iframe 跟着一起伸缩；拖动分栏时必须关掉，否则手感发飘 */
+  transition:width .26s cubic-bezier(.4,0,.2,1); }
+.is-embed.is-resizing .page-col { transition:none; }
 .is-embed .page-col.is-panel { display:flex; flex-direction:column; gap:10px; padding:10px 12px 12px; box-sizing:border-box; }
 /* 拖拽手柄要 position: relative，否则 z-index 不生效、会被 iframe 盖住点不到 */
 .embed-resizer { flex:none; position:relative; width:6px; margin-left:-4px; z-index:6; cursor:col-resize; }
@@ -1287,7 +1456,7 @@ onUnmounted(() => {
 h1 { margin:0; color:#1d1d1f; font-size:22px; font-weight:700; letter-spacing:-.3px; }
 .page-header p { margin:4px 0 0; color:#6e6e73; font-size:13px; line-height:1.5; max-width:820px; }
 .page-intro { min-width:0; }
-.page-actions { display:flex; align-items:center; gap:10px; flex:none; padding-top:2px; }
+.page-actions { display:flex; align-items:center; gap:8px; flex:none; padding-top:2px; }
 .hint-dot { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; margin-left:3px; border-radius:50%; background:#eef1f6; color:#86909c; font-size:10px; font-weight:700; cursor:help; vertical-align:1px; }
 
 /* 卡片 */
@@ -1295,21 +1464,54 @@ h1 { margin:0; color:#1d1d1f; font-size:22px; font-weight:700; letter-spacing:-.
 .panel-card :deep(.el-card__header) { padding:11px 16px; border-bottom:1px solid #f0f2f5; background:linear-gradient(180deg,#fcfdff,#f7f9fc); }
 .panel-card :deep(.el-card__body) { padding:14px 16px; }
 .section-header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.steps-head-right { display:flex; align-items:center; gap:8px; flex:none; }
+/* 「收起」按钮：24px 高的小文字按钮，和状态标签同一基线 */
+.recording-page :deep(.el-button.steps-collapse-btn.is-text) {
+  height:24px;
+  padding:0 6px;
+  margin-right:-6px;
+  border-radius:6px;
+  color:#6e6e73;
+  font-size:12px;
+  font-weight:500;
+}
+.recording-page :deep(.el-button.steps-collapse-btn.is-text:hover) { background:#f2f7ff; color:#0071e3; }
 .card-title { position:relative; padding-left:12px; font-size:15px; font-weight:700; color:#1d1d1f; }
 .card-title::before { content:''; position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:15px; border-radius:3px; background:linear-gradient(180deg,#0a84ff,#0071e3); }
 .field-hint { color:#909399; font-size:12px; line-height:1.5; margin-top:6px; }
 .root-hint { margin-left:6px; color:#a8abb2; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11.5px; }
 
-/* 覆盖 Element Plus 对 append 内按钮的 margin:0 -20px + flex:1，否则并排按钮会叠在一起。
-   两个按钮固定同高、文字居中，中间加一条竖线，避免看起来像一个按钮。 */
-:deep(.el-input-group__append) { padding:0 6px; }
-:deep(.el-input-group__append) .append-group { display:flex; align-items:center; }
-:deep(.el-input-group__append) .append-group .el-button {
-  flex:0 0 auto; margin:0; height:26px; padding:0 8px; border-radius:6px;
-  font-weight:500; line-height:1;
+/* 输入框右侧的动作区：不再是两个浮着的小白块，而是与输入框同高、通顶的分段动作，
+   只靠一条竖线分隔，hover 才有底色 —— 视觉上和输入框是一个整体。 */
+:deep(.el-input-group__append) {
+  padding: 0;
+  background: #f7f8fa;
+  border-left: 1px solid var(--btn-line);
+  box-shadow: none;
 }
-:deep(.el-input-group__append) .append-group .el-button:hover { background:#eaf3ff; color:#0071e3; }
-.append-sep { flex:0 0 auto; width:1px; height:14px; margin:0 4px; background:#dfe3e9; }
+:deep(.el-input-group__append) .append-group { display: flex; align-items: stretch; height: 100%; }
+:deep(.el-input-group__append) .append-group .el-button {
+  flex: 0 0 auto; margin: 0; height: 100%; padding: 0 12px;
+  border: 0; border-radius: 0; background: transparent; box-shadow: none;
+  color: #4a5160; font-size: 12.5px; font-weight: 500;
+}
+:deep(.el-input-group__append) .append-group .el-button:hover { background: #eaf2fd; color: #0071e3; }
+:deep(.el-input-group__append) .append-group .el-button.is-disabled { background: transparent; color: #b3b9c2; }
+.append-sep { flex: 0 0 auto; align-self: center; width: 1px; height: 16px; margin: 0; background: #e3e6ea; }
+
+/* 「高级设置」：从 16px 高的裸链接改成标准文字按钮（有 hover 底色），
+   但压到 26px，不抢表单字段的视觉重量 */
+.advanced-row { margin: -6px 0 6px; }
+.recording-page :deep(.el-button.advanced-toggle.is-text) {
+  height: 26px;
+  margin-left: -8px;
+  padding: 0 8px;
+  border-radius: 7px;
+  color: #5b6472;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.recording-page :deep(.el-button.advanced-toggle.is-text:hover) { background: #f2f7ff; color: #0071e3; }
 
 /* 配置：两列网格，起始地址/工作区/目标文件占整行；Python 解释器进「高级设置」 */
 .config-form--grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:0 20px; align-items:start; }
@@ -1318,9 +1520,6 @@ h1 { margin:0; color:#1d1d1f; font-size:22px; font-weight:700; letter-spacing:-.
 .config-form :deep(.el-form-item) { margin-bottom:12px; }
 /* el-form-item__content 默认是横向 flex，输入框 + 提示 + 检测结果会被挤到一行；这里改成纵向 */
 .config-form :deep(.el-form-item__content) { flex-direction:column; align-items:stretch; }
-.advanced-row { margin:-2px 0 10px; }
-.advanced-toggle { padding:0; border:0; background:transparent; color:#0071e3; font-size:12.5px; font-weight:500; cursor:pointer; }
-.advanced-toggle:hover { color:#0077ed; }
 
 /* 检测结果：一行 chips，细节折叠在「依据与参考文件」里 */
 .detect-inline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; }
@@ -1364,8 +1563,34 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .state-failed, .state-cancelled { background:#fff7e6; color:#ad6800; }
 
 /* 工具栏 */
-.toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+.toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; transition:gap .2s ease; }
 .toolbar-sep { width:1px; height:22px; background:#e4e7ed; margin:0 4px; }
+/* 单行 flex 切成 3 列网格属于重排，没法补间；给按钮一个归位动画，切换时就不会「啪」地跳。
+   两个 keyframes 内容一样但名字不同——名字一变动画就会重播，收起和展开都能各放一次。 */
+.toolbar :deep(.el-button) { animation:toolbar-settle .18s ease both; }
+.toolbar.is-lean :deep(.el-button) { animation-name:toolbar-settle-lean; }
+@keyframes toolbar-settle { from { opacity:.5; transform:translateY(1.5px); } to { opacity:1; transform:none; } }
+@keyframes toolbar-settle-lean { from { opacity:.5; transform:translateY(1.5px); } to { opacity:1; transform:none; } }
+
+/* 收起后工具栏排成两行三列，列宽一致；中间的竖线换成一条通栏细线，
+   正好把「录制控制 / 步骤操作」分成上下两组，窄到 420px 也不会散架。 */
+.toolbar.is-lean {
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  gap:6px;
+  align-items:stretch;
+}
+.toolbar.is-lean :deep(.el-button) {
+  width:100%;
+  min-width:0;
+  padding:0 6px;
+  font-size:12.5px;
+  overflow:hidden;
+}
+.toolbar.is-lean :deep(.el-button > span) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.toolbar.is-lean .toolbar-sep { grid-column:1 / -1; width:100%; height:1px; margin:2px 0; background:#e6e9ee; }
+/* 未录制时这一组只有两个按钮：主按钮占两列补齐整行，右边界正好和下面「添加等待」对齐 */
+.toolbar.is-lean :deep(.lean-wide) { grid-column:span 2; }
 .pick-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff7e6; color:#ad6800; font-size:12.5px; line-height:1.5; }
 .pause-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff4e6; color:#b45309; border:1px dashed #f3c98b; font-size:12.5px; line-height:1.5; }
 .session-error { margin-top:12px; }
@@ -1376,9 +1601,10 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 
 /* 时间线 */
 .timeline { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:8px; }
-.step { display:flex; gap:10px; align-items:flex-start; padding:10px 10px 10px 9px; border:1px solid #ebedf0; border-radius:12px; background:#fff; transition:border-color .18s ease, box-shadow .18s ease; }
+.step { display:flex; gap:10px; align-items:flex-start; padding:10px 10px 10px 9px; border:1px solid #ebedf0; border-radius:12px; background:#fff; transition:border-color .18s ease, box-shadow .18s ease, padding .22s ease, gap .22s ease; }
 .step:hover { border-color:#dce7fb; box-shadow:0 4px 14px rgba(16,24,40,.06); }
-.step.is-blocked { border-color:#ffccc7; background:#fffbfa; }
+/* 不唯一现在是「可降级生成」，用琥珀色提示而不是红色阻断 */
+.step.is-blocked { border-color:#f3d8a8; background:#fffdf6; }
 .step-no { flex-shrink:0; width:24px; height:24px; border-radius:50%; background:#eef4ff; color:#0071e3; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums; }
 .step-body { flex:1; min-width:0; }
 .step-main { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
@@ -1388,6 +1614,30 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .step-alias { color:#303133; font-size:12.5px; font-weight:600; }
 .locator-code { color:#6e6e73; font-size:11.5px; background:#f7f9fc; border:1px solid #eef0f4; border-radius:6px; padding:2px 6px; word-break:break-all; }
 .step-actions { display:flex; flex-direction:row; align-items:center; gap:2px; flex-shrink:0; }
+/* 次要操作组（上移 / 下移 / 删除）：收起时用 max-width 收进去，文字跟着回流而不是瞬移。
+   三个 30px 按钮之间还有 Element Plus 的 12px 相邻间距，实测 118px，上限给 140px 留余量。 */
+.step-actions-extra {
+  display:flex; align-items:center; gap:2px; flex:none; overflow:hidden;
+  max-width:140px; opacity:1;
+  transition:max-width .24s cubic-bezier(.4,0,.2,1), opacity .16s ease, margin-left .24s cubic-bezier(.4,0,.2,1);
+}
+.step-actions-extra :deep(.el-button) { flex:none; }
+.step-actions-extra.is-off { max-width:0; opacity:0; margin-left:-2px; pointer-events:none; }
+/* 「在这步之后插入」：位置常驻（避免 hover 时整行文字回流），只有图标淡入 */
+.step-insert-btn { opacity:0; transition:opacity .15s ease; }
+.step:hover .step-insert-btn, .step-insert-btn:focus-within { opacity:1; }
+@media (hover:none) { .step-insert-btn { opacity:1; } }
+/* 插入成功后闪一下，指认新步骤落在哪 */
+.step.is-flash { animation:step-flash 1.1s ease; }
+@keyframes step-flash {
+  0%, 55% { background:#fff7e0; border-color:#f0d99b; }
+  100% { background:#fff; border-color:#ebedf0; }
+}
+/* 收起后只剩铅笔：行内边距收紧，省出的宽度都给步骤文字 */
+.is-lean .step { gap:8px; padding:8px; }
+/* 步骤行图标：30×30 正方形，四个按钮从 176px 收到 126px */
+.recording-page .step-actions :deep(.el-button.is-text) { width:30px; height:30px; padding:0; border-radius:7px; }
+.recording-page .step-actions :deep(.el-button.is-text .el-icon) { font-size:14px; }
 
 /* 拖拽排序（sortablejs）：按住编号拖动 */
 .step-no { cursor:grab; }
@@ -1408,7 +1658,9 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 
 /* 断言 / 等待 模板 */
 .draft-card { margin-top:16px; border:1.5px dashed #c9d6ea; border-radius:14px; padding:16px; background:#fbfdff; }
-.draft-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+.draft-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px; }
+/* 从行内「+」进来时标明锚点，和工具栏那三个按钮打开时的区别一眼可见 */
+.draft-anchor { margin-right:auto; font-size:11.5px; color:#0071e3; background:#eaf3ff; border-radius:999px; padding:2px 9px; white-space:nowrap; }
 .draft-title { font-size:14px; font-weight:700; color:#1d1d1f; }
 .draft-nl { display:flex; gap:10px; align-items:flex-start; }
 .draft-nl .el-textarea { flex:1; }
@@ -1433,12 +1685,20 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .check.bad .check-dot { background:#e5484d; }
 .check.warn { color:#ad6800; }
 .check.warn .check-dot { background:#ffb020; }
-.generate-btn { width:100%; }
+/* 整宽主行动：唯一比标准按钮高的一处（独占一行，不与任何按钮并排），
+   926px 宽下 36px 才有分量；32px 会显得像一条薄片。 */
+.recording-page :deep(.el-button.generate-btn) { width:100%; height:36px; font-size:13.5px; border-radius:9px; }
+.gen-block-reason { display:flex; align-items:flex-start; gap:7px; margin-top:2px; color:#ad6800; font-size:12.5px; line-height:1.5; }
+.gen-block-dot { flex-shrink:0; width:7px; height:7px; border-radius:50%; background:#ffb020; margin-top:6px; }
 .gen-error { margin-top:14px; padding:12px; border-radius:10px; background:#fff1f0; color:#e5484d; font-size:13px; }
 .gen-error-title { font-weight:700; }
 .gen-error-list { margin:8px 0 0; padding-left:18px; font-size:12.5px; line-height:1.6; }
 .gen-result { margin-top:14px; padding:12px; border-radius:10px; background:#f0faf4; }
 .gen-result-title { color:#1e7a46; font-weight:700; font-size:13.5px; }
+/* 降级定位提示：绿底结果里嵌一块琥珀，别让「已写入」的绿色盖住风险 */
+.gen-degraded { margin-top:10px; padding:9px 11px; border-radius:8px; background:#fff7e6; border:1px solid #f3d8a8; }
+.gen-degraded-title { color:#a15c07; font-size:12.5px; font-weight:600; }
+.gen-degraded ul { margin:6px 0 0; padding-left:16px; color:#8a5a12; font-size:12px; line-height:1.65; }
 
 
 
@@ -1447,8 +1707,20 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 }
 
 @media (max-width: 1100px) {
-  .recording-body { grid-template-columns:1fr; }
+  /* 单列后左右并排的一屏约束就不成立了：解除固定高度，否则第一行（配置卡）
+     会被 minmax(0,1fr) 压成 0 高，直接看不见。 */
+  .recording-page:not(.is-panel):not(.is-embed) { height:auto; }
+  .recording-body { grid-template-columns:1fr; grid-template-rows:auto; }
+  .recording-body .config-card { overflow:visible; }
   .config-form--grid { grid-template-columns:1fr; }
   .form-grid { grid-template-columns:1fr; }
+}
+/* 系统开了「减弱动态效果」就全部瞬时完成 */
+@media (prefers-reduced-motion: reduce) {
+  .is-embed .page-col,
+  .step,
+  .step-actions-extra,
+  .toolbar { transition:none !important; }
+  .toolbar :deep(.el-button) { animation:none !important; }
 }
 </style>

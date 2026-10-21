@@ -1,5 +1,5 @@
 <template>
-  <div class="records-page">
+  <div class="records-page workspace-buttons">
     <div class="page-header">
       <div class="page-intro">
         <div class="eyebrow">RECORDING · GENERATIONS</div>

@@ -141,16 +141,34 @@ class EmitTest(unittest.TestCase):
         self.assertIn('未安装 SeleniumLibrary', str(ctx.exception))
         self.assertEqual(runner.prompts, [])
 
-    def test_ambiguous_step_blocks_generation_before_any_write(self):
+    def test_ambiguous_step_is_degraded_not_blocked(self):
+        """定位不唯一不再整体拒绝：降级成「最窄候选 + 录制序号」，并在提示词里给出 nth。"""
         bad = _rf_step()
         bad['no'] = 7
-        dup = {'kind': 'rf_css', 'desc': 'rf css:a', 'count': 2,
+        dup = {'kind': 'rf_css', 'desc': 'rf css:a', 'count': 2, 'index': 1,
                'spec': {'kind': 'rf_css', 'method': 'locator', 'args': ['css=a'], 'kwargs': {}, 'desc': 'x'}}
         bad['target']['candidates'] = [dup]
         bad['target']['primary'] = None
+        runner = FakeRunner(write(TARGET, ROBOT()))
+        result = self._gen(runner, [(True, 'ok')], steps=[_rf_step(), bad])
+        self.assertTrue(result['validated'])
+        self.assertEqual(len(result['degraded']), 1)
+        self.assertEqual(result['degraded'][0]['no'], 7)
+        self.assertEqual(result['degraded'][0]['matches'], 2)
+        self.assertEqual(result['degraded'][0]['nth'], 1)
+        self.assertIn('"nth": 1', runner.prompts[0])
+        self.assertIn('"match_count": 2', runner.prompts[0])
+        self.assertTrue((self.ws / TARGET).is_file())
+
+    def test_target_that_matches_nothing_still_blocks(self):
+        """连一条候选都命不中（元素已不在页面上）才拒绝——那种情况写不出任何定位。"""
+        gone = _rf_step()
+        gone['no'] = 7
+        gone['target']['candidates'] = []
+        gone['target']['primary'] = None
         runner = FakeRunner()
         with self.assertRaises(emit.EmitError) as ctx:
-            self._gen(runner, [], steps=[_rf_step(), bad])
+            self._gen(runner, [], steps=[_rf_step(), gone])
         self.assertIn('第 7 步', str(ctx.exception))
         self.assertEqual(runner.prompts, [])
         self.assertFalse((self.ws / TARGET).exists())

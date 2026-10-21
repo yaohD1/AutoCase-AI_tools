@@ -20,6 +20,15 @@ from app.services.recording.locators import build_specs, rank, stale_check, stat
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RECORDER_JS = os.path.join(HERE, 'recorder.js')
+# 录制时给目标元素打的临时属性，用来算出「用户点的是第几个匹配」（见 _count）。
+TARGET_MARK_ATTR = 'data-autocase-target'
+FIND_INDEX_JS = (
+    "(els, mark) => els.findIndex((el) => el.getAttribute('%s') === mark)" % TARGET_MARK_ATTR
+)
+CLEAR_MARK_JS = (
+    "() => document.querySelectorAll('[%s]').forEach((el) => el.removeAttribute('%s'))"
+    % (TARGET_MARK_ATTR, TARGET_MARK_ATTR)
+)
 IDLE_SECONDS = 15 * 60
 PUMP_MS = 150
 COMMAND_TIMEOUT = 60
@@ -792,14 +801,34 @@ class RecordingSession(object):
         except ValueError:
             return 0
 
-    def _count(self, frame, specs):
+    def _count(self, frame, specs, mark=None):
+        """逐条在页面上数匹配数；mark 存在时顺带算出「用户点的是第几个匹配」。
+
+        Playwright 的语义选择器（get_by_role 等）内部怎么排序我们拿不到，
+        所以录制那一刻由 recorder.js 给目标元素打一个临时属性，再在页面里 findIndex，
+        这样不唯一的步骤也能生成 .nth(i)，指向用户真正操作的那个元素。
+        """
         out = []
         for spec in specs:
+            index = None
             try:
-                n = getattr(frame, spec['method'])(*spec['args'], **spec['kwargs']).count()
+                locator = getattr(frame, spec['method'])(*spec['args'], **spec['kwargs'])
+                n = locator.count()
+                if mark and n > 1:
+                    found = locator.evaluate_all(FIND_INDEX_JS, mark)
+                    index = found if isinstance(found, int) and found >= 0 else None
             except Exception:
                 n = -1
-            out.append({'kind': spec['kind'], 'desc': spec['desc'], 'count': n, 'spec': spec})
+            item = {'kind': spec['kind'], 'desc': spec['desc'], 'count': n, 'spec': spec}
+            if index is not None:
+                item['index'] = index
+            out.append(item)
+        if mark:
+            # 计数完立刻摘掉临时属性，不把痕迹留在被测页面上。
+            try:
+                frame.evaluate(CLEAR_MARK_JS)
+            except Exception:
+                pass
         return out
 
     def _on_event(self, source, raw):
@@ -824,7 +853,9 @@ class RecordingSession(object):
 
         # 记录元素所在的 iframe（主框架为 None），回放时据此找到同一个框架。
         snap = dict(snap, frame_url=frame.url if frame.parent_frame is not None else None)
-        counted = self._count(frame, build_specs(snap))
+        # _mark 只用于这一轮求 index，不留在 target 里（它只是个临时 DOM 属性名）。
+        mark = snap.pop('_mark', None)
+        counted = self._count(frame, build_specs(snap), mark=mark)
         primary, ordered = rank(counted)
         status = status_of(primary)
         target = ir.make_target(snap, ordered, primary, status)
@@ -874,7 +905,13 @@ class RecordingSession(object):
                 owners.setdefault(id(pick['target']), (pick['target'], pick['_frame']))
         for target, frame in owners.values():
             previous = target['primary']['desc'] if target.get('primary') else None
+            # index 是录制那一刻算的，复核时元素上的临时标记早就没了，
+            # 按 desc 把旧 index 带过来，别让复核把降级定位的信息洗掉。
+            kept_index = {c['desc']: c.get('index') for c in (target.get('candidates') or [])}
             counted = self._count(frame, build_specs(target['snap']))
+            for item in counted:
+                if item.get('index') is None and kept_index.get(item['desc']) is not None:
+                    item['index'] = kept_index[item['desc']]
             primary, ordered = rank(counted)
             with self._lock:
                 target['candidates'] = ordered

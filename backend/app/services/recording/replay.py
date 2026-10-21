@@ -4,6 +4,8 @@
 """
 from playwright.sync_api import expect, sync_playwright
 
+from app.services.recording.locators import best_effort
+
 ASSERT_TIMEOUT_MS = 5000
 
 
@@ -19,16 +21,24 @@ def _page_for(context, step):
 
 
 def _locator(page, target):
-    if not target or not target.get('primary'):
-        raise ReplayError('目标没有唯一定位')
+    if not target:
+        raise ReplayError('这一步没有目标元素')
     root = page
     frame_url = (target.get('snap') or {}).get('frame_url')
     if frame_url:
         root = next((f for f in page.frames if f.url == frame_url), None)
         if root is None:
             raise ReplayError('找不到目标 iframe：%s' % frame_url)
-    spec = target['primary']['spec']
-    return getattr(root, spec['method'])(*spec['args'], **spec['kwargs'])
+    # 优先用唯一候选；不唯一时与生成保持一致，降级到最窄候选 + 录制时的序号。
+    chosen = target.get('primary') or best_effort('playwright-ts', target.get('candidates') or [])
+    if not chosen:
+        raise ReplayError('目标没有可用的定位')
+    spec = chosen['spec']
+    locator = getattr(root, spec['method'])(*spec['args'], **spec['kwargs'])
+    index = chosen.get('index')
+    if index is not None and chosen.get('count', 1) > 1:
+        return locator.nth(index)
+    return locator
 
 
 def _assert(intent, target, page):
