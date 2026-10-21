@@ -39,15 +39,24 @@
       </div>
 
       <div v-if="!compactMode" class="page-header">
-      <div>
+      <div class="page-intro">
         <div class="eyebrow">RECORDING · CODE GENERATOR</div>
         <h1>自动化工具</h1>
-        <p>在真实浏览器里操作，记录步骤与唯一定位。插入断言或等待后，按目标工作区的框架生成脚本并写入指定文件；写入后可以预览，再提交或撤销。</p>
-        <p class="page-hint">录制时会自动打开一个并排的编排面板：左侧操作真实页面，右侧实时显示步骤与定位，可以直接插入断言、删除或排序。</p>
+        <p>
+          在真实浏览器里操作，记录步骤与唯一定位；录制时会自动打开编排面板，插入断言后按工作区框架生成脚本。
+          <span class="hint-dot" title="写入后可以预览，再提交或撤销；校验失败会自动还原，不留半成品。">?</span>
+        </p>
       </div>
-      <el-button @click="$router.push('/')">返回首页</el-button>
+      <div class="page-actions">
+        <el-button :icon="Tickets" @click="$router.push('/recording/records')">生成记录</el-button>
+        <el-button v-if="!isRecording" type="primary" size="large" :loading="starting" @click="startRecording">开始录制</el-button>
+        <el-button v-else type="danger" plain size="large" :loading="stopping" @click="stopRecording">停止录制</el-button>
+        <el-button @click="$router.push('/')">返回首页</el-button>
+      </div>
     </div>
 
+    <!-- 左配置 / 右步骤+生成：一屏内看完，生成记录单独成页 -->
+    <div class="recording-body">
     <!-- 目标与配置 -->
     <el-card v-show="!compactMode || configExpanded" class="panel-card config-card">
       <template #header>
@@ -56,96 +65,83 @@
           <span class="field-hint">配置会记在本浏览器里，下次打开自动填入</span>
         </div>
       </template>
-      <div class="config-grid">
-        <el-form label-position="top" class="config-form">
-          <el-form-item label="录制起始地址">
-            <el-input v-model="config.baseUrl" placeholder="http://127.0.0.1:8080/login" clearable />
-          </el-form-item>
-          <el-form-item label="工作区（Git 目录）">
-            <el-input v-model="config.workspace" placeholder="点击「浏览」选择，或填写相对 AUTOMATION_WORKSPACE_ROOT 的路径" clearable>
-              <!-- 两个按钮要包一层：Element Plus 会给 append 里的 .el-button 加 margin:0 -20px，并排时会重叠 -->
-              <template #append>
-                <div class="append-group">
-                  <el-button :icon="FolderOpened" @click="openWorkspacePicker">浏览</el-button>
-                  <span class="append-sep"></span>
-                  <el-button :loading="detecting" @click="detectWorkspace">检测</el-button>
-                </div>
-              </template>
-            </el-input>
-            <div class="field-hint">
-              必须是 AUTOMATION_WORKSPACE_ROOT 内的目录。
-              <span v-if="workspaceRoot" class="root-hint">根目录：{{ workspaceRoot }}</span>
-            </div>
-          </el-form-item>
-          <el-form-item label="框架">
-            <el-select v-model="config.framework" style="width: 100%">
-              <el-option
-                v-for="item in FRAMEWORKS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="目标文件（工作区内相对路径）">
-            <el-input v-model="config.targetPath" :placeholder="targetPlaceholder" clearable>
-              <template #append>
-                <el-button :icon="Document" :disabled="!config.workspace.trim()" @click="openTargetPicker">浏览</el-button>
-              </template>
-            </el-input>
-            <div class="field-hint">
-              选已有文件会覆盖（生成前会再次确认）；也可以进入目录后填一个新文件名。
-              <span v-if="!config.workspace.trim()">需先选择工作区。</span>
-            </div>
-          </el-form-item>
-          <el-form-item label="模型（断言解析与代码生成）">
-            <el-select v-model="config.model" filterable placeholder="选择模型" style="width: 100%">
-              <el-option v-for="m in modelOptions" :key="m.value" :label="m.value" :value="m.value" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="用例名称">
-            <el-input v-model="config.title" placeholder="例如：登录成功" maxlength="200" clearable />
-          </el-form-item>
-          <el-form-item label="Python 解释器（可选，留空则自动查找项目里的 .venv）">
-            <el-input v-model="config.python" placeholder="例如 D:/proj/.venv/Scripts/python.exe" clearable />
-          </el-form-item>
-        </el-form>
-
-        <div class="detect-panel">
-          <div class="detect-title">工作区检测</div>
-          <div v-if="!detect" class="detect-empty">
-            输入工作区后点击「检测」，读取它使用的框架、Python 环境和库版本。检测结果只作提示，不会阻止生成。
-          </div>
-          <template v-else>
-            <div class="detect-row">
-              <span class="detect-key">框架</span>
-              <el-tag :type="detect.framework ? 'success' : 'info'" effect="light">{{ frameworkName(detect.framework) }}</el-tag>
-            </div>
-            <div class="detect-row">
-              <span class="detect-key">Python</span>
-              <code class="detect-value">{{ detect.python || '未找到' }}</code>
-            </div>
-            <div class="detect-row">
-              <span class="detect-key">SeleniumLibrary</span>
-              <span class="detect-value">{{ detect.seleniumlibrary_version || '未检测到，将按主流写法生成' }}</span>
-            </div>
-            <div v-if="detect.samples && detect.samples.length" class="detect-row detect-samples">
-              <span class="detect-key">参考文件</span>
-              <div>
-                <div v-for="sample in detect.samples" :key="sample.path" class="detect-sample">{{ sample.path }}</div>
+      <el-form label-position="top" class="config-form config-form--grid">
+        <el-form-item class="span-2" label="录制起始地址">
+          <el-input v-model="config.baseUrl" placeholder="http://127.0.0.1:8080/login" clearable />
+        </el-form-item>
+        <el-form-item class="span-2" label="工作区（Git 目录）">
+          <el-input v-model="config.workspace" placeholder="点击「浏览」选择工作区目录" clearable>
+            <!-- 两个按钮要包一层：Element Plus 会给 append 里的 .el-button 加 margin:0 -20px，并排时会重叠 -->
+            <template #append>
+              <div class="append-group">
+                <el-button :icon="FolderOpened" @click="openWorkspacePicker">浏览</el-button>
+                <span class="append-sep"></span>
+                <el-button :loading="detecting" @click="detectWorkspace">检测</el-button>
               </div>
-            </div>
-            <details class="detect-evidence">
-              <summary>依据</summary>
-              <div v-for="(item, idx) in detect.evidence" :key="idx" class="evidence-line">
+            </template>
+          </el-input>
+          <div class="field-hint">
+            必须是 AUTOMATION_WORKSPACE_ROOT 内的目录。
+            <span v-if="workspaceRoot" class="root-hint">根目录：{{ workspaceRoot }}</span>
+          </div>
+          <!-- 检测结果内联成一行，不再常驻一整栏 -->
+          <div v-if="detect" class="detect-inline">
+            <span class="detect-chip" :class="detect.framework ? 'is-ok' : ''">{{ frameworkName(detect.framework) }}</span>
+            <span class="detect-chip" :class="detect.python ? 'is-ok' : 'is-warn'" :title="detect.python || ''">
+              Python {{ detect.python ? tailPath(detect.python) : '未找到' }}
+            </span>
+            <span class="detect-chip" :class="detect.seleniumlibrary_version ? 'is-ok' : 'is-warn'">
+              SeleniumLibrary {{ detect.seleniumlibrary_version || '未检测到，按主流写法生成' }}
+            </span>
+            <details v-if="(detect.samples && detect.samples.length) || (detect.evidence && detect.evidence.length)" class="detect-more">
+              <summary>依据与参考文件</summary>
+              <div v-for="sample in detect.samples || []" :key="sample.path" class="detect-sample">{{ sample.path }}</div>
+              <div v-for="(item, idx) in detect.evidence || []" :key="idx" class="evidence-line">
                 <span class="evidence-kind">{{ item.kind }}</span>
                 <span>{{ item.value === null ? '—' : item.value }}</span>
                 <span class="evidence-source">{{ item.source }}</span>
               </div>
             </details>
-          </template>
+          </div>
+        </el-form-item>
+        <el-form-item label="框架">
+          <el-select v-model="config.framework" style="width: 100%">
+            <el-option
+              v-for="item in FRAMEWORKS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="模型（断言解析与代码生成）">
+          <el-select v-model="config.model" filterable placeholder="选择模型" style="width: 100%">
+            <el-option v-for="m in modelOptions" :key="m.value" :label="m.value" :value="m.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="目标文件（工作区内相对路径）">
+          <el-input v-model="config.targetPath" :placeholder="targetPlaceholder" clearable>
+            <template #append>
+              <el-button :icon="Document" :disabled="!config.workspace.trim()" @click="openTargetPicker">浏览</el-button>
+            </template>
+          </el-input>
+          <div class="field-hint">
+            选已有文件会覆盖（生成前会再次确认）；也可以填新文件名。
+            <span v-if="!config.workspace.trim()">需先选择工作区。</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="用例名称">
+          <el-input v-model="config.title" placeholder="例如：登录成功" maxlength="200" clearable />
+        </el-form-item>
+        <div class="span-2 advanced-row">
+          <button type="button" class="advanced-toggle" @click="showAdvanced = !showAdvanced">
+            {{ showAdvanced ? '收起高级设置' : '高级设置：Python 解释器' }}
+          </button>
         </div>
-      </div>
+        <el-form-item v-if="showAdvanced" class="span-2" label="Python 解释器（可选，留空则自动查找项目里的 .venv）">
+          <el-input v-model="config.python" placeholder="例如 D:/proj/.venv/Scripts/python.exe" clearable />
+        </el-form-item>
+      </el-form>
     </el-card>
 
     <div class="main-layout">
@@ -159,7 +155,7 @@
         </template>
 
         <div class="toolbar">
-          <el-button v-if="!isRecording" type="primary" :loading="starting" @click="startRecording">开始录制</el-button>
+          <el-button v-if="!isRecording" :type="compactMode ? 'primary' : 'default'" :loading="starting" @click="startRecording">开始录制</el-button>
           <el-button v-else type="danger" plain :loading="stopping" @click="stopRecording">停止录制</el-button>
           <el-button
             v-if="isRecording"
@@ -171,7 +167,6 @@
           >
             {{ paused ? '继续录制' : '暂停录制' }}
           </el-button>
-          <el-button v-if="isRecording" plain @click="cancelRecording">取消</el-button>
           <el-button :type="picking ? 'warning' : 'default'" :disabled="!isRecording" @click="togglePick(!picking)">
             {{ picking ? '退出拾取' : '拾取元素' }}
           </el-button>
@@ -190,11 +185,10 @@
         </div>
         <el-alert v-if="session && session.error" :title="session.error" type="error" :closable="false" class="session-error" />
 
-        <el-empty
-          v-if="!steps.length && !draft"
-          description="还没有步骤。点击「开始录制」后，在弹出的浏览器里操作。"
-          :image-size="90"
-        />
+        <div v-if="!steps.length && !draft" class="steps-empty">
+          <span class="steps-empty-dot"></span>
+          <span>还没有步骤 · 点「开始录制」后，在弹出的浏览器里操作</span>
+        </div>
 
         <ol v-if="steps.length" ref="timelineEl" class="timeline">
           <li
@@ -368,12 +362,12 @@
           </div>
         </template>
 
-        <div class="checklist">
+        <div v-if="isStopped" class="checklist">
           <div :class="['check', { ok: steps.length > 0 }]">
             <span class="check-dot"></span>已录制 {{ steps.length }} 个步骤
           </div>
           <div :class="['check', { ok: isStopped }]">
-            <span class="check-dot"></span>{{ isStopped ? '录制已停止' : '需要先停止录制' }}
+            <span class="check-dot"></span>录制已停止
           </div>
           <div :class="['check', { ok: !blockers.length, bad: blockers.length > 0 }]">
             <span class="check-dot"></span>
@@ -385,6 +379,11 @@
           <div :class="['check', { ok: !!config.workspace && !!config.targetPath && !!config.model }]">
             <span class="check-dot"></span>工作区、目标文件、模型均已填写
           </div>
+        </div>
+        <!-- 没停录制时把 4 行检查压成一行，别占掉半屏 -->
+        <div v-else class="gen-compact">
+          停止录制后可生成 · 已录 <b>{{ steps.length }}</b> 步
+          <span v-if="blockers.length" class="gen-compact-bad">· {{ blockers.length }} 处定位不唯一</span>
         </div>
 
         <el-button
@@ -411,105 +410,16 @@
           <div class="field-hint">
             {{ genResult.validated ? '校验通过' : '未校验' }} · 框架 {{ frameworkName(genResult.framework) }}
           </div>
-          <div class="field-hint">在下方「生成记录」里预览，确认后可以提交或撤销。</div>
+          <div class="gen-result-actions">
+            <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: genResult.generation_id } })">
+              查看生成记录
+            </el-button>
+            <span class="field-hint">预览文件内容、提交到 Git 或撤销这次写入</span>
+          </div>
         </div>
       </el-card>
     </div>
-
-    <!-- 生成记录：面板模式不显示，完整记录回主页面看 -->
-    <el-card v-if="!compactMode" class="panel-card records-card">
-      <template #header>
-        <div class="section-header">
-          <span class="card-title">生成记录</span>
-          <el-button text :loading="recordsLoading" @click="loadRecords">刷新</el-button>
-        </div>
-      </template>
-
-      <div class="records-layout">
-        <div class="record-list">
-          <el-empty v-if="!records.length" description="还没有生成记录" :image-size="70" />
-          <div
-            v-for="item in records"
-            :key="item.id"
-            :class="['record-item', { active: selected && selected.id === item.id }]"
-            @click="openRecord(item.id)"
-          >
-            <div class="record-path">{{ item.target_path }}</div>
-            <div class="record-meta">
-              <el-tag size="small" :type="recordStatusTone(item.status)" effect="light">{{ recordStatusLabel(item.status) }}</el-tag>
-              <span>{{ frameworkName(item.framework) }}</span>
-              <span>{{ formatDate(item.created_at) }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="record-detail">
-          <el-empty v-if="!selected" description="选择一条记录查看预览" :image-size="70" />
-          <template v-else>
-            <div class="detail-head">
-              <div>
-                <div class="detail-title">{{ selected.target_path }}</div>
-                <div class="field-hint">
-                  {{ frameworkName(selected.framework) }} · 模型 {{ selected.model || '—' }} · {{ formatDate(selected.created_at) }}
-                </div>
-              </div>
-              <el-tag :type="recordStatusTone(selected.status)" effect="light">{{ recordStatusLabel(selected.status) }}</el-tag>
-            </div>
-
-            <el-alert
-              v-if="selected.changed_since_generation && selected.status === 'generated'"
-              title="文件在生成后已被改动或删除，提交和撤销都会被拒绝。请先确认文件内容。"
-              type="warning"
-              :closable="false"
-              class="detail-alert"
-            />
-            <el-alert
-              v-if="selected.status === 'committed'"
-              :title="`已提交：${selected.commit_message || ''}（${(selected.commit_hash || '').slice(0, 8)}）`"
-              type="success"
-              :closable="false"
-              class="detail-alert"
-            />
-
-            <div class="detail-section">
-              <div class="detail-label">录制的步骤</div>
-              <ol class="mini-steps">
-                <li v-for="step in selected.steps" :key="step.no">
-                  <span class="mini-kind">{{ stepKindLabel(step.type) }}</span>
-                  <span>{{ step.text || step.value || '' }}</span>
-                </li>
-              </ol>
-            </div>
-
-            <div class="detail-section">
-              <div class="detail-label">文件内容预览{{ selected.truncated ? '（已截断）' : '' }}</div>
-              <pre class="code-preview">{{ selected.file_exists ? selected.content : '文件当前不存在' }}</pre>
-            </div>
-
-            <div v-if="selected.reply" class="detail-section">
-              <div class="detail-label">生成 agent 的说明</div>
-              <div class="agent-reply">{{ selected.reply }}</div>
-            </div>
-
-            <div v-if="selected.status === 'generated'" class="detail-section commit-box">
-              <div class="detail-label">提交说明</div>
-              <el-input v-model="commitMessage" maxlength="500" show-word-limit />
-              <div class="commit-actions">
-                <el-button type="primary" :loading="committing" :disabled="selected.changed_since_generation" @click="commitSelected">
-                  提交到 Git
-                </el-button>
-              </div>
-            </div>
-
-            <div v-if="selected.status === 'generated' || selected.status === 'committed'" class="detail-actions">
-              <el-button type="danger" plain :loading="reverting" @click="revertSelected">
-                {{ selected.status === 'generated' ? '撤销写入' : '回滚这次提交' }}
-              </el-button>
-            </div>
-          </template>
-        </div>
-      </div>
-    </el-card>
+    </div>
 
       <PathPickerDialog
         v-model="picker.visible"
@@ -529,7 +439,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, FolderOpened, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, FolderOpened, Tickets, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -584,6 +494,8 @@ const panelTitle = computed(() => {
 const modelOptions = ref([])
 const detect = ref(null)
 const detecting = ref(false)
+// 高级设置（Python 解释器）默认收起：绝大多数工作区能自动找到 .venv。
+const showAdvanced = ref(false)
 
 // 面板宽度可拖拽调整；收起后 left iframe 吃掉几乎整个窗口。
 const PANEL_WIDTH_KEY = 'autocase.recording.panelWidth'
@@ -664,13 +576,6 @@ const draft = ref(null)
 const generating = ref(false)
 const genError = ref(null)
 const genResult = ref(null)
-
-const records = ref([])
-const recordsLoading = ref(false)
-const selected = ref(null)
-const commitMessage = ref('')
-const committing = ref(false)
-const reverting = ref(false)
 
 let pollTimer = null
 
@@ -872,23 +777,6 @@ async function stopRecording() {
     ElMessage.error(errorText(error))
   } finally {
     stopping.value = false
-  }
-}
-
-async function cancelRecording() {
-  try {
-    await ElMessageBox.confirm('取消会丢弃本次录制的全部步骤，确定吗？', '取消录制', {
-      confirmButtonText: '确定取消', cancelButtonText: '继续录制', type: 'warning'
-    })
-  } catch {
-    return
-  }
-  try {
-    const { data } = await api.cancelRecording()
-    draft.value = null
-    applySession(data)
-  } catch (error) {
-    ElMessage.error(errorText(error))
   }
 }
 
@@ -1139,6 +1027,13 @@ function frameworkName(value) {
   return (FRAMEWORKS.find(f => f.value === value) || {}).label || (value ? value : '未识别')
 }
 
+// 检测结果里的绝对路径太长（Python 解释器常常三四层），chips 里只留末尾两段，完整路径放 title。
+function tailPath(path, depth = 2) {
+  if (!path) return ''
+  const parts = String(path).split(/[\\/]+/).filter(Boolean)
+  return parts.slice(-depth).join('/')
+}
+
 function intentLabel(type) { return INTENT_LABELS[type] || type }
 
 function intentDescription(intent, target) {
@@ -1234,15 +1129,13 @@ async function generate(overwrite) {
     })
     genResult.value = data
     ElMessage.success(`已写入 ${data.path}`)
-    await loadRecords()
-    if (data.generation_id) await openRecord(data.generation_id)
   } catch (error) {
     const details = (error.response && error.response.data && error.response.data.details) || []
     const isConflict = error.response && error.response.status === 409 && details.some(d => String(d).startsWith('conflict:'))
     if (isConflict) {
       try {
         await ElMessageBox.confirm(
-          `目标文件 ${config.targetPath.trim()} 已存在。覆盖后可以在下方记录里撤销，恢复原内容。是否覆盖？`,
+          `目标文件 ${config.targetPath.trim()} 已存在。覆盖后可以在「生成记录」里撤销，恢复原内容。是否覆盖？`,
           '文件已存在',
           { confirmButtonText: '覆盖', cancelButtonText: '取消', type: 'warning' }
         )
@@ -1264,79 +1157,6 @@ function detailText(item) {
   if (text.startsWith('ambiguous:')) return `第 ${text.split(':')[1]} 步定位不唯一`
   if (text.startsWith('conflict:')) return `目标文件已存在：${text.slice('conflict:'.length)}`
   return text
-}
-
-// ---- 生成记录 ----
-async function loadRecords() {
-  recordsLoading.value = true
-  try {
-    const { data } = await api.listRecordingGenerations()
-    records.value = data.generations || []
-  } catch (error) {
-    ElMessage.error(errorText(error))
-  } finally {
-    recordsLoading.value = false
-  }
-}
-
-async function openRecord(id) {
-  try {
-    const { data } = await api.getRecordingGeneration(id)
-    selected.value = data
-    commitMessage.value = `录制生成：${data.title || data.target_path}`
-  } catch (error) {
-    ElMessage.error(errorText(error))
-  }
-}
-
-async function commitSelected() {
-  committing.value = true
-  try {
-    await api.commitRecordingGeneration(selected.value.id, commitMessage.value)
-    ElMessage.success('已提交')
-    await openRecord(selected.value.id)
-    await loadRecords()
-  } catch (error) {
-    ElMessage.error(errorText(error))
-  } finally {
-    committing.value = false
-  }
-}
-
-async function revertSelected() {
-  const committed = selected.value.status === 'committed'
-  try {
-    await ElMessageBox.confirm(
-      committed ? '将生成一个回滚提交，撤销这次录制生成的文件。确定吗？' : '将删除新写入的文件，或恢复生成前的原内容。确定吗？',
-      committed ? '回滚提交' : '撤销写入',
-      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
-    )
-  } catch {
-    return
-  }
-  reverting.value = true
-  try {
-    await api.revertRecordingGeneration(selected.value.id)
-    ElMessage.success('已撤销')
-    await openRecord(selected.value.id)
-    await loadRecords()
-  } catch (error) {
-    ElMessage.error(errorText(error))
-  } finally {
-    reverting.value = false
-  }
-}
-
-function recordStatusLabel(status) {
-  return ({ generated: '未提交', committed: '已提交', reverted: '已撤销' })[status] || status
-}
-
-function recordStatusTone(status) {
-  return ({ generated: 'warning', committed: 'success', reverted: 'info' })[status] || 'info'
-}
-
-function formatDate(value) {
-  return value ? new Date(value).toLocaleString() : '-'
 }
 
 function errorText(error) {
@@ -1376,7 +1196,6 @@ onMounted(async () => {
     modelOptions.value = []
   }
   if (config.workspace) detectWorkspace()
-  loadRecords()
 })
 
 // 页面被 keep-alive 缓存：回到页面时刷新会话状态，离开时停止轮询。
@@ -1439,6 +1258,7 @@ onUnmounted(() => {
 .panel-count { font-size:11.5px; color:#6e6e73; background:#f2f4f7; border-radius:999px; padding:1px 8px; }
 .panel-warn { font-size:11.5px; color:#b45309; background:#fff4e6; border-radius:999px; padding:1px 8px; }
 .panel-actions { margin-left:auto; display:flex; gap:2px; }
+.is-panel .recording-body, .is-embed .page-col .recording-body { display:flex; flex-direction:column; gap:10px; flex:1; min-height:0; }
 .is-panel .main-layout { display:flex; flex-direction:column; gap:10px; flex:1; min-height:0; }
 .is-panel .panel-card { margin-bottom:0; border-radius:10px; }
 .is-panel .panel-card :deep(.el-card__header) { padding:10px 14px; }
@@ -1458,18 +1278,22 @@ onUnmounted(() => {
 }
 .is-panel .toolbar :deep(.el-button) { padding:6px 10px; font-size:12.5px; height:30px; }
 .is-panel .config-card :deep(.el-card__body) { padding:14px; }
+/* 面板/嵌入模式只有 600px 宽，配置改回单列 */
+.is-panel .config-form--grid, .is-embed .page-col .config-form--grid { grid-template-columns:1fr; gap:0; }
 
 /* 页头：与「自动化脚本」页保持一致 */
 .page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:22px; }
 .eyebrow { color:#0071e3; font-size:11px; font-weight:700; letter-spacing:1.4px; margin-bottom:8px; text-transform:uppercase; }
-h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.3px; }
-.page-header p { margin:8px 0 0; color:#6e6e73; font-size:14px; line-height:1.55; max-width:760px; }
-.page-header .page-hint { margin-top:6px; color:#8a8f99; font-size:12.5px; }
+h1 { margin:0; color:#1d1d1f; font-size:22px; font-weight:700; letter-spacing:-.3px; }
+.page-header p { margin:4px 0 0; color:#6e6e73; font-size:13px; line-height:1.5; max-width:820px; }
+.page-intro { min-width:0; }
+.page-actions { display:flex; align-items:center; gap:10px; flex:none; padding-top:2px; }
+.hint-dot { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; margin-left:3px; border-radius:50%; background:#eef1f6; color:#86909c; font-size:10px; font-weight:700; cursor:help; vertical-align:1px; }
 
 /* 卡片 */
 .panel-card { border:1px solid #ebedf0; border-radius:14px; overflow:hidden; box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 30px rgba(16,24,40,.05); margin-bottom:20px; }
-.panel-card :deep(.el-card__header) { padding:15px 20px; border-bottom:1px solid #f0f2f5; background:linear-gradient(180deg,#fcfdff,#f7f9fc); }
-.panel-card :deep(.el-card__body) { padding:20px; }
+.panel-card :deep(.el-card__header) { padding:11px 16px; border-bottom:1px solid #f0f2f5; background:linear-gradient(180deg,#fcfdff,#f7f9fc); }
+.panel-card :deep(.el-card__body) { padding:14px 16px; }
 .section-header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
 .card-title { position:relative; padding-left:12px; font-size:15px; font-weight:700; color:#1d1d1f; }
 .card-title::before { content:''; position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:15px; border-radius:3px; background:linear-gradient(180deg,#0a84ff,#0071e3); }
@@ -1487,26 +1311,51 @@ h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.
 :deep(.el-input-group__append) .append-group .el-button:hover { background:#eaf3ff; color:#0071e3; }
 .append-sep { flex:0 0 auto; width:1px; height:14px; margin:0 4px; background:#dfe3e9; }
 
-/* 配置 */
-.config-grid { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(280px,.9fr); gap:24px; }
-.config-form :deep(.el-form-item__label) { font-size:13px; font-weight:600; color:#303133; padding-bottom:6px; }
-.config-form :deep(.el-form-item) { margin-bottom:14px; }
-.detect-panel { background:#f7f9fc; border:1px solid #ebedf0; border-radius:12px; padding:16px; }
-.detect-title { font-size:13px; font-weight:700; color:#303133; margin-bottom:10px; }
-.detect-empty { color:#909399; font-size:12.5px; line-height:1.6; }
-.detect-row { display:flex; gap:12px; align-items:flex-start; margin-bottom:10px; font-size:13px; }
-.detect-key { flex-shrink:0; width:110px; color:#6e6e73; font-weight:600; }
-.detect-value { color:#1d1d1f; word-break:break-all; }
-.detect-value code, code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size:12px; }
+/* 配置：两列网格，起始地址/工作区/目标文件占整行；Python 解释器进「高级设置」 */
+.config-form--grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:0 20px; align-items:start; }
+.config-form--grid .span-2 { grid-column:1 / -1; }
+.config-form :deep(.el-form-item__label) { font-size:12.5px; font-weight:600; color:#303133; padding-bottom:4px; }
+.config-form :deep(.el-form-item) { margin-bottom:12px; }
+/* el-form-item__content 默认是横向 flex，输入框 + 提示 + 检测结果会被挤到一行；这里改成纵向 */
+.config-form :deep(.el-form-item__content) { flex-direction:column; align-items:stretch; }
+.advanced-row { margin:-2px 0 10px; }
+.advanced-toggle { padding:0; border:0; background:transparent; color:#0071e3; font-size:12.5px; font-weight:500; cursor:pointer; }
+.advanced-toggle:hover { color:#0077ed; }
+
+/* 检测结果：一行 chips，细节折叠在「依据与参考文件」里 */
+.detect-inline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; }
+.detect-chip { display:inline-flex; align-items:center; height:22px; padding:0 9px; border-radius:999px; background:#f2f5f9; color:#5b6472; font-size:11.5px; font-family:ui-monospace, 'Cascadia Code', Consolas, monospace; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.detect-chip.is-ok { background:#eaf7ef; color:#1e7a46; }
+.detect-chip.is-warn { background:#fff7e6; color:#ad6800; }
+.detect-more { flex-basis:100%; margin-top:2px; font-size:12px; color:#6e6e73; }
+.detect-more summary { cursor:pointer; color:#0071e3; font-size:12px; }
+code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size:12px; }
 .detect-sample { color:#1d1d1f; font-family: ui-monospace, Consolas, monospace; font-size:12px; line-height:1.7; }
-.detect-evidence { margin-top:8px; font-size:12px; color:#6e6e73; }
-.detect-evidence summary { cursor:pointer; color:#0071e3; }
 .evidence-line { display:flex; gap:8px; padding:3px 0; }
 .evidence-kind { color:#303133; font-weight:600; min-width:110px; }
 .evidence-source { color:#a1a1a6; margin-left:auto; }
 
 /* 主布局 */
-.main-layout { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(330px,.75fr); gap:20px; align-items:start; }
+.main-layout { display:flex; flex-direction:column; gap:16px; min-width:0; }
+/* 左配置 / 右步骤+生成：一屏看完，生成记录单独成页 */
+/* 普通模式整页锁一屏：标题常驻，左右两列各自内部滚动，步骤再多也不把页面撑长。
+   100dvh - 72(顶栏) - 44(上下留白) = 内容高度 */
+.recording-page:not(.is-panel):not(.is-embed) { height:calc(100dvh - 116px); display:flex; flex-direction:column; }
+/* page-col 是内容的外壳（embed 模式也用它）：普通模式下必须把高度传下去，链条才不断 */
+.recording-page:not(.is-panel):not(.is-embed) .page-col { flex:1; min-height:0; display:flex; flex-direction:column; }
+.recording-page:not(.is-panel):not(.is-embed) .page-col > .page-header { flex:none; }
+.recording-body { display:grid; grid-template-columns:minmax(340px,400px) minmax(0,1fr); grid-template-rows:minmax(0,1fr); gap:16px; align-items:stretch; flex:1; min-height:0; }
+/* 左列配置超高时自己滚 */
+.recording-body .config-card { min-height:0; overflow-y:auto; }
+/* 右列：步骤吃满剩余高度，生成卡贴底 */
+.recording-body .main-layout { height:100%; min-height:0; }
+.recording-body .steps-card { flex:1; min-height:0; display:flex; flex-direction:column; }
+.recording-body .steps-card :deep(.el-card__body) { flex:1; min-height:0; overflow-y:auto; }
+.recording-body .generate-card { flex:none; }
+.recording-body .config-form--grid { grid-template-columns:1fr; gap:0; }
+.recording-body .panel-card { margin-bottom:0; }
+.gen-result-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px; }
+.gen-result-actions .field-hint { margin-top:0; }
 
 /* 状态 */
 .state-pill { display:inline-flex; align-items:center; height:24px; padding:0 10px; border-radius:999px; font-size:12px; font-weight:700; background:#f2f4f7; color:#6e6e73; }
@@ -1521,9 +1370,13 @@ h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.
 .pause-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff4e6; color:#b45309; border:1px dashed #f3c98b; font-size:12.5px; line-height:1.5; }
 .session-error { margin-top:12px; }
 
+/* 空状态：一行提示，别用 el-empty 那张大插画占半屏 */
+.steps-empty { display:flex; align-items:center; gap:8px; margin-top:14px; padding:12px 14px; border:1px dashed #e4e7ed; border-radius:10px; background:#fbfcfe; color:#909399; font-size:13px; }
+.steps-empty-dot { flex:none; width:7px; height:7px; border-radius:50%; background:#c9d6ea; }
+
 /* 时间线 */
-.timeline { list-style:none; margin:16px 0 0; padding:0; display:flex; flex-direction:column; gap:10px; }
-.step { display:flex; gap:12px; align-items:flex-start; padding:12px 12px 12px 10px; border:1px solid #ebedf0; border-radius:12px; background:#fff; transition:border-color .18s ease, box-shadow .18s ease; }
+.timeline { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:8px; }
+.step { display:flex; gap:10px; align-items:flex-start; padding:10px 10px 10px 9px; border:1px solid #ebedf0; border-radius:12px; background:#fff; transition:border-color .18s ease, box-shadow .18s ease; }
 .step:hover { border-color:#dce7fb; box-shadow:0 4px 14px rgba(16,24,40,.06); }
 .step.is-blocked { border-color:#ffccc7; background:#fffbfa; }
 .step-no { flex-shrink:0; width:24px; height:24px; border-radius:50%; background:#eef4ff; color:#0071e3; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums; }
@@ -1568,6 +1421,10 @@ h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.
 
 /* 生成 */
 .checklist { display:flex; flex-direction:column; gap:10px; margin-bottom:18px; }
+/* 未停止录制时只留一行，别让 4 条「未满足」把整张卡撑高 */
+.gen-compact { margin-bottom:14px; padding:10px 12px; border-radius:10px; background:#f7f9fc; color:#6e6e73; font-size:13px; line-height:1.5; }
+.gen-compact b { color:#0071e3; font-weight:700; }
+.gen-compact-bad { color:#d4380d; }
 .check { display:flex; align-items:flex-start; gap:10px; font-size:13px; color:#6e6e73; line-height:1.5; }
 .check-dot { flex-shrink:0; width:9px; height:9px; margin-top:6px; border-radius:50%; background:#d0d5dd; }
 .check.ok { color:#1e7a46; }
@@ -1583,30 +1440,15 @@ h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.
 .gen-result { margin-top:14px; padding:12px; border-radius:10px; background:#f0faf4; }
 .gen-result-title { color:#1e7a46; font-weight:700; font-size:13.5px; }
 
-/* 生成记录 */
-.records-layout { display:grid; grid-template-columns:minmax(260px,.8fr) minmax(0,1.6fr); gap:20px; min-height:200px; }
-.record-list { display:flex; flex-direction:column; gap:8px; max-height:560px; overflow:auto; }
-.record-item { padding:12px; border:1px solid #ebedf0; border-radius:10px; cursor:pointer; background:#fff; transition:border-color .15s ease, background .15s ease; }
-.record-item:hover { border-color:#dce7fb; background:#fbfdff; }
-.record-item.active { border-color:#0071e3; background:#f5f9ff; }
-.record-path { color:#1d1d1f; font-size:13px; font-weight:600; font-family: ui-monospace, Consolas, monospace; word-break:break-all; }
-.record-meta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:6px; color:#8e8e93; font-size:12px; }
-.record-detail { min-width:0; }
-.detail-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:12px; }
-.detail-title { color:#1d1d1f; font-size:15px; font-weight:700; font-family: ui-monospace, Consolas, monospace; word-break:break-all; }
-.detail-alert { margin-bottom:12px; }
-.detail-section { margin-top:14px; }
-.detail-label { font-size:12px; font-weight:700; color:#6e6e73; margin-bottom:8px; letter-spacing:.2px; }
-.mini-steps { margin:0; padding-left:18px; color:#303133; font-size:12.5px; line-height:1.8; }
-.mini-kind { display:inline-block; min-width:64px; color:#0071e3; font-weight:600; }
-.code-preview { margin:0; max-height:360px; overflow:auto; padding:14px; border-radius:10px; background:#0f172a; color:#e2e8f0; font-size:12px; line-height:1.6; font-family: ui-monospace, Consolas, monospace; white-space:pre; }
-.agent-reply { padding:10px 12px; border-radius:9px; background:#f7f9fc; color:#303133; font-size:12.5px; line-height:1.6; white-space:pre-wrap; }
-.commit-box { padding:12px; border:1px solid #ebedf0; border-radius:10px; }
-.commit-actions { margin-top:10px; display:flex; justify-content:flex-end; }
-.detail-actions { margin-top:14px; display:flex; justify-content:flex-end; }
+
+
+@media (max-height: 620px) {
+  .recording-page:not(.is-panel):not(.is-embed) { height:auto; }
+}
 
 @media (max-width: 1100px) {
-  .config-grid, .main-layout, .records-layout { grid-template-columns:1fr; }
+  .recording-body { grid-template-columns:1fr; }
+  .config-form--grid { grid-template-columns:1fr; }
   .form-grid { grid-template-columns:1fr; }
 }
 </style>

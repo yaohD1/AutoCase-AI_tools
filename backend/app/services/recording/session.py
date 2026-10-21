@@ -129,6 +129,8 @@ class RecordingSession(object):
         return self._call('stop')
 
     def cancel(self):
+        """内部中止：关浏览器但不重校验定位。界面上没有入口（只有「停止录制」），
+        主要给测试 teardown 这类「不关心最终定位状态」的场景用。"""
         return self._call('cancel')
 
     def relayout(self):

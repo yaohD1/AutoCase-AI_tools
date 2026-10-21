@@ -137,11 +137,6 @@ def stop_recording():
     return _mutate(lambda session: session.stop())
 
 
-@recording_bp.route('/automation/recording/cancel', methods=['POST'])
-def cancel_recording():
-    return _mutate(lambda session: session.cancel())
-
-
 @recording_bp.route('/automation/recording/steps/<int:no>', methods=['DELETE'])
 def delete_recording_step(no):
     return _mutate(lambda session: session.remove_step(no))

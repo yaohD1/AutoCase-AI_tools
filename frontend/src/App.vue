@@ -1,5 +1,5 @@
 <template>
-  <div id="app" :class="{ 'is-panel-mode': panelMode }">
+  <div id="app" :class="{ 'is-panel-mode': panelMode, 'is-workspace': workspaceMode }">
     <el-container>
       <el-header v-if="!panelMode">
         <div class="header-content">
@@ -38,9 +38,11 @@ import { Setting } from '@element-plus/icons-vue'
 const route = useRoute()
 const panelMode = computed(() => route.query.panel === '1' || route.query.embed === '1')
 
-// body 默认有 8px margin，全屏时会造成 16px 溢出并出现滚动条（右侧多一条空白）。
+// 录制/生成记录是「一屏看完」的工作页：收掉 body 的 8px 默认边距和多余的页面留白，避免 16px 溢出滚出滚动条。
+const workspaceMode = computed(() => !panelMode.value && route.path.startsWith('/recording'))
+
 watchEffect(() => {
-  document.body.classList.toggle('immersive', panelMode.value)
+  document.body.classList.toggle('immersive', panelMode.value || workspaceMode.value)
 })
 </script>
 
@@ -122,6 +124,10 @@ watchEffect(() => {
 }
 
 /* 编排面板窗口：无顶部导航、无留白、高度锁死一屏 */
+#app.is-workspace .el-main {
+  padding: 22px 32px;
+}
+
 #app.is-panel-mode .el-main {
   padding: 0;
   min-height: 100vh;

@@ -187,9 +187,6 @@ batchDeleteTestcases(ids) {
   stopRecording() {
     return api.post('/automation/recording/stop')
   },
-  cancelRecording() {
-    return api.post('/automation/recording/cancel')
-  },
   deleteRecordingStep(no) {
     return api.delete(`/automation/recording/steps/${no}`)
   },
