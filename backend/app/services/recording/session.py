@@ -852,7 +852,13 @@ class RecordingSession(object):
             return
 
         # 记录元素所在的 iframe（主框架为 None），回放时据此找到同一个框架。
-        snap = dict(snap, frame_url=frame.url if frame.parent_frame is not None else None)
+        # frame_name 是给 SeleniumLibrary 的 Select Frame 用的：它认 name/id，不认 url。
+        if frame.parent_frame is not None:
+            try:
+                frame_name = frame.name or None
+            except Exception:
+                frame_name = None
+            snap = dict(snap, frame_url=frame.url, frame_name=frame_name)
         # _mark 只用于这一轮求 index，不留在 target 里（它只是个临时 DOM 属性名）。
         mark = snap.pop('_mark', None)
         counted = self._count(frame, build_specs(snap), mark=mark)

@@ -11,10 +11,18 @@
 import re
 
 PW_KINDS = ('testid', 'role', 'label', 'placeholder', 'text', 'css')
-RF_KINDS = ('rf_id', 'rf_name', 'rf_xpath', 'rf_css')
+# RF 组按「语义强度」排：属性型（testid/id/name/aria/label）优先，文本型其次，结构定位兜底。
+# 新增 rf_testid / rf_aria / rf_label 是为了让快照里的每个语义信号都有 xpath 等价物，
+# 否则 div 按钮、菜单项、图标按钮只能掉到 rf_css（详见 test_recording_locator_parity）。
+RF_KINDS = ('rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_xpath', 'rf_css')
 # 排序优先级：Playwright 组在前，RF 组在后。rank() 给出的主定位只用于 Playwright 预览。
 PRIORITY = PW_KINDS + RF_KINDS
-RF_PREFERENCE = ('rf_id', 'rf_name', 'rf_xpath', 'rf_css')
+RF_PREFERENCE = ('rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_xpath', 'rf_css')
+
+# 文本型 xpath 只对「通常不嵌套同类标签」的元素生成，避免 //div[...] 把祖先容器也算进来
+# （Playwright 的 text 引擎只命中最小元素，两侧计数会对不上）。
+TEXT_TAGS = ('button', 'a', 'label', 'span', 'li', 'td', 'th', 'option', 'p',
+             'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'em')
 
 # 这些定位依赖页面结构（位置、顺序），结构一变就可能指向别的元素。
 # 只要唯一就接受（用户确认），但要标黄让用户看见。
@@ -60,20 +68,58 @@ def build_specs(snap):
     if snap.get('css'):
         specs.append(_spec('css', 'locator', [snap['css']], "locator(%r)" % snap['css']))
 
-    # Robot Framework 组：统一用 Playwright 的 css= / xpath= 前缀去页面上数，与 SeleniumLibrary 的语义一致。
+    # ---- Robot Framework 组：把同一份快照里的每个语义信号投影成等价 xpath ----
+    # 只投影「可证明等价」的属性（testid / id / name / aria-label / placeholder / label 关联 / 文本），
+    # 这样两套框架的命中集合才对得上；结构路径（css）永远排最后兜底。
+    testid = snap.get('testid')
+    if testid:
+        expr = '//*[@data-testid=%s]' % _xpath_literal(testid)
+        specs.append(_spec('rf_testid', 'locator', ['xpath=' + expr], 'rf testid:' + testid))
+
     element_id = snap.get('id')
     if element_id and not _DYNAMIC_ID.search(element_id):
-        specs.append(_spec('rf_id', 'locator', ['css=[id="%s"]' % element_id], 'rf id:%s' % element_id))
+        expr = '//*[@id=%s]' % _xpath_literal(element_id)
+        specs.append(_spec('rf_id', 'locator', ['xpath=' + expr], 'rf id:' + element_id))
+
     attr_name = snap.get('attr_name')
     if attr_name:
-        specs.append(_spec('rf_name', 'locator', ['css=[name="%s"]' % attr_name], 'rf name:%s' % attr_name))
+        expr = '//*[@name=%s]' % _xpath_literal(attr_name)
+        specs.append(_spec('rf_name', 'locator', ['xpath=' + expr], 'rf name:' + attr_name))
+
+    aria = snap.get('aria_label')
+    if aria:
+        expr = '//*[@aria-label=%s]' % _xpath_literal(aria)
+        specs.append(_spec('rf_aria', 'locator', ['xpath=' + expr], 'rf aria:' + aria))
+
+    label = snap.get('label')
+    if label:
+        # for= 关联和包裹式 <label> 是两种结构，各出一条；命中数为 0 的那条自然被跳过。
+        specs.append(_spec('rf_label', 'locator',
+                           ['xpath=//*[@id=//label[normalize-space(.)=%s]/@for]' % _xpath_literal(label)],
+                           'rf label(for):' + label))
+        specs.append(_spec('rf_label', 'locator',
+                           ['xpath=//label[normalize-space(.)=%s]//*[self::input or self::textarea or self::select]'
+                            % _xpath_literal(label)],
+                           'rf label(wrap):' + label))
+
+    placeholder = snap.get('placeholder')
+    if placeholder:
+        expr = '//*[@placeholder=%s]' % _xpath_literal(placeholder)
+        specs.append(_spec('rf_xpath', 'locator', ['xpath=' + expr], 'rf xpath:' + expr))
+
     tag = snap.get('tag')
-    if tag in ('button', 'a') and text and len(text) <= 40:
-        expr = "//%s[normalize-space(.)=%s]" % (tag, _xpath_literal(text))
-        specs.append(_spec('rf_xpath', 'locator', ['xpath=' + expr], 'rf xpath:' + expr))
-    if snap.get('placeholder') and tag == 'input':
-        expr = "//input[@placeholder=%s]" % _xpath_literal(snap['placeholder'])
-        specs.append(_spec('rf_xpath', 'locator', ['xpath=' + expr], 'rf xpath:' + expr))
+    text = snap.get('text')
+    if text and len(text) <= 40:
+        # 显式 role 用 //*[@role=...]，能覆盖 div/span 这类组件库按钮；
+        # 隐式 role 不能这么写（真实 <button> 上没有 role 属性），所以标签名单独出一条。
+        role_attr = snap.get('role_attr')
+        if role_attr:
+            expr = '//*[@role=%s][normalize-space(.)=%s]' % (_xpath_literal(role_attr), _xpath_literal(text))
+            specs.append(_spec('rf_xpath', 'locator', ['xpath=' + expr], 'rf xpath:' + expr))
+        if tag in TEXT_TAGS:
+            expr = '//%s[normalize-space(.)=%s]' % (tag, _xpath_literal(text))
+            specs.append(_spec('rf_xpath', 'locator', ['xpath=' + expr], 'rf xpath:' + expr))
+
     if snap.get('css'):
         specs.append(_spec('rf_css', 'locator', ['css=' + snap['css']], 'rf css:' + snap['css']))
     return specs

@@ -12,15 +12,46 @@ RF_FRAMEWORK = 'robot-selenium'
 PW_FRAMEWORK = 'playwright-ts'
 MAX_REPAIR_ROUNDS = 1
 MAX_CANDIDATES_IN_PROMPT = 5
-PROMPT_RULES = (
+LOCATOR_RULES = (
     '要求：\n'
     '- 只写 target_path 指定的文件，不改其他文件。\n'
     '- 定位优先用 target.locator；不要自己编造选择器，需要更精确时只能从 target.candidates 里挑或组合。\n'
     '- target.match_count > 1 表示这条定位在页面上匹配了多个元素，属于「不唯一但仍可用」：\n'
-    '  · 给了 target.nth，就写成 locator.nth(n)（Robot 写成 XPath 的第 n+1 个，例如 (//button[...])[3]）；\n'
+    '  · 给了 target.nth，就取第 nth 个（下标从 0 开始）：\n'
+    '    playwright-ts 写 locator.nth(n)；\n'
+    '    robot-selenium 写 xpath=(<target.locator 去掉 xpath= 前缀后的表达式>)[n+1]，不要改写表达式本身；\n'
     '  · 没给 nth，就取第一个，并在该行上方加一行注释：匹配 N 个元素，取第 1 个，请确认。\n'
     '- target.match_count 为 null 时这一步拿不到定位，写一行 TODO 注释说明，不要猜。\n'
+    '- step.page_index 大于 0 表示这一步发生在第几个标签页（按打开顺序，从 0 开始）：'
+    'playwright-ts 取 context.pages[i]，robot-selenium 用 Switch Window 配合 ${windows}[i]（窗口句柄顺序与打开顺序一致）。\n'
+    '- target.frame 存在表示元素在 iframe 里：playwright-ts 用 page.frameLocator(frame.url)，'
+    'robot-selenium 先 Select Frame（优先 frame.name，没有 name 就用 src 的 xpath）。'
+    '不要在顶层 page 上直接定位 frame 内的元素。\n'
 )
+
+# 两套框架的差异不只在定位写法，还在「有没有自动等待」——这是脚本能不能稳定跑起来的分水岭。
+# SeleniumLibrary 拿到元素就操作，页面没渲染好直接失败；Playwright 自带 auto-wait。
+FRAMEWORK_RULES = {
+    'robot-selenium': (
+        '框架写法（SeleniumLibrary，没有自动等待，每条交互前必须显式等待）：\n'
+        '- 打开页面 Go To；点击 Click Element；输入 Input Text / Input Password；'
+        '下拉用 Select From List By Label（或 By Value），不要用 Click Element 点原生 select。\n'
+        '- 任何交互前先 Wait Until Element Is Visible（超时 10s），不要用 Sleep 代替等待。\n'
+        '- 断言/等待映射：visible → Wait Until Element Is Visible；hidden → Wait Until Element Is Not Visible；'
+        'text_contains → Wait Until Element Contains；text_equals → Wait Until Keyword Succeeds | 10x | 500ms | '
+        'Element Text Should Be；value_equals → Wait Until Keyword Succeeds + Textfield Value Should Be；'
+        'url_contains → Wait Until Location Contains；enabled → Wait Until Keyword Succeeds + Element Should Be Enabled。\n'
+        '- 新标签页用 Switch Window 配合 Wait Until Keyword Succeeds；frame 内操作前先 Select Frame。\n'
+        '- target.locator 已带 xpath= 前缀，原样使用，不要再包 css= 或再拼前缀。\n'
+    ),
+    'playwright-ts': (
+        '框架写法（Playwright，自带 auto-wait）：\n'
+        '- 直接 click / fill / selectOption，不要用 waitForTimeout 充当等待。\n'
+        '- 断言用 expect(locator)：toBeVisible / toBeHidden / toHaveText / toHaveValue；'
+        '地址断言用 expect(page).toHaveURL(...)。\n'
+        '- 新标签页用 context.waitForEvent("page")；frame 内用 page.frameLocator(目标 frame 的 url)。\n'
+    ),
+}
 
 
 class EmitError(Exception):
@@ -65,6 +96,13 @@ def _steps_for_prompt(steps, framework):
                 'nth': info['nth'] if info else None,
                 'candidates': _candidates_for_prompt(target, framework),
             }
+            # 元素在 iframe 里时，模型必须知道要先切框架，否则会写成顶层 page.getByRole。
+            snap = target.get('snap') or {}
+            if snap.get('frame_url') or snap.get('frame_name'):
+                item['target']['frame'] = {'url': snap.get('frame_url'), 'name': snap.get('frame_name')}
+        # 标签页序号：0 是主标签页，非 0 说明这一步是在别的标签页里发生的。
+        if step.get('page_index'):
+            item['page_index'] = step['page_index']
         out.append(item)
     return out
 
@@ -112,8 +150,9 @@ def _prompt(payload):
     return (
         '请按下面的录制结果写入一个测试文件。\n'
         '只写 target_path 指定的文件，不写其他文件。\n'
-        + PROMPT_RULES +
-        '```json\n' + json.dumps(payload, ensure_ascii=False, indent=2) + '\n```\n'
+        + LOCATOR_RULES
+        + FRAMEWORK_RULES.get(payload.get('framework'), '')
+        + '```json\n' + json.dumps(payload, ensure_ascii=False, indent=2) + '\n```\n'
     )
 
 

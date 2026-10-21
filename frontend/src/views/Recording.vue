@@ -525,7 +525,7 @@ const STATE_LABELS = {
 const STORAGE_KEY = 'autocase.recording.config'
 // 与后端 locators.py 保持一致：Playwright 与 RF 两组的优先级，以及结构定位（需标黄）。
 const PW_ORDER = ['testid', 'role', 'label', 'placeholder', 'text', 'css']
-const RF_ORDER = ['rf_id', 'rf_name', 'rf_xpath', 'rf_css']
+const RF_ORDER = ['rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_xpath', 'rf_css']
 const FRAGILE_KINDS = ['css', 'rf_css']
 
 const config = reactive(loadConfig())

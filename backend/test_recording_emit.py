@@ -177,6 +177,29 @@ class EmitTest(unittest.TestCase):
         with self.assertRaises(emit.EmitError):
             emit.generate(FakeRunner(), self.ws, 'p/m', [], 'robot-selenium', TARGET, 'Login')
 
+    def test_prompt_carries_framework_waits_and_frame_context(self):
+        """两套框架的提示词必须是「各自的写法」：RF 要有显式等待，PW 要有 auto-wait 语义。"""
+        step = _rf_step()
+        step['page_index'] = 1
+        step['target']['snap'] = {'tag': 'input', 'frame_url': 'http://a/frame.html', 'frame_name': 'inner'}
+        rf_steps = emit._steps_for_prompt([step], 'robot-selenium')
+        self.assertEqual(rf_steps[0]['page_index'], 1)
+        self.assertEqual(rf_steps[0]['target']['frame'],
+                         {'url': 'http://a/frame.html', 'name': 'inner'})
+
+        rf_prompt = emit._prompt({'framework': 'robot-selenium', 'steps': rf_steps})
+        self.assertIn('Wait Until Element Is Visible', rf_prompt)
+        self.assertIn('Select Frame', rf_prompt)
+        self.assertNotIn('自带 auto-wait', rf_prompt)
+
+        pw_prompt = emit._prompt({'framework': 'playwright-ts', 'steps': []})
+        self.assertIn('frameLocator', pw_prompt)
+        self.assertNotIn('Wait Until Element Is Visible', pw_prompt)
+        # 主框架的步骤不该带 frame 字段，否则模型会多写一层切框架。
+        plain = emit._steps_for_prompt([_rf_step()], 'robot-selenium')[0]
+        self.assertNotIn('frame', plain['target'])
+        self.assertNotIn('page_index', plain)
+
 
 if __name__ == '__main__':
     unittest.main()

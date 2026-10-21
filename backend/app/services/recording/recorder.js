@@ -71,8 +71,13 @@
       tag: el.tagName.toLowerCase(),
       type: el.getAttribute('type'),
       role: el.getAttribute('role') || implicitRole(el),
+      // role_attr 只保留显式写的 role。隐式角色（<button> 的 button）在 xpath 里不存在，
+      // RF 投影必须区分这两种情况，否则会生成 //*[@role='button'] 这种命中 0 条的候选。
+      role_attr: el.getAttribute('role'),
       name: name ? name.slice(0, 80) : null,
       label: label,
+      // aria-label 单独留一份：name 会被 label / 文本覆盖，投影 xpath 时需要原始值。
+      aria_label: el.getAttribute('aria-label'),
       placeholder: el.getAttribute('placeholder'),
       testid: el.getAttribute('data-testid'),
       text: text,
