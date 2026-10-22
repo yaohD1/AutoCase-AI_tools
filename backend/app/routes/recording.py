@@ -11,8 +11,8 @@ from app.services.automation_generator import AutomationScriptGenerator
 from app.services.opencode_runner import OpenCodeRunner
 from app.models import db
 from app.models.recording_generation import RecordingGeneration
-from app.services.recording import detect, emit, records
-from app.services.recording import intent
+from app.services.recording import detect, emit, records, replay
+from app.services.recording import intent, verify
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
 
 
@@ -137,6 +137,37 @@ def stop_recording():
     return _mutate(lambda session: session.stop())
 
 
+@recording_bp.route('/automation/recording/close', methods=['POST'])
+def close_recording_browser():
+    """停止后关掉浏览器（录制结果保留）。停止本身不再关窗口，所以需要一个显式出口。"""
+    return _mutate(lambda session: session.close_browser())
+
+
+@recording_bp.route('/automation/recording/verify', methods=['POST'])
+def verify_recording_intent():
+    """插入前验证：在当前页面判断这条断言此刻是否成立。
+
+    只读当前页面，不等待、不回放；结果要按「此刻」理解，界面上也必须这么标。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    if not session.snapshot().get('browser_open'):
+        return _error('浏览器已关闭，无法再看当前页面', 409)
+    body = request.get_json(silent=True) or {}
+    try:
+        checked = intent.validate(body.get('intent'), session.aliases())
+    except intent.IntentError as exc:
+        return _error(str(exc), 400)
+    try:
+        result = session.verify_intent(checked)
+    except RecordingError as exc:
+        return _error(str(exc), 409)
+    except verify.VerifyError as exc:
+        return _error(str(exc), 422)
+    return jsonify(result), 200
+
+
 @recording_bp.route('/automation/recording/steps/<int:no>', methods=['DELETE'])
 def delete_recording_step(no):
     return _mutate(lambda session: session.remove_step(no))
@@ -256,6 +287,34 @@ def generate_recording():
 
 def _record_or_404(generation_id):
     return db.session.get(RecordingGeneration, generation_id)
+
+
+@recording_bp.route('/automation/recording/replay', methods=['POST'])
+def replay_recording():
+    """在浏览器里把录制重跑一遍，验证定位是否仍然有效。
+
+    校验的是「录制本身还能不能走通」，不是「生成的脚本对不对」，所以两个框架都能校验：
+    RF 的 rf_* 候选本来就是用 Playwright 的 xpath= / css= 计数的，不需要 Selenium 环境。
+    不生成代码、不写文件。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    if session.status not in ('stopped', 'idle_timeout', 'closed'):
+        return _error('请先停止录制再回放校验', 409)
+    body = request.get_json(silent=True) or {}
+    framework = (body.get('framework') or '').strip() or replay.PW_FRAMEWORK
+    if framework not in (replay.PW_FRAMEWORK, replay.RF_FRAMEWORK):
+        return _error('不支持的框架：%s' % framework, 400)
+    steps = session.ir()
+    if not steps:
+        return _error('还没有录制任何步骤', 400)
+    try:
+        result = replay.replay_checked(steps, framework=framework,
+                                       headless=bool(body.get('headless', True)))
+    except Exception as exc:  # 浏览器起不来、页面打不开等环境问题
+        return _error('回放无法执行：%s' % exc, 500)
+    return jsonify(result), 200
 
 
 @recording_bp.route('/automation/recording/generations', methods=['GET'])

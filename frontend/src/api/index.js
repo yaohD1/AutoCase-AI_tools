@@ -187,6 +187,14 @@ batchDeleteTestcases(ids) {
   stopRecording() {
     return api.post('/automation/recording/stop')
   },
+  // 停止后浏览器仍然开着，需要显式关掉
+  closeRecordingBrowser() {
+    return api.post('/automation/recording/close')
+  },
+  // 插入前验证：只看当前页面这一刻的状态，不回放
+  verifyRecordingIntent(intent) {
+    return api.post('/automation/recording/verify', { intent }, { timeout: 30000 })
+  },
   deleteRecordingStep(no) {
     return api.delete(`/automation/recording/steps/${no}`)
   },
@@ -206,6 +214,10 @@ batchDeleteTestcases(ids) {
   },
   generateRecording(data) {
     return api.post('/automation/recording/generate', data, { timeout: 1900000 })
+  },
+  // 回放校验要起浏览器把录制重跑一遍，10 步大概十几秒，超时给宽一点
+  replayRecording(data) {
+    return api.post('/automation/recording/replay', data, { timeout: 300000 })
   },
   listRecordingGenerations() {
     return api.get('/automation/recording/generations')

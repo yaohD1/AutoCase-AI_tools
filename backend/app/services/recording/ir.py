@@ -8,7 +8,7 @@ STEP_TYPES = ('goto', 'click', 'fill', 'select', 'new_page', 'assert', 'wait', '
 # 断言 / 等待的意图类型，固定 schema。代码片段由生成 agent 按框架写。
 INTENT_TYPES = (
     'visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled',
-    'url_contains', 'wait_visible', 'wait_hidden', 'sleep',
+    'url_contains', 'page_text_contains', 'wait_visible', 'wait_hidden', 'sleep',
 )
 
 
@@ -21,11 +21,15 @@ def step_type_for_intent(kind):
     return 'assert'
 
 
+# 别名要显示在下拉里，也要写进给模型的提示词，太长会挤掉真正有区分度的部分。
+ALIAS_MAX_LENGTH = 40
+
+
 def make_target(snap, candidates, primary, status):
     """目标元素。alias 用于在模板里引用这个元素。"""
     alias = snap.get('name') or snap.get('label') or snap.get('placeholder') or snap.get('text') or snap.get('tag')
     return {
-        'alias': (alias or '')[:40],
+        'alias': (alias or '')[:ALIAS_MAX_LENGTH],
         'snap': snap,
         'candidates': candidates,
         'primary': primary,

@@ -51,7 +51,6 @@ SNAP_JS = r"""
     if (t === 'a' && node.href) return 'link';
     if (t === 'select') return 'combobox';
     if (t === 'textarea') return 'textbox';
-    if (t === 'li') return 'listitem';
     if (t === 'input') {
       const ty = (node.type || 'text');
       if (ty === 'button' || ty === 'submit' || ty === 'reset') return 'button';
@@ -106,6 +105,11 @@ SNAP_JS = r"""
 """
 
 IDX_JS = "els => els.map(e => e.getAttribute('data-idx'))"
+
+# 只有一个无 label 的 select：验证「没有可访问名称的控件」也能拿到语义定位。
+ONLY_SELECT = """<!doctype html><html><head><meta charset="utf-8"></head><body>
+<select data-idx="1"><option>北京</option><option>上海</option></select>
+</body></html>"""
 
 # (data-idx, 说明)。这些都是真实页面里最常见的元素形态。
 CASES = [
@@ -188,6 +192,23 @@ class LocatorParityTest(unittest.TestCase):
                 for spec, count, hit in self._resolve(idx):
                     if spec['kind'] in RF_KINDS and count == 1:
                         self.assertEqual(hit, [str(idx)], 'RF 候选唯一但指错：%s' % spec['desc'])
+
+    def test_no_pw_candidate_points_elsewhere(self):
+        """Playwright 组做同样的约束：新增的裸 role 候选靠「页面上只有一个」成立，更容易选错。"""
+        for idx, name in CASES:
+            with self.subTest(element=name):
+                for spec, count, hit in self._resolve(idx):
+                    if spec['kind'] in PW_KINDS and count == 1:
+                        self.assertEqual(hit, [str(idx)], 'PW 候选唯一但指错：%s' % spec['desc'])
+
+    def test_widget_without_accessible_name_stays_semantic(self):
+        """没有 label / aria-label 的 select：Playwright 以前只能落到 css，现在应走裸 role。"""
+        self.page.set_content(ONLY_SELECT)
+        measured = [(spec,) + self._measure(spec) for spec in build_specs(self.page.evaluate(SNAP_JS, 1))]
+        self.assertIn('role_bare', [m[0]['kind'] for m in measured])
+        spec, hit = self._pick(measured, PW)
+        self.assertEqual(spec['kind'], 'role_bare', 'Playwright 仍落到结构定位：%s' % spec['desc'])
+        self.assertEqual(hit, ['1'])
 
     def test_rf_keeps_semantic_locator_for_every_widget(self):
         """只要快照里有语义信号，RF 就必须给出非 css 的唯一候选（覆盖率对齐的核心断言）。"""

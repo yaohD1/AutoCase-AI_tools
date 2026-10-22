@@ -15,7 +15,7 @@ from app.services.recording.session import RecordingSession  # noqa: E402
 
 PAGE = (
     '<!doctype html><html><head><meta charset="utf-8"><title>录制测试</title></head>'
-    '<body><input placeholder="用户名"></body></html>'
+    '<body><input placeholder="用户名"><p>登录成功</p></body></html>'
 ).encode('utf-8')
 MODEL = 'volcengine-plan/deepseek-v4-flash'
 START = '/api/automation/recording/start'
@@ -53,15 +53,14 @@ class RecordingRoutesTest(unittest.TestCase):
         cls.client = cls.app.test_client()
 
     def setUp(self):
+        # 上一轮可能是「停止但浏览器还开着」的会话，先收掉再开始。
+        RecordingSession.dispose_current()
         RecordingSession._current = None
 
     def tearDown(self):
         session = RecordingSession.current()
-        if session is not None and session.status in ('starting', 'recording'):
-            try:
-                session.cancel()
-            except Exception:
-                pass
+        if session is not None:
+            session.dispose()
 
     def _start(self):
         r = self.client.post(START, json={'base_url': _BASE})
@@ -71,11 +70,14 @@ class RecordingRoutesTest(unittest.TestCase):
     def _stop(self):
         return self.client.post('/api/automation/recording/stop')
 
+    def _verify(self, intent):
+        return self.client.post('/api/automation/recording/verify', json={'intent': intent})
+
     def test_start_rejects_non_http_url(self):
         r = self.client.post(START, json={'base_url': 'file:///etc/passwd'})
         self.assertEqual(r.status_code, 400)
 
-    def test_start_is_exclusive_and_stop_is_final(self):
+    def test_start_is_exclusive_and_stop_is_idempotent(self):
         self._start()
         busy = self.client.post(START, json={'base_url': _BASE})
         self.assertEqual(busy.status_code, 409)
@@ -86,7 +88,54 @@ class RecordingRoutesTest(unittest.TestCase):
 
         stopped = self._stop().get_json()
         self.assertEqual(stopped['status'], 'stopped')
-        self.assertEqual(self._stop().status_code, 409)
+        # 停止只结束记录，浏览器留着：后面还要拾取元素、验证断言。
+        self.assertTrue(stopped['browser_open'])
+        self.assertEqual(self._stop().status_code, 200)
+
+    def test_browser_lives_through_stop_until_closed(self):
+        self._start()
+        self._stop()
+        picked = self.client.post('/api/automation/recording/pick', json={'on': True})
+        self.assertEqual(picked.status_code, 200, picked.get_json())
+        self.assertTrue(picked.get_json()['pick'])
+
+        closed = self.client.post('/api/automation/recording/close')
+        self.assertEqual(closed.status_code, 200, closed.get_json())
+        self.assertEqual(closed.get_json()['status'], 'stopped')
+        self.assertFalse(closed.get_json()['browser_open'])
+        # 关掉之后不能再操作，也不能再验证
+        self.assertEqual(self.client.post('/api/automation/recording/pick', json={'on': True}).status_code, 409)
+        self.assertEqual(
+            self._verify({'type': 'page_text_contains', 'value': '登录成功'}).status_code, 409)
+
+    def test_verify_reads_the_current_page(self):
+        self._start()
+        hit = self._verify({'type': 'page_text_contains', 'value': '登录成功'})
+        self.assertEqual(hit.status_code, 200, hit.get_json())
+        self.assertTrue(hit.get_json()['ok'])
+        self.assertIn('登录成功', hit.get_json()['actual'])
+
+        miss = self._verify({'type': 'page_text_contains', 'value': '查无此文'})
+        self.assertEqual(miss.status_code, 200, miss.get_json())
+        self.assertFalse(miss.get_json()['ok'])
+        self.assertIn('没有这段内容', miss.get_json()['detail'])
+
+        url = self._verify({'type': 'url_contains', 'value': 'index.html'})
+        self.assertTrue(url.get_json()['ok'])
+        self._stop()
+
+    def test_verify_still_works_after_stop(self):
+        self._start()
+        self._stop()
+        r = self._verify({'type': 'page_text_contains', 'value': '登录成功'})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertTrue(r.get_json()['ok'])
+
+    def test_verify_rejects_unknown_target(self):
+        self._start()
+        r = self._verify({'type': 'visible', 'target': '不存在'})
+        self.assertEqual(r.status_code, 400)
+        self._stop()
 
     def test_pick_toggles_on_active_session(self):
         self._start()

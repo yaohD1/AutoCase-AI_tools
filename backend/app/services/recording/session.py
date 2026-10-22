@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
-from app.services.recording import ir
+from app.services.recording import ir, verify
 from app.services.recording.locators import build_specs, rank, stale_check, status_of
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,8 +30,13 @@ CLEAR_MARK_JS = (
     % (TARGET_MARK_ATTR, TARGET_MARK_ATTR)
 )
 IDLE_SECONDS = 15 * 60
+# 停止后浏览器继续开着（用户还要拾取元素、验证断言），但不能永远占着：
+# 一小时没有任何命令就自己收掉。
+STOPPED_IDLE_SECONDS = 60 * 60
 PUMP_MS = 150
 COMMAND_TIMEOUT = 60
+# 关闭浏览器这类命令不能把请求线程拖住：关不掉就让线程自己退出。
+CLOSE_TIMEOUT = 8
 PICK_OFF_TAGS = ('select', 'label')
 NON_TEXT_INPUT_TYPES = ('button', 'submit', 'reset', 'checkbox', 'radio')
 # 被录制页面里的浮层：只显示最近几步，避免面板过高挡住应用。
@@ -92,6 +97,8 @@ class RecordingSession(object):
         self._events = []
         self._steps = []
         self._picks = []
+        # 元素身份 → 别名。同一个元素复用同一个别名，不同元素撞名时加后缀（见 _alias_for）。
+        self._alias_keys = {}
         self._wired = set()
         self._last_url = {}
         self._pick = False
@@ -112,8 +119,12 @@ class RecordingSession(object):
             current = cls._current
             if current is not None and current.status in ('starting', 'recording'):
                 raise RecordingBusy('已有正在进行的录制，请先停止或取消')
-            session = cls(base_url, headless=headless, driver=driver, panel_url=panel_url,
-                          panel_ratio=panel_ratio, hud_panel=hud_panel, embed_url=embed_url)
+        # 上一轮停止后浏览器还开着，开新的之前必须收掉，否则会留下一个没人管的窗口。
+        if current is not None:
+            current.dispose()
+        session = cls(base_url, headless=headless, driver=driver, panel_url=panel_url,
+                      panel_ratio=panel_ratio, hud_panel=hud_panel, embed_url=embed_url)
+        with cls._current_lock:
             cls._current = session
         session._thread.start()
         session._ready.wait(COMMAND_TIMEOUT)
@@ -127,6 +138,13 @@ class RecordingSession(object):
     def current(cls):
         return cls._current
 
+    @classmethod
+    def dispose_current(cls, timeout=CLOSE_TIMEOUT):
+        """把当前会话的浏览器收掉（应用退出、测试 teardown 用）。"""
+        current = cls._current
+        if current is not None:
+            current.dispose(timeout=timeout)
+
     def set_pick(self, on):
         return self._call('set_pick', on=bool(on))
 
@@ -135,24 +153,43 @@ class RecordingSession(object):
         return self._call('set_pause', on=bool(on))
 
     def stop(self):
+        """停止记录，但把浏览器留着：停止后仍可拾取元素、验证断言。"""
         return self._call('stop')
+
+    def close_browser(self):
+        """关掉浏览器与面板窗口（录制结果保留）。"""
+        return self._call('close', timeout=CLOSE_TIMEOUT)
+
+    def verify_intent(self, intent):
+        """在当前页面上判断一条断言此刻是否成立。"""
+        return self._call('verify', intent=intent)
 
     def cancel(self):
         """内部中止：关浏览器但不重校验定位。界面上没有入口（只有「停止录制」），
         主要给测试 teardown 这类「不关心最终定位状态」的场景用。"""
         return self._call('cancel')
 
+    def dispose(self, timeout=CLOSE_TIMEOUT):
+        """尽力关掉浏览器，失败也不抛：调用方只需要它「别留下窗口」。"""
+        try:
+            self._call('close', timeout=timeout)
+        except Exception:
+            pass
+
     def relayout(self):
         """把被测页面和面板窗口重新摆成左右并排。"""
         return self._call('relayout')
 
-    def _call(self, name, **kwargs):
-        # 先看状态而不是线程：停止后线程还要一会儿才退出，命令放进队列也没人取，会白等超时。
-        if self.status not in ('starting', 'recording') or not self._thread.is_alive():
+    def _call(self, name, timeout=COMMAND_TIMEOUT, **kwargs):
+        # 用线程是否存活判断，而不是状态：停止后浏览器还开着，命令照样要能发进去。
+        if not self._thread.is_alive():
             raise RecordingError('录制已结束')
         reply = queue.Queue(maxsize=1)
         self._commands.put((name, kwargs, reply))
-        ok, value = reply.get(timeout=COMMAND_TIMEOUT)
+        try:
+            ok, value = reply.get(timeout=timeout)
+        except queue.Empty:
+            raise RecordingError('录制线程没有响应，请重试')
         if not ok:
             raise RecordingError(value)
         return value
@@ -175,9 +212,17 @@ class RecordingSession(object):
                 'steps': steps,
                 'picks': picks,
                 'aliases': self.aliases(),
+                # 下拉里要区分「删除」和「删除#2」，只给字符串分不出来（见 alias_items）。
+                'alias_items': self.alias_items(),
                 # 面板窗口是否开着，前端据此显示「重新并排」按钮。
                 'panel': self._panel_page is not None,
+                # 浏览器的生命周期比录制长：停止后仍开着，前端据此决定能否继续拾取 / 验证。
+                'browser_open': self._browser_open(),
             }
+
+    def _browser_open(self):
+        return (getattr(self, '_browser', None) is not None
+                and self.status in ('starting', 'recording', 'stopped', 'idle_timeout'))
 
     def ir(self):
         """完整 IR（含可执行的定位 spec），供回放与生成使用；不返回给前端。"""
@@ -198,6 +243,58 @@ class RecordingSession(object):
             if alias and alias not in seen:
                 seen.append(alias)
         return seen
+
+    def alias_items(self):
+        """给界面用的别名列表：带上是第几步 / 拾取来的，用户才分得清「删除」和「删除#2」。"""
+        items = []
+        seen = set()
+        with self._lock:
+            rows = [(s['target'], s['no'], s['type']) for s in self._steps if s.get('target')]
+            rows += [(p['target'], None, 'pick') for p in self._picks]
+        for target, no, kind in rows:
+            alias = target.get('alias')
+            if not alias or alias in seen:
+                continue
+            seen.add(alias)
+            items.append({
+                'alias': alias,
+                'hint': ('第 %d 步 · %s' % (no, STEP_TITLES.get(kind, kind))) if no else '拾取',
+                'desc': (target.get('primary') or {}).get('desc'),
+            })
+        return items
+
+    # ---- 别名分配 ----
+    #
+    # 别名是断言唯一能指认元素的手段（`add_intent_step` 靠它找目标），所以必须唯一。
+    # 但「唯一」不能简单地对重名加后缀：同一个按钮点两次会产生两个别名，
+    # 下拉里就出现两个其实指向同一元素的选项。身份按「同一个元素」判，而不是「同一个名字」。
+
+    @staticmethod
+    def _alias_key(snap, primary, frame):
+        """判断两次操作是不是同一个元素。
+
+        主定位唯一时，主定位本身就是身份——两个不同元素不可能同时命中同一个唯一选择器。
+        没有唯一候选时退回结构路径：同一元素两次操作得到的路径相同，不同行里的同名按钮不同。
+        """
+        if primary is not None:
+            return ('locator', primary['desc'])
+        return ('path', snap.get('css') or '', snap.get('tag') or '', id(frame))
+
+    def _alias_for(self, target, key):
+        """返回该元素在本次录制内唯一的别名。调用方需持有 self._lock。"""
+        known = self._alias_keys.get(key)
+        if known:
+            return known
+        base = target.get('alias') or 'element'
+        used = set(self._alias_keys.values())
+        alias = base
+        n = 2
+        while alias in used:
+            suffix = '#%d' % n
+            alias = base[:ir.ALIAS_MAX_LENGTH - len(suffix)] + suffix
+            n += 1
+        self._alias_keys[key] = alias
+        return alias
 
     def _index_of(self, no):
         idx = next((i for i, s in enumerate(self._steps) if s['no'] == no), None)
@@ -311,6 +408,7 @@ class RecordingSession(object):
         """插入断言 / 等待 / 睡眠。intent 必须已由 intent.validate 校验过。
 
         text 保存用户原文；after_no 为空则追加到末尾，否则插入到该步骤之后。
+        断言的标签页跟着锚点走：以前固定写 0，多标签页录制时断言会被写到主标签页上。
         """
         step_type = ir.step_type_for_intent(intent['type'])
         with self._lock:
@@ -319,7 +417,9 @@ class RecordingSession(object):
                 target = self._find_target(intent['target'])
                 if target is None:
                     raise RecordingError('没有名为 %r 的元素' % intent['target'])
-            step = ir.make_step(step_type, no=0, target=target, value=intent.get('value'), source='manual')
+            page_index = self._page_index_near(after_no)
+            step = ir.make_step(step_type, no=0, target=target, value=intent.get('value'),
+                                page_index=page_index, source='manual')
             step['intent'] = intent
             step['text'] = text
             if after_no is None:
@@ -333,14 +433,32 @@ class RecordingSession(object):
         self._schedule_hud()
         return self.snapshot()
 
+    def _page_index_near(self, after_no=None):
+        """断言落在哪个标签页：插在某步之后就用那一步的页，追加就用最后一步的页。"""
+        if after_no is not None:
+            try:
+                return self._steps[self._index_of(after_no)].get('page_index') or 0
+            except RecordingError:
+                return 0
+        for step in reversed(self._steps):
+            if step.get('page_index'):
+                return step['page_index']
+        return 0
+
     def _find_target(self, alias):
+        return self._find_target_with_frame(alias)[0]
+
+    def _find_target_with_frame(self, alias):
+        """按别名找目标，并把「它在哪个 frame 里」一起带出来（验证要在原来的 frame 上做）。"""
+        if not alias:
+            return None, None
         for s in reversed(self._steps):
             if s.get('target') and s['target'].get('alias') == alias:
-                return s['target']
+                return s['target'], s.get('_frame')
         for p in self._picks:
             if p['target'].get('alias') == alias:
-                return p['target']
-        return None
+                return p['target'], p.get('_frame')
+        return None, None
 
     def _renumber(self):
         for i, s in enumerate(self._steps, 1):
@@ -408,15 +526,21 @@ class RecordingSession(object):
             self._process_inbox()
             if self._drain_commands():
                 return
-            if not self._paused and time.time() - self._last_activity > IDLE_SECONDS:
+            if self.status == 'recording' and not self._paused and time.time() - self._last_activity > IDLE_SECONDS:
                 # 暂停期间不判超时：用户可能正在页面上查资料或读提示。
-                self._finish('idle_timeout', revalidate=False)
+                self._mark_stopped('idle_timeout', revalidate=False)
+                self._shutdown()
+                return
+            if self.status in ('stopped', 'idle_timeout') and time.time() - self._last_activity > STOPPED_IDLE_SECONDS:
+                # 停止后浏览器一直开着，但没人用了就收掉，别在机器上留窗口。
+                self._shutdown()
                 return
             try:
                 self._pump()
             except Exception as exc:
                 self.error = '浏览器已关闭：%s' % exc
-                self._finish('closed', revalidate=False)
+                self._mark_stopped('closed', revalidate=False)
+                self._shutdown()
                 return
 
     def _pump(self):
@@ -434,9 +558,20 @@ class RecordingSession(object):
             self._touch()
             try:
                 if name == 'stop':
-                    result = self._finish('stopped', revalidate=True)
+                    # 停止是幂等的：浏览器还开着，再点一次不该报错。
+                    if self.status == 'recording':
+                        result = self._mark_stopped('stopped', revalidate=True)
+                    else:
+                        result = self.snapshot()
+                elif name == 'close':
+                    # 先把结果回给请求线程，再关窗口——面板可能就活在这个浏览器里。
+                    # 状态要按「关掉之后」写，不能等 _shutdown 之后再取（那时已经回不了话）。
+                    result = dict(self.snapshot(), browser_open=False)
+                    reply.put((True, result))
+                    self._shutdown()
+                    return True
                 elif name == 'cancel':
-                    result = self._finish('cancelled', revalidate=False)
+                    result = self._mark_stopped('cancelled', revalidate=False)
                 elif name == 'set_pick':
                     self._set_pick(kwargs['on'])
                     result = {'pick': self._pick}
@@ -445,20 +580,39 @@ class RecordingSession(object):
                     result = {'paused': self._paused}
                 elif name == 'relayout':
                     result = {'laid_out': self.layout_windows()}
+                elif name == 'verify':
+                    result = self._verify_now(kwargs['intent'])
                 else:
                     raise RecordingError('未知命令：%s' % name)
                 reply.put((True, result))
             except Exception as exc:
                 reply.put((False, str(exc)))
-            if name in ('stop', 'cancel'):
+            if name == 'cancel':
+                self._shutdown()
                 return True
 
-    def _finish(self, status, revalidate):
+    def _mark_stopped(self, status, revalidate):
+        """结束记录：不再入库新步骤，但浏览器和面板都留着。"""
         self._process_inbox()
         with self._lock:
             self.status = 'stopping'
         if revalidate:
             self._revalidate_all()
+        with self._lock:
+            self.status = status
+        self._push_hud()
+        return self.snapshot()
+
+    def _shutdown(self):
+        """关面板窗口与浏览器；状态保持不变（录到的结果仍然有效）。"""
+        try:
+            for page in list(self._context.pages) if self._context is not None else []:
+                try:
+                    page.evaluate('window.__pwSetPick(false)')
+                except Exception:
+                    pass
+        except Exception:
+            pass
         try:
             # 面板窗口是独立 context，先关它再关浏览器。
             if self._panel_context is not None:
@@ -472,9 +626,7 @@ class RecordingSession(object):
                 self._browser.close()
         except Exception:
             pass
-        with self._lock:
-            self.status = status
-        return self.snapshot()
+        self._browser = None
 
     def _touch(self):
         self._last_activity = time.time()
@@ -837,11 +989,12 @@ class RecordingSession(object):
 
     def _handle_event(self, source, raw):
         data = json.loads(raw)
-        # 暂停期间不记操作；拾取是显式动作，仍然允许。
-        if self._paused and data.get('type') != 'pick':
+        kind = data['type']
+        # 停止后浏览器还开着：拾取仍要做（断言要用），但不能再记操作步骤。
+        # 暂停期间同理，拾取是显式动作，仍然允许。
+        if kind != 'pick' and (self._paused or self.status != 'recording'):
             return
         snap = data['snap']
-        kind = data['type']
         frame = source['frame']
         page = source['page']
         self._touch()
@@ -868,6 +1021,8 @@ class RecordingSession(object):
         index = self._page_index(page)
 
         with self._lock:
+            # 别名在这里定，不在 make_target 里定：唯一性要看已录入的步骤，是会话状态。
+            target['alias'] = self._alias_for(target, self._alias_key(snap, primary, frame))
             seq = len(self._events)
             self._events.append({'seq': seq, 'type': kind, 'status': status,
                                  'desc': primary['desc'] if primary else None})
@@ -897,6 +1052,55 @@ class RecordingSession(object):
         # 徽标要读计数结果，`_count` 已经算完；这里排进队列，避免在锁里做 Playwright 调用。
         self._schedule_badge(frame, status, kind, target.get('alias'), no)
         self._schedule_hud()
+
+    # ---- 插入前验证（只在录制线程里跑，直接读当前页面）----
+
+    def _verify_now(self, intent):
+        """在当前页面上判断这条断言此刻是否成立。
+
+        只回答「现在」：不等待、不重跑流程。所以 false 不代表脚本一定失败——
+        断言插在点击之后时，当前页面可能还没走到那一步。
+        """
+        kind = intent.get('type')
+        target, frame = self._find_target_with_frame(intent.get('target'))
+        page = self._page_of(frame) or self._current_page()
+        if page is None:
+            raise RecordingError('浏览器里没有可用的页面')
+        # 这两类断言没有目标元素：一个看整页文字，一个看地址。
+        if kind in ('page_text_contains', 'url_contains'):
+            return verify.check(self._text_frame(page), None, intent)
+        if target is None:
+            raise RecordingError('没有名为 %r 的元素' % intent.get('target'))
+        # frame 已经随着页面导航失效时退回当前页，至少给个「找不到」而不是抛异常。
+        frame = frame if self._page_of(frame) is not None else None
+        return verify.check(frame or self._text_frame(page), target, intent)
+
+    @staticmethod
+    def _page_of(frame):
+        if frame is None:
+            return None
+        try:
+            return None if frame.is_detached() else frame.page
+        except Exception:
+            return None
+
+    def _current_page(self):
+        """用户此刻在看的页面：最近打开的那个（面板是独立 context，不在这里面）。"""
+        try:
+            pages = [p for p in self._context.pages if not p.is_closed()]
+        except Exception:
+            return None
+        return pages[-1] if pages else None
+
+    def _text_frame(self, page):
+        """「整个页面的文字」落在哪个 frame：普通模式是顶层文档，嵌入模式是被测 iframe。"""
+        try:
+            for frame in page.frames:
+                if frame is not page.main_frame and self._is_app_frame(frame):
+                    return frame
+            return page.main_frame
+        except Exception:
+            return page.main_frame
 
     def _revalidate_all(self):
         # 同一个目标可能被多个步骤引用（例如点击后又被断言引用），只能按目标去重；

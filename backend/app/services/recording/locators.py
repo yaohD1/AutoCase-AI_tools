@@ -10,7 +10,7 @@
 """
 import re
 
-PW_KINDS = ('testid', 'role', 'label', 'placeholder', 'text', 'css')
+PW_KINDS = ('testid', 'role', 'label', 'placeholder', 'role_bare', 'text', 'css')
 # RF 组按「语义强度」排：属性型（testid/id/name/aria/label）优先，文本型其次，结构定位兜底。
 # 新增 rf_testid / rf_aria / rf_label 是为了让快照里的每个语义信号都有 xpath 等价物，
 # 否则 div 按钮、菜单项、图标按钮只能掉到 rf_css（详见 test_recording_locator_parity）。
@@ -56,6 +56,11 @@ def build_specs(snap):
     if role and name:
         specs.append(_spec('role', 'get_by_role', [role], "getByRole(%r, name=%r)" % (role, name),
                            {'name': name, 'exact': True}))
+    elif role:
+        # 没有可访问名称时的退路（典型：没有 label 的 select / checkbox、纯图标按钮）。
+        # 页面上同类元素只有它一个时这仍是语义定位；多于一个则 count > 1，被 rank 跳过，
+        # 交给录制时记下的 index 降级。排位放在 placeholder 之后：有名称的定位永远更强。
+        specs.append(_spec('role_bare', 'get_by_role', [role], "getByRole(%r)" % role))
     if snap.get('label'):
         specs.append(_spec('label', 'get_by_label', [snap['label']], "getByLabel(%r)" % snap['label'],
                            {'exact': True}))

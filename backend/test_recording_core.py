@@ -31,6 +31,32 @@ class LocatorRankingTest(unittest.TestCase):
         primary, _ = rank(counted)
         self.assertEqual(status_of(primary), 'unique')
 
+    def test_widget_without_accessible_name_gets_bare_role(self):
+        # 没有 label / aria-label 的 select：以前 Playwright 组只剩 css，等于「换框架」时
+        # 连同一套框架内的降级都靠结构。补一条不带 name 的 role 兜住这类控件。
+        snap = {'tag': 'select', 'type': None, 'role': 'combobox', 'role_attr': None, 'name': None,
+                'label': None, 'aria_label': None, 'placeholder': None, 'testid': None,
+                'text': None, 'id': None, 'attr_name': 'city', 'css': 'html > body > select'}
+        specs = build_specs(snap)
+        bare = [s for s in specs if s['kind'] == 'role_bare']
+        self.assertEqual(len(bare), 1)
+        self.assertEqual(bare[0]['desc'], "getByRole('combobox')")
+        self.assertEqual(bare[0]['kwargs'], {}, '不带 name 的 role 候选项不能带 kwargs')
+        # 一旦有了可访问名称，就不该再有裸 role：有名称的定位永远更强。
+        snap['name'] = '城市'
+        self.assertNotIn('role_bare', [s['kind'] for s in build_specs(snap)])
+
+    def test_bare_role_ranks_below_named_locators(self):
+        # 有 placeholder 的输入框应优先用 placeholder，而不是「页面上只有一个 textbox」这种弱依据。
+        counted = [
+            {'kind': 'css', 'desc': 'locator(a)', 'count': 1},
+            {'kind': 'role_bare', 'desc': "getByRole('textbox')", 'count': 1},
+            {'kind': 'placeholder', 'desc': "getByPlaceholder('密码')", 'count': 1},
+        ]
+        primary, ordered = rank(counted)
+        self.assertEqual(primary['kind'], 'placeholder')
+        self.assertEqual([c['kind'] for c in ordered], ['placeholder', 'role_bare', 'css'])
+
     def test_no_unique_candidate_is_ambiguous(self):
         counted = [{'kind': 'css', 'desc': "locator('div')", 'count': 3}]
         primary, _ = rank(counted)
@@ -78,6 +104,16 @@ class IntentTest(unittest.TestCase):
         self.assertIsNone(got['target'])
         self.assertEqual(got['value'], '/dashboard')
 
+    def test_page_text_contains_needs_value_but_no_target(self):
+        got = intent.validate({'type': 'page_text_contains', 'value': '登录成功'}, [])
+        self.assertIsNone(got['target'])
+        self.assertEqual(got['value'], '登录成功')
+        with self.assertRaises(intent.IntentError):
+            intent.validate({'type': 'page_text_contains'}, [])
+        # 模型可能给不需要目标的类型硬塞一个别名，直接丢掉，别让它变成假的目标元素
+        got = intent.validate({'type': 'page_text_contains', 'value': 'x', 'target': '不存在'}, [])
+        self.assertIsNone(got['target'])
+
     def test_sleep_bounds(self):
         self.assertEqual(intent.validate({'type': 'sleep', 'seconds': '2'}, [])['seconds'], 2.0)
         with self.assertRaises(intent.IntentError):
@@ -106,6 +142,9 @@ class IntentTest(unittest.TestCase):
         self.assertEqual(seen['system'], intent.SYSTEM_PROMPT)
         self.assertIn('- 提交', seen['prompt'])
         self.assertIn('- 用户名', seen['prompt'])
+        # 类型只列名字不够，模型会猜；提示词里要写清哪些不需要目标元素。
+        self.assertIn('page_text_contains：整个页面的文字', seen['prompt'])
+        self.assertIn('url_contains：当前地址', seen['prompt'])
 
     def test_parse_rejects_non_json_reply(self):
         with self.assertRaises(intent.IntentError):

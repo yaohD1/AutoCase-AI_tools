@@ -16,6 +16,8 @@ LOCATOR_RULES = (
     '要求：\n'
     '- 只写 target_path 指定的文件，不改其他文件。\n'
     '- 定位优先用 target.locator；不要自己编造选择器，需要更精确时只能从 target.candidates 里挑或组合。\n'
+    '- intent.type 为 url_contains / page_text_contains / sleep 时没有 target：'
+    'url_contains 断言整条地址，page_text_contains 断言整个页面的文字，不要为它们编造元素定位。\n'
     '- target.match_count > 1 表示这条定位在页面上匹配了多个元素，属于「不唯一但仍可用」：\n'
     '  · 给了 target.nth，就取第 nth 个（下标从 0 开始）：\n'
     '    playwright-ts 写 locator.nth(n)；\n'
@@ -40,7 +42,8 @@ FRAMEWORK_RULES = {
         '- 断言/等待映射：visible → Wait Until Element Is Visible；hidden → Wait Until Element Is Not Visible；'
         'text_contains → Wait Until Element Contains；text_equals → Wait Until Keyword Succeeds | 10x | 500ms | '
         'Element Text Should Be；value_equals → Wait Until Keyword Succeeds + Textfield Value Should Be；'
-        'url_contains → Wait Until Location Contains；enabled → Wait Until Keyword Succeeds + Element Should Be Enabled。\n'
+        'url_contains → Wait Until Location Contains；enabled → Wait Until Keyword Succeeds + Element Should Be Enabled；'
+        'page_text_contains → Wait Until Page Contains。\n'
         '- 新标签页用 Switch Window 配合 Wait Until Keyword Succeeds；frame 内操作前先 Select Frame。\n'
         '- target.locator 已带 xpath= 前缀，原样使用，不要再包 css= 或再拼前缀。\n'
     ),
@@ -48,7 +51,7 @@ FRAMEWORK_RULES = {
         '框架写法（Playwright，自带 auto-wait）：\n'
         '- 直接 click / fill / selectOption，不要用 waitForTimeout 充当等待。\n'
         '- 断言用 expect(locator)：toBeVisible / toBeHidden / toHaveText / toHaveValue；'
-        '地址断言用 expect(page).toHaveURL(...)。\n'
+        '地址断言用 expect(page).toHaveURL(...)；整页文字断言用 expect(page.locator("body")).toContainText(...)。\n'
         '- 新标签页用 context.waitForEvent("page")；frame 内用 page.frameLocator(目标 frame 的 url)。\n'
     ),
 }

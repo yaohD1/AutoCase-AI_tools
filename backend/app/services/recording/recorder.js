@@ -8,6 +8,12 @@
   if (window.__pwRecorderInstalled) return;
   window.__pwRecorderInstalled = true;
   const state = { pick: false, paused: false };
+  // 只有这些 input 类型能用 Playwright 的 fill() 赋值；其余（checkbox/radio/range/color/file）
+  // 的交互由 click 记录，input 事件必须忽略，否则会生成跑不通的 fill 步骤。
+  const FILL_INPUT_TYPES = new Set([
+    'text', 'search', 'tel', 'url', 'email', 'password', 'number',
+    'date', 'datetime-local', 'month', 'week', 'time',
+  ]);
   // 暂停：浏览器照常操作，但不再产生步骤（同 Playwright codegen 的 Pause）。
   window.__pwSetPaused = (v) => { state.paused = !!v; };
   window.__pwSetPick = (v) => {
@@ -375,9 +381,14 @@
     lastPoint = { x: e.clientX, y: e.clientY };
     lastEl = el;
     if (state.pick) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      e.stopPropagation();
+      // 默认拦截：拾取时误点「删除」不该真的把数据删掉。
+      // 但滚动菜单、下拉、折叠面板里的元素必须先展开才点得到，所以按住 Alt 时只拾取、不拦截
+      // （Alt 是全局修饰键，页面自己很少用；拦不拦由用户按不按决定，不做元素白名单猜测）。
+      if (!e.altKey) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+      }
       emit({ type: 'pick', snap: snap(el) });
       return;
     }
@@ -391,6 +402,10 @@
     // Browsers fire `input` on <select> too; the `change` handler records selects.
     if (state.pick || e.target.tagName === 'SELECT') return;
     const el = e.target;
+    // checkbox / radio 点一下也会触发 input（值变成 on），但那场交互已经由 click 记录；
+    // 记成 fill 会生成 `fill('on')`，Playwright 在非文本输入上直接报错。range / color / file 同理。
+    if (el.tagName === 'INPUT' && !FILL_INPUT_TYPES.has((el.type || 'text').toLowerCase())) return;
+    if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return;
     lastPoint = { x: e.clientX, y: e.clientY };
     lastEl = el;
     emit({ type: 'fill', snap: snap(el), value: el.value });

@@ -17,6 +17,12 @@ def _session(steps):
         step['no'] = i
     s._steps = steps
     s._picks = []
+    s._alias_keys = {}
+    # 这些用例只测步骤规则，没有真实浏览器上下文；补成 None / False，
+    # 让 _schedule_hud 与 snapshot 直接返回（缺字段会 AttributeError）。
+    s._context = None
+    s._paused = False
+    s._panel_page = None
     return s
 
 
@@ -64,6 +70,87 @@ class StepRulesTest(unittest.TestCase):
         s = _session(self._flow())
         s.move_step(1, 'up')
         self.assertEqual(s._steps[0]['type'], 'click')
+
+    def test_assertion_inherits_the_tab_of_its_anchor(self):
+        # 断言必须跟着锚点所在的标签页走：以前恒写 0，多标签页录制时会被塞到主标签页
+        # （回放/生成的脚本就会在错误的页面上找元素）。
+        s = _session([_step('click', 'open')])
+        s._steps.append(ir.make_step('new_page', no=0, page_index=1))
+        s._steps.append(ir.make_step('click', no=0, page_index=1))
+        s._renumber()
+        checked = intent.validate({'type': 'sleep', 'seconds': 1}, [])
+        s.add_intent_step(checked, text='末尾')
+        self.assertEqual(s._steps[-1]['page_index'], 1)
+        s.add_intent_step(checked, text='中间', after_no=1)
+        # 锚点那一步后面紧跟着「标签页切换」，实际插在切换之后，但页号仍按锚点算。
+        middle = next(step for step in s._steps if step['text'] == '中间')
+        self.assertEqual(middle['page_index'], 0)
+
+
+class AliasTest(unittest.TestCase):
+    """别名必须唯一，且唯一的单位是「元素」而不是「名字」。"""
+
+    def _assign(self, s, snap, primary=None, frame=None):
+        target = ir.make_target(snap, [], primary, 'unique' if primary else 'ambiguous')
+        with s._lock:
+            target['alias'] = s._alias_for(target, s._alias_key(snap, primary, frame))
+        return target
+
+    @staticmethod
+    def _snap(name, css):
+        return {'tag': 'button', 'name': name, 'text': name, 'css': css}
+
+    def test_same_name_different_elements_get_distinct_aliases(self):
+        # 列表里两行各有一个「删除」：不下标的话，第二个会把第一个盖掉，
+        # 断言就会静默绑到用户没选的那个元素上。
+        s = _session([])
+        row1 = self._assign(s, self._snap('删除', 'tbody > tr:nth-of-type(1) > td > button'))
+        row2 = self._assign(s, self._snap('删除', 'tbody > tr:nth-of-type(2) > td > button'))
+        self.assertEqual(row1['alias'], '删除')
+        self.assertEqual(row2['alias'], '删除#2')
+
+    def test_the_same_element_clicked_twice_keeps_one_alias(self):
+        # 同一个按钮点两次不该变成两个选项——那才是「同名但不是同一个元素」的反面。
+        s = _session([])
+        css = 'body > form > button'
+        first = self._assign(s, self._snap('提交', css))
+        second = self._assign(s, self._snap('提交', css))
+        self.assertEqual(first['alias'], '提交')
+        self.assertEqual(second['alias'], '提交')
+        s._steps.append(ir.make_step('click', no=0, target=first))
+        s._steps.append(ir.make_step('click', no=0, target=second))
+        s._renumber()
+        self.assertEqual(s.aliases(), ['提交'])
+
+    def test_unique_locator_decides_identity_not_the_css_path(self):
+        # 重新渲染后结构路径会变，但唯一主定位没变，仍是同一个元素。
+        s = _session([])
+        primary = {'kind': 'role', 'desc': "getByRole('button', name='提交')", 'count': 1}
+        a = self._assign(s, self._snap('提交', 'body > div:nth-of-type(1) > button'), primary)
+        b = self._assign(s, self._snap('提交', 'body > div:nth-of-type(2) > button'), primary)
+        self.assertEqual(a['alias'], b['alias'])
+
+    def test_each_alias_resolves_to_its_own_element(self):
+        # 修复前 _find_target 取的是「最后一个同名」：给第一行加断言会绑到第二行。
+        s = _session([])
+        row1 = self._assign(s, self._snap('删除', 'tbody > tr:nth-of-type(1) > td > button'))
+        row2 = self._assign(s, self._snap('删除', 'tbody > tr:nth-of-type(2) > td > button'))
+        for target in (row1, row2):
+            s._steps.append(ir.make_step('click', no=0, target=target))
+        s._renumber()
+        self.assertIs(s._find_target('删除'), row1)
+        self.assertIs(s._find_target('删除#2'), row2)
+
+    def test_alias_items_explain_where_each_one_came_from(self):
+        s = _session([])
+        row1 = self._assign(s, self._snap('删除', 'tbody > tr:nth-of-type(1) > td > button'))
+        row2 = self._assign(s, self._snap('删除', 'tbody > tr:nth-of-type(2) > td > button'))
+        s._steps.append(ir.make_step('click', no=0, target=row1))
+        s._steps.append(ir.make_step('click', no=0, target=row2))
+        s._renumber()
+        items = s.alias_items()
+        self.assertEqual([i['alias'] for i in items], ['删除', '删除#2'])
+        self.assertEqual([i['hint'] for i in items], ['第 1 步 · 点击', '第 2 步 · 点击'])
 
 
 if __name__ == '__main__':

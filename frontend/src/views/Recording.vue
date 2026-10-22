@@ -187,9 +187,16 @@
           >
             {{ paused ? '继续录制' : '暂停录制' }}
           </el-button>
-          <el-button :type="picking ? 'warning' : 'default'" :disabled="!isRecording" @click="togglePick(!picking)">
+          <!-- 停止后浏览器不关，所以拾取与验证仍然可用；关掉窗口才真正结束 -->
+          <el-button
+            :type="picking ? 'warning' : 'default'"
+            :disabled="!canInspect"
+            :title="canInspect ? '' : '浏览器已关闭，无法再拾取元素'"
+            @click="togglePick(!picking)"
+          >
             {{ picking ? '退出拾取' : '拾取元素' }}
           </el-button>
+          <el-button v-if="canCloseBrowser" :loading="closingBrowser" @click="closeBrowser">关闭浏览器</el-button>
           <span class="toolbar-sep"></span>
           <el-button :disabled="!canEdit" @click="openDraft('assert')">添加断言</el-button>
           <el-button :disabled="!canEdit" @click="openDraft('wait')">添加等待</el-button>
@@ -200,8 +207,13 @@
           已暂停：可以在浏览器里自由操作（关闭弹层、滚动、试填一遍都不算），这些动作不会被记录。点「继续录制」接着录。
         </div>
 
+        <div v-if="isStopped && browserOpen" class="keep-open-hint">
+          录制已停止，浏览器仍然开着：可以继续拾取元素、验证断言；确认完成后点「关闭浏览器」。
+        </div>
+
         <div v-if="picking" class="pick-hint">
           拾取模式已开启：在浏览器里点击元素，它会被记为可引用的元素，不会记为操作步骤。
+          要拾取菜单、下拉、折叠面板里的元素，<b>按住 Alt 再点</b>——这一下会真的展开，不会被拦掉。
         </div>
         <el-alert v-if="session && session.error" :title="session.error" type="error" :closable="false" class="session-error" />
 
@@ -265,7 +277,7 @@
                 <div v-if="step.target" class="step-locator">
                   <span class="step-alias">{{ step.target.alias || '未命名元素' }}</span>
                   <code class="locator-code">{{ locatorText(step.target) }}</code>
-                  <el-tag size="small" :type="statusTone(effectiveStatus(step))" effect="light">
+                  <el-tag size="small" :type="statusTone(effectiveStatus(step))" effect="light" :title="statusHint(step)">
                     {{ statusLabel(effectiveStatus(step)) }}
                   </el-tag>
                 </div>
@@ -330,29 +342,25 @@
               type="textarea"
               :rows="2"
               maxlength="300"
-              placeholder="用自然语言描述，例如：提交成功的提示出现 / 等到加载遮罩消失 / 地址包含 /dashboard"
+              placeholder="用自然语言描述，例如：提交成功的提示出现 / 等到加载遮罩消失 / 页面包含「登录成功」"
             />
             <el-button :loading="draft.parsing" :disabled="!config.model || !draft.text.trim()" @click="parseDraft">
               解析
             </el-button>
           </div>
           <div class="field-hint">
-            {{ config.model ? '所选模型会把描述解析为固定意图，确认后才会插入。' : '未选择模型：请使用下方的结构化表单。' }}
+            {{ config.model ? '解析结果会填进下面的表单，改完再插入；插入的永远是表单里的内容。' : '未选择模型：直接在下面的表单里填写。' }}
           </div>
 
           <div v-if="draft.parsed" class="parsed-preview">
             <div class="parsed-line">
-              <span class="parsed-label">理解为</span>
-              <span>{{ intentDescription(draft.parsed, null) }}</span>
-            </div>
-            <div class="parsed-actions">
-              <el-button type="primary" size="small" :loading="draft.inserting" @click="insertIntent(draft.parsed, draft.text)">
-                确认插入
-              </el-button>
+              <span class="parsed-label">解析为</span>
+              <span class="parsed-text">{{ intentDescription(draft.parsed) }}</span>
+              <span :class="['parsed-tag', { dirty: formDirty }]">{{ formDirty ? '表单已修改，以表单为准' : '已填入表单' }}</span>
             </div>
           </div>
 
-          <el-divider content-position="left">结构化表单</el-divider>
+          <el-divider content-position="left">断言内容（可修改）</el-divider>
           <div class="form-grid">
             <el-select v-model="draft.intentType" placeholder="意图类型">
               <el-option
@@ -362,17 +370,30 @@
                 :value="type"
               />
             </el-select>
+            <!-- 不需要目标元素的断言（地址 / 整页文字）：与其摆一个灰掉的下拉，不如直接不显示 -->
             <el-select
+              v-if="needsTarget(draft.intentType)"
               v-model="draft.target"
               clearable
               placeholder="目标元素"
-              :disabled="!needsTarget(draft.intentType)"
             >
-              <el-option v-for="alias in aliases" :key="alias" :label="alias" :value="alias" />
+              <el-option
+                v-for="item in aliasItems"
+                :key="item.alias"
+                :label="item.alias"
+                :value="item.alias"
+              >
+                <span class="alias-option">
+                  <span class="alias-option-name">{{ item.alias }}</span>
+                  <span class="alias-option-hint" :title="item.desc || ''">{{ item.hint }}</span>
+                </span>
+              </el-option>
             </el-select>
             <el-button
+              v-if="needsTarget(draft.intentType)"
               :type="draft.picking ? 'warning' : 'default'"
-              :disabled="!isRecording || !needsTarget(draft.intentType)"
+              :disabled="!canInspect"
+              :title="canInspect ? '' : '浏览器已关闭，无法再拾取元素'"
               @click="pickForDraft"
             >
               {{ draft.picking ? '请在浏览器中点击元素…' : '拾取元素' }}
@@ -392,8 +413,40 @@
               controls-position="right"
             />
           </div>
+
+          <!-- 插入前验证：只回答「此刻成不成立」，口径必须写清楚，否则会被当成回放结论 -->
+          <div v-if="draft.verify" :class="['verify-box', draft.verify.ok ? 'ok' : 'bad']">
+            <div class="verify-head">
+              <span class="verify-dot"></span>
+              <span class="verify-title">当前页面状态：{{ draft.verify.ok ? '成立' : '不成立' }}</span>
+              <code v-if="draft.verify.locator" class="verify-loc" :title="draft.verify.locator">{{ draft.verify.locator }}</code>
+              <button type="button" class="verify-close" title="关掉这条结果" @click="draft.verify = null">×</button>
+            </div>
+            <div class="verify-row">
+              <span class="verify-key">期望</span>
+              <span class="verify-val">{{ draft.verify.expected ?? '—' }}</span>
+            </div>
+            <div class="verify-row">
+              <span class="verify-key">实际</span>
+              <span class="verify-val">{{ draft.verify.actual ?? '—' }}</span>
+            </div>
+            <div v-if="draft.verify.detail" class="verify-detail">{{ draft.verify.detail }}</div>
+            <div class="verify-note">
+              只反映点「验证」这一刻的页面，不是回放结论；断言写在操作之后时，现在不成立是正常的。
+            </div>
+          </div>
+
           <div class="draft-actions">
-            <el-button type="primary" plain :loading="draft.inserting" @click="insertFromForm">插入表单内容</el-button>
+            <el-button
+              v-if="draft.intentType !== 'sleep'"
+              :loading="draft.verifying"
+              :disabled="!canInspect"
+              :title="canInspect ? '在浏览器当前页面上判断这条断言现在成不成立' : '浏览器已关闭，无法再看当前页面'"
+              @click="verifyDraft"
+            >
+              验证当前页面
+            </el-button>
+            <el-button type="primary" :loading="draft.inserting" @click="insertFromForm">{{ insertLabel }}</el-button>
           </div>
         </div>
       </el-card>
@@ -468,7 +521,41 @@
             <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: genResult.generation_id } })">
               查看生成记录
             </el-button>
+            <el-button size="small" :loading="replaying" @click="runReplay">回放校验</el-button>
             <span class="field-hint">预览文件内容、提交到 Git 或撤销这次写入</span>
+          </div>
+
+          <!-- 回放校验：在浏览器里把录制重跑一遍，验证定位是否仍然命中。
+               校验的是录制本身，不是生成的脚本语法，所以两个框架都能跑。 -->
+          <div v-if="replayResult" class="gen-replay">
+            <button type="button" class="gen-replay-head" @click="replayOpen = !replayOpen">
+              <span :class="['gen-replay-dot', replayResult.ok ? 'ok' : 'bad']"></span>
+              <span :class="['gen-replay-title', { bad: !replayResult.ok }]">{{ replayTitle }}</span>
+              <span v-if="replayResult.steps.length" class="gen-replay-toggle">
+                {{ replayOpen ? '收起明细' : '展开明细' }}
+              </span>
+            </button>
+            <div v-if="!replayResult.ok && replayResult.error" class="gen-replay-error">{{ replayResult.error }}</div>
+            <div v-if="config.framework === 'robot-selenium'" class="gen-replay-note">
+              Robot 生成的脚本需要 Selenium 环境运行，这里只校验定位是否仍然有效。
+            </div>
+            <ul v-if="replayOpen" class="gen-replay-steps">
+              <li v-for="item in replayResult.steps" :key="item.no" :class="{ bad: !item.ok }">
+                <span class="gen-replay-no">{{ item.no }}</span>
+                <span class="gen-replay-type">{{ item.type }}</span>
+                <span class="gen-replay-alias" :title="item.alias || item.url || ''">
+                  {{ item.alias || item.url || '—' }}
+                </span>
+                <code v-if="item.used" class="gen-replay-loc" :title="item.used.syntax">
+                  {{ item.used.syntax }}
+                </code>
+                <span v-else class="gen-replay-loc is-empty">—</span>
+                <span v-if="item.used && item.used.nth" class="gen-replay-nth">
+                  匹配 {{ item.used.matches }} 取第 {{ item.used.nth }}
+                </span>
+                <span v-if="!item.ok && item.error" class="gen-replay-why">{{ item.error }}</span>
+              </li>
+            </ul>
           </div>
         </div>
       </el-card>
@@ -503,15 +590,15 @@ const FRAMEWORKS = [
   { value: 'robot-selenium', label: 'Robot Framework（SeleniumLibrary）' },
   { value: 'playwright-ts', label: 'Playwright TypeScript' }
 ]
-const ASSERT_TYPES = ['visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled', 'url_contains']
+const ASSERT_TYPES = ['visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled', 'url_contains', 'page_text_contains']
 const WAIT_TYPES = ['wait_visible', 'wait_hidden']
 const SLEEP_TYPES = ['sleep']
 const NEEDS_TARGET = new Set(['visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled', 'wait_visible', 'wait_hidden'])
-const NEEDS_VALUE = new Set(['text_contains', 'text_equals', 'value_equals', 'url_contains'])
+const NEEDS_VALUE = new Set(['text_contains', 'text_equals', 'value_equals', 'url_contains', 'page_text_contains'])
 const INTENT_LABELS = {
   visible: '元素可见', hidden: '元素隐藏', text_contains: '文字包含', text_equals: '文字等于',
   value_equals: '值等于', enabled: '元素可用', url_contains: '地址包含',
-  wait_visible: '等待出现', wait_hidden: '等待消失', sleep: '固定等待'
+  page_text_contains: '页面包含文字', wait_visible: '等待出现', wait_hidden: '等待消失', sleep: '固定等待'
 }
 const STEP_LABELS = {
   goto: '打开页面', click: '点击', fill: '输入', select: '选择', new_page: '新标签页',
@@ -524,7 +611,7 @@ const STATE_LABELS = {
 }
 const STORAGE_KEY = 'autocase.recording.config'
 // 与后端 locators.py 保持一致：Playwright 与 RF 两组的优先级，以及结构定位（需标黄）。
-const PW_ORDER = ['testid', 'role', 'label', 'placeholder', 'text', 'css']
+const PW_ORDER = ['testid', 'role', 'label', 'placeholder', 'role_bare', 'text', 'css']
 const RF_ORDER = ['rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_xpath', 'rf_css']
 const FRAGILE_KINDS = ['css', 'rf_css']
 
@@ -650,6 +737,7 @@ applyPanelQuery()
 const session = ref(null)
 const starting = ref(false)
 const stopping = ref(false)
+const closingBrowser = ref(false)
 const draft = ref(null)
 // 刚插入的那一步短暂高亮，用来「指认」插入结果
 const flashingNo = ref(0)
@@ -657,6 +745,10 @@ let flashTimer = 0
 const generating = ref(false)
 const genError = ref(null)
 const genResult = ref(null)
+// 回放校验：结果只在本次生成后有意义，重新生成时清空
+const replaying = ref(false)
+const replayResult = ref(null)
+const replayOpen = ref(false)
 
 let pollTimer = null
 
@@ -768,8 +860,15 @@ watch(() => config.framework, (next) => {
 const isRecording = computed(() => session.value?.status === 'recording')
 const isStopped = computed(() => ['stopped', 'idle_timeout', 'closed'].includes(session.value?.status))
 const canEdit = computed(() => isRecording.value || isStopped.value)
+// 浏览器只在停止后才关闭（或用户手动关），所以「拾取 / 验证」的可用性跟浏览器走，不跟录制状态走。
+const browserOpen = computed(() => !!session.value?.browser_open)
+const canInspect = computed(() => isRecording.value || (browserOpen.value && isStopped.value))
+// 停止后浏览器还开着，但用户可能已经不想要那个窗口了，需要一个显式出口。
+const canCloseBrowser = computed(() => browserOpen.value && isStopped.value)
 const steps = computed(() => session.value?.steps || [])
 const aliases = computed(() => session.value?.aliases || [])
+// 下拉里要能分清「删除」和「删除#2」：别名 + 它来自第几步。
+const aliasItems = computed(() => session.value?.alias_items || aliases.value.map((alias) => ({ alias, hint: '', desc: '' })))
 const picking = computed(() => !!session.value?.pick)
 const paused = computed(() => !!session.value?.paused)
 const pausing = ref(false)
@@ -812,6 +911,8 @@ function applySession(data) {
     draft.value.target = latest.target.alias
     draft.value.picking = false
     if (data.pick) togglePick(false, true)
+    // 停止后浏览器还开着，拾取靠轮询拿结果；拿到就收，别一直在后台拉。
+    if (data.status !== 'recording' && data.status !== 'starting') stopPolling()
   }
   // 列表结构变了，拖拽实例要跟着（重）建。
   nextTick(initSortable)
@@ -873,6 +974,9 @@ async function stopRecording() {
     const { data } = await api.stopRecording()
     if (draft.value && draft.value.picking) draft.value.picking = false
     applySession(data)
+    if (data.browser_open) {
+      ElMessage.success('已停止录制；浏览器保持打开，可以继续拾取元素、验证断言')
+    }
   } catch (error) {
     ElMessage.error(errorText(error))
   } finally {
@@ -884,6 +988,8 @@ async function togglePick(on, quiet = false) {
   try {
     const { data } = await api.setRecordingPick(on)
     if (session.value) session.value = { ...session.value, pick: data.pick }
+    // 停止后的轮询只为接拾取结果，退出拾取就停。
+    if (!on && !isRecording.value) stopPolling()
   } catch (error) {
     if (!quiet) ElMessage.error(errorText(error))
   }
@@ -1023,6 +1129,20 @@ function draftKindTypes(kind) {
 
 const draftTypes = computed(() => draft.value ? draftKindTypes(draft.value.kind) : [])
 const draftTitle = computed(() => ({ assert: '添加断言', wait: '添加等待', sleep: '固定等待' })[draft.value?.kind] || '')
+const insertLabel = computed(() => ({ assert: '插入断言', wait: '插入等待', sleep: '插入固定等待' })[draft.value?.kind] || '插入')
+
+// 表单当前签名：解析结果会填进表单，之后用户改没改过，靠这个签名对比。
+const formSig = computed(() => {
+  const current = draft.value
+  if (!current) return ''
+  return [current.intentType, current.target || '', current.value || '', current.seconds ?? ''].join('\u0001')
+})
+const formDirty = computed(() => !!draft.value?.parsed && formSig.value !== (draft.value?.parsedSig || ''))
+
+// 表单一动，上一次「验证当前页面」的结论就过期了，留着会比没有更误导。
+watch(formSig, () => {
+  if (draft.value && draft.value.verify) draft.value.verify = null
+})
 
 function openDraft(kind, afterNo = null) {
   const first = draftKindTypes(kind)[0]
@@ -1036,6 +1156,9 @@ function openDraft(kind, afterNo = null) {
     value: '',
     seconds: 1,
     parsed: null,
+    parsedSig: '',
+    verify: null,
+    verifying: false,
     parsing: false,
     inserting: false,
     picking: false,
@@ -1056,6 +1179,8 @@ function openDraft(kind, afterNo = null) {
 function closeDraft() {
   if (draft.value && draft.value.picking) togglePick(false, true)
   draft.value = null
+  // 停止后才开的轮询（为了接拾取结果）用完就收。
+  if (!isRecording.value) stopPolling()
 }
 
 // 新插入的步骤：滚进视野 + 高亮 1.2 秒，否则插在中间那一下没有任何反馈
@@ -1073,15 +1198,94 @@ function needsTarget(type) { return NEEDS_TARGET.has(type) }
 function needsValue(type) { return NEEDS_VALUE.has(type) }
 
 async function parseDraft() {
-  draft.value.parsing = true
-  draft.value.parsed = null
+  const current = draft.value
+  if (!current || current.parsing) return
+  current.parsing = true
+  current.parsed = null
+  current.verify = null
   try {
-    const { data } = await api.parseRecordingIntent(draft.value.text.trim(), config.model)
-    draft.value.parsed = data.intent
+    const { data } = await api.parseRecordingIntent(current.text.trim(), config.model)
+    // 解析要等模型几秒，期间用户可能已经关掉草稿或换了一个。
+    if (draft.value === current) applyParsed(current, data.intent)
   } catch (error) {
     ElMessage.error(errorText(error))
   } finally {
-    draft.value.parsing = false
+    if (draft.value === current) current.parsing = false
+  }
+}
+
+function kindForIntent(type) {
+  if (type === 'sleep') return 'sleep'
+  return WAIT_TYPES.includes(type) ? 'wait' : 'assert'
+}
+
+// 解析结果直接落到表单字段上：用户能改，插入只认表单。
+// 之前预览和表单是两套数据，点了「确认插入」提交的是预览，改表单完全没用。
+function applyParsed(current, intent) {
+  // 模型可能给出别的语义（在「添加断言」里写了「等到遮罩消失」），卡片种类跟着结果走，
+  // 否则下拉列表里没有这个选项，字段就显示不出来。
+  current.kind = kindForIntent(intent.type)
+  current.intentType = intent.type
+  current.target = intent.target || null
+  current.value = intent.value || ''
+  if (intent.seconds != null) current.seconds = Number(intent.seconds)
+  current.parsed = intent
+  // 等 DOM 更新后再记签名，否则 computed 立即求值会被当成「用户改过了」。
+  nextTick(() => {
+    if (draft.value === current) current.parsedSig = formSig.value
+  })
+}
+
+async function verifyDraft() {
+  const current = draft.value
+  if (!current || current.verifying) return
+  let intent
+  try {
+    intent = buildFormIntent(current)
+  } catch (error) {
+    ElMessage.warning(error.message)
+    return
+  }
+  current.verifying = true
+  try {
+    const { data } = await api.verifyRecordingIntent(intent)
+    if (draft.value === current) {
+      current.verify = data
+      // 窄栏里结果块会出现在可视区之外，验证完要把它带进视野，否则以为没反应。
+      // 等一帧再滚：块刚插进 DOM 时高度还没算出来，nearest 会滚不到位。
+      setTimeout(() => {
+        const box = document.querySelector('.draft-card .verify-box')
+        if (box && box.scrollIntoView) box.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      }, 80)
+    }
+  } catch (error) {
+    if (draft.value === current) current.verify = null
+    ElMessage.error(errorText(error))
+  } finally {
+    if (draft.value === current) current.verifying = false
+  }
+}
+
+async function closeBrowser() {
+  try {
+    await ElMessageBox.confirm(
+      '关闭后就无法再在当前页面拾取元素或验证断言了。已录步骤、生成与回放校验都不受影响。',
+      '关闭浏览器',
+      { confirmButtonText: '关闭', cancelButtonText: '先留着', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  closingBrowser.value = true
+  try {
+    await api.closeRecordingBrowser()
+    ElMessage.success('已关闭浏览器')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    closingBrowser.value = false
+    // 面板窗口本身可能就活在这个浏览器里，请求回来时页面已经没了；能回来的情况刷新一下状态。
+    loadCurrent()
   }
 }
 
@@ -1152,6 +1356,8 @@ function insertFromForm() {
 async function pickForDraft() {
   draft.value.pickBaseline = (session.value?.picks || []).length
   draft.value.picking = true
+  // 停止后浏览器仍然开着，拾取结果只能靠轮询拿回来（录制中本来就在轮询）。
+  startPolling()
   await togglePick(true)
 }
 
@@ -1224,6 +1430,21 @@ function statusLabel(status) {
   return ({ unique: '唯一', fragile: '结构定位', ambiguous: '不唯一', stale: '页面已变化' })[status] || status
 }
 
+// 徽标只写四个字，把「凭什么算唯一」放进 title：role_bare 和普通唯一的前提不一样，
+// 不说明的话用户会以为它和「有名字的语义定位」一样稳。
+function statusHint(step) {
+  const status = effectiveStatus(step)
+  const chosen = pickFor(config.framework, step.target?.candidates || [])
+  if (status === 'unique' && chosen?.kind === 'role_bare') {
+    return '按 role 定位：页面上只有这一个同类元素。新增同类控件后会退化为「匹配 N 个取第 k 个」'
+  }
+  if (status === 'unique') return '语义定位，页面上唯一命中'
+  if (status === 'fragile') return '结构定位：依赖页面层级，改版后可能失效'
+  if (status === 'ambiguous') return '匹配到多个元素，生成时按录制时点的序号取'
+  if (status === 'stale') return '重新校验时还找得到，但已经不是你录制时点的那个元素'
+  return ''
+}
+
 function statusTone(status) {
   // ambiguous 现在会降级生成（不再阻断），所以用警告色而不是红色
   return ({ unique: 'success', fragile: 'warning', ambiguous: 'warning', stale: 'info' })[status] || 'info'
@@ -1275,6 +1496,8 @@ async function generate(overwrite) {
   generating.value = true
   genError.value = null
   genResult.value = null
+  replayResult.value = null
+  replayOpen.value = false
   try {
     const { data } = await api.generateRecording({
       model: config.model,
@@ -1307,6 +1530,42 @@ async function generate(overwrite) {
     genError.value = { message: errorText(error), details }
   } finally {
     generating.value = false
+  }
+}
+
+// 回放校验用的框架必须和生成结果一致：生成时选 RF，回放就得用 rf_* 候选，
+// 否则「校验通过」只能证明 Playwright 那套定位没坏，说明不了生成的脚本。
+const replayFramework = computed(() => genResult.value?.framework || config.framework)
+
+const replayTitle = computed(() => {
+  const result = replayResult.value
+  if (!result) return ''
+  if (result.ok) return `回放校验通过 · ${result.done}/${result.total} 步走通`
+  if (result.failed_no) return `回放校验未通过 · 第 ${result.failed_no} 步（${result.failed_type || '?'}）`
+  return '回放校验未执行'
+})
+
+// 回放要起浏览器把录制重跑一遍，步骤多时十几秒，必须给进度反馈。
+async function runReplay() {
+  if (replaying.value) return
+  replaying.value = true
+  replayResult.value = null
+  replayOpen.value = false
+  try {
+    const { data } = await api.replayRecording({ framework: replayFramework.value })
+    replayResult.value = data
+    // 通过只关心结论，折叠；失败要直接看到是哪一步、什么错，展开。
+    replayOpen.value = !data.ok
+    if (data.ok) ElMessage.success(`回放校验通过：${data.done} 步全部走通`)
+    else ElMessage.warning(`回放校验未通过：第 ${data.failed_no} 步`)
+  } catch (error) {
+    replayResult.value = {
+      ok: false, done: 0, total: steps.value.length, steps: [],
+      error: errorText(error), failed_no: null
+    }
+    replayOpen.value = true
+  } finally {
+    replaying.value = false
   }
 }
 
@@ -1592,6 +1851,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 未录制时这一组只有两个按钮：主按钮占两列补齐整行，右边界正好和下面「添加等待」对齐 */
 .toolbar.is-lean :deep(.lean-wide) { grid-column:span 2; }
 .pick-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff7e6; color:#ad6800; font-size:12.5px; line-height:1.5; }
+/* 停止后浏览器还开着：这条提示必须常驻，否则用户会以为窗口是遗留的、直接关掉 */
+.keep-open-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#eef6ff; color:#175cd3; font-size:12.5px; line-height:1.5; }
 .pause-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff4e6; color:#b45309; border:1px dashed #f3c98b; font-size:12.5px; line-height:1.5; }
 .session-error { margin-top:12px; }
 
@@ -1665,11 +1926,39 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .draft-nl { display:flex; gap:10px; align-items:flex-start; }
 .draft-nl .el-textarea { flex:1; }
 .parsed-preview { margin-top:12px; padding:12px; border-radius:10px; background:#f0faf4; border:1px solid #d6f0df; }
-.parsed-line { display:flex; gap:10px; font-size:13.5px; color:#1d1d1f; }
+.parsed-line { display:flex; gap:10px; align-items:flex-start; font-size:13.5px; color:#1d1d1f; flex-wrap:wrap; }
 .parsed-label { color:#1e7a46; font-weight:700; flex-shrink:0; }
-.parsed-actions { margin-top:10px; display:flex; justify-content:flex-end; }
+.parsed-text { min-width:0; word-break:break-word; }
+/* 解析结果只是「填表来源」：用户改过表单就以表单为准，标签要说清楚，否则会以为插入的还是预览那条 */
+.parsed-tag { flex-shrink:0; margin-left:auto; font-size:11.5px; color:#1e7a46; background:#e2f5e9; border-radius:999px; padding:2px 9px; }
+.parsed-tag.dirty { color:#a15c07; background:#fff4e2; }
 .form-grid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:10px; }
+.alias-option { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.alias-option-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.alias-option-hint { flex:none; color:#a8abb2; font-size:11.5px; }
 .draft-actions { margin-top:12px; display:flex; justify-content:flex-end; }
+
+/* 插入前验证：结论用「当前页面状态」这个词，避免和回放校验混为一谈 */
+.verify-box { margin-top:12px; padding:10px 12px; border-radius:10px; background:#f6f9ff; border:1px solid #dbe7fa; }
+.verify-box.ok { background:#f2fbf5; border-color:#cdebd8; }
+.verify-box.bad { background:#fff8f0; border-color:#f3ddc2; }
+.verify-head { display:flex; align-items:center; gap:8px; min-width:0; }
+.verify-dot { flex:none; width:8px; height:8px; border-radius:50%; background:#e0a03a; }
+.verify-box.ok .verify-dot { background:#12a150; }
+.verify-title { flex:none; font-size:12.5px; font-weight:700; color:#1f2d3d; }
+.verify-box.ok .verify-title { color:#14713c; }
+.verify-box.bad .verify-title { color:#a15c07; }
+.verify-loc {
+  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-size:11px; color:#5c6675; background:#fff; border:1px solid #e7edf6; border-radius:4px; padding:1px 5px;
+}
+.verify-close { flex:none; margin-left:auto; border:0; background:none; color:#96a0b0; font-size:15px; line-height:1; cursor:pointer; padding:0 2px; }
+.verify-close:hover { color:#4b5563; }
+.verify-row { display:flex; gap:8px; margin-top:6px; font-size:12px; line-height:1.5; color:#3d4657; }
+.verify-key { flex:none; width:30px; color:#8a94a6; }
+.verify-val { min-width:0; word-break:break-word; }
+.verify-detail { margin-top:6px; font-size:12px; color:#8a5a12; line-height:1.5; }
+.verify-note { margin-top:8px; color:#8a94a6; font-size:11.5px; line-height:1.55; }
 
 /* 生成 */
 .checklist { display:flex; flex-direction:column; gap:10px; margin-bottom:18px; }
@@ -1699,6 +1988,38 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .gen-degraded { margin-top:10px; padding:9px 11px; border-radius:8px; background:#fff7e6; border:1px solid #f3d8a8; }
 .gen-degraded-title { color:#a15c07; font-size:12.5px; font-weight:600; }
 .gen-degraded ul { margin:6px 0 0; padding-left:16px; color:#8a5a12; font-size:12px; line-height:1.65; }
+
+/* 回放校验结果：折叠时只占一行，结论先行 */
+.gen-replay { margin-top:10px; padding:9px 11px; border-radius:8px; background:#fafbfc; border:1px solid #e9edf2; }
+.gen-replay-head {
+  display:flex; align-items:center; gap:7px; width:100%; padding:0; border:0;
+  background:none; cursor:pointer; text-align:left; font:inherit;
+}
+.gen-replay-head:hover .gen-replay-toggle { text-decoration:underline; }
+.gen-replay-dot { width:7px; height:7px; border-radius:50%; flex:none; background:#12a150; }
+.gen-replay-dot.bad { background:#e0352b; }
+.gen-replay-title { color:#1f2d3d; font-size:12.5px; font-weight:600; }
+.gen-replay-title.bad { color:#c0271d; }
+.gen-replay-toggle { margin-left:auto; color:#0071e3; font-size:12px; }
+.gen-replay-error { margin-top:6px; color:#c0271d; font-size:12px; line-height:1.6; word-break:break-all; }
+.gen-replay-note { margin-top:6px; color:#8a94a6; font-size:11.5px; line-height:1.55; }
+.gen-replay-steps { margin:8px 0 0; padding:0; list-style:none; max-height:220px; overflow-y:auto; }
+.gen-replay-steps li {
+  display:flex; align-items:center; gap:7px; padding:5px 0; border-top:1px dashed #eef0f3;
+  font-size:11.5px; color:#5c6675; min-width:0; flex-wrap:wrap;
+}
+.gen-replay-steps li.bad { color:#c0271d; }
+.gen-replay-no { flex:none; width:20px; color:#9aa4b2; font-variant-numeric:tabular-nums; }
+.gen-replay-type { flex:none; width:52px; color:#8892a0; }
+.gen-replay-alias { flex:none; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gen-replay-loc {
+  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  color:#3d4657; font-size:11px; background:#f4f6f8; padding:1px 5px; border-radius:4px;
+}
+.gen-replay-loc.is-empty { background:none; color:#b4bcc8; padding:1px 0; }
+.gen-replay-nth { flex:none; color:#a15c07; }
+/* 失败原因是整句，独占一行，否则会把定位挤成省略号 */
+.gen-replay-why { flex-basis:100%; padding-left:27px; color:#c0271d; font-size:11.5px; line-height:1.5; }
 
 
 

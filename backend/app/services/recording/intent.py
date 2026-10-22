@@ -8,11 +8,27 @@ import re
 
 from app.services.recording.ir import INTENT_TYPES
 
-# 需要目标元素的意图。url_contains 不需要目标。sleep 只需要秒数。
+# 需要目标元素的意图。url_contains / page_text_contains 不需要目标。sleep 只需要秒数。
 NEEDS_TARGET = {'visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled',
                 'wait_visible', 'wait_hidden'}
-NEEDS_VALUE = {'text_contains', 'text_equals', 'value_equals', 'url_contains'}
+NEEDS_VALUE = {'text_contains', 'text_equals', 'value_equals', 'url_contains', 'page_text_contains'}
 MAX_SLEEP_SECONDS = 60
+
+# 给模型看的一句话说明：哪些要目标元素、哪些只看整页/地址。
+# 之前的提示词只列了类型名，模型只能靠猜，常常把「页面提示出现」解析成需要选元素的 text_contains。
+TYPE_HINTS = {
+    'visible': '某个元素可见（需要 target）',
+    'hidden': '某个元素不存在或不可见（需要 target）',
+    'text_contains': '某个元素的文字包含 value（需要 target）',
+    'text_equals': '某个元素的文字等于 value（需要 target）',
+    'value_equals': '输入框的值等于 value（需要 target）',
+    'enabled': '某个元素可用、未被禁用（需要 target）',
+    'url_contains': '当前地址包含 value（不需要 target）',
+    'page_text_contains': '整个页面的文字里包含 value（不需要 target）',
+    'wait_visible': '等到某个元素出现（需要 target）',
+    'wait_hidden': '等到某个元素消失（需要 target）',
+    'sleep': '固定等待 seconds 秒',
+}
 
 
 SYSTEM_PROMPT = (
@@ -28,14 +44,17 @@ class IntentError(ValueError):
 def build_prompt(text, aliases):
     """aliases: 已录入的目标别名列表。模型只能从中选择，不能编造。"""
     alias_lines = '\n'.join('- %s' % a for a in aliases) or '- （暂无已录元素）'
+    type_lines = '\n'.join('- %s：%s' % (kind, TYPE_HINTS.get(kind, '')) for kind in INTENT_TYPES)
     return (
         '把下面的中文描述转换为一个 JSON 对象，只输出 JSON，不要解释。\n'
         '可用的 type 只有：' + ', '.join(INTENT_TYPES) + '\n'
-        '字段：type（必填）、target（已录元素别名，需要元素的类型必填，只能从下列别名中选）、'
-        'value（文字或值，text_contains / text_equals / value_equals / url_contains 必填）、'
+        '各类型的含义：\n%s\n'
+        '字段：type（必填）、target（已录元素别名，只能从下面的别名里选；不需要 target 的类型必须省略或写 null）、'
+        'value（文字或值，text_contains / text_equals / value_equals / url_contains / page_text_contains 必填）、'
         'seconds（仅 sleep 使用，0 到 %d 之间的数字）。\n'
+        '描述里说的是「页面上出现/包含某段文字」而不是某个具体元素时，用 page_text_contains，不要硬选一个别名。\n'
         '已录元素别名：\n%s\n'
-        '描述：%s\n' % (MAX_SLEEP_SECONDS, alias_lines, text)
+        '描述：%s\n' % (type_lines, MAX_SLEEP_SECONDS, alias_lines, text)
     )
 
 

@@ -2,7 +2,8 @@ import http.server
 import threading
 import unittest
 
-from app.services.recording.replay import ReplayError, replay
+from app.services.recording.emit import _locator_info
+from app.services.recording.replay import ReplayError, replay, replay_checked
 from app.services.recording.session import RecordingSession
 
 PAGES = {
@@ -91,12 +92,18 @@ class ReplayScenarioTest(unittest.TestCase):
     def setUp(self):
         RecordingSession._current = None
 
+    def tearDown(self):
+        # 停止后浏览器仍开着（为了停止后还能拾取、验证），每个用例结束要收掉。
+        RecordingSession.dispose_current()
+
     def _record(self):
         session = RecordingSession.start_new(self.base, headless=True, driver=_scenario)
-        session.add_intent_step({'type': 'visible', 'target': '提交', 'value': None, 'seconds': None},
-                                text='提交按钮可见')
-        session.add_intent_step({'type': 'url_contains', 'target': None, 'value': 'index.html', 'seconds': None},
-                                text='地址包含 index.html')
+        # 追加在末尾的断言会落在「最后一步所在的标签页」——这里流程最后停在新标签页，
+        # 所以断言的目标必须是新页面上的元素（以前固定写 page 0，等于在主页面里找）。
+        session.add_intent_step({'type': 'visible', 'target': '新页按钮', 'value': None, 'seconds': None},
+                                text='新页按钮可见')
+        session.add_intent_step({'type': 'url_contains', 'target': None, 'value': 'newtab.html', 'seconds': None},
+                                text='地址包含 newtab.html')
         session.stop()
         return session
 
@@ -117,11 +124,56 @@ class ReplayScenarioTest(unittest.TestCase):
     def test_replay_fails_when_an_assertion_is_wrong(self):
         session = self._record()
         steps = session.ir()
-        steps[-2]['intent'] = {'type': 'text_equals', 'target': '提交', 'value': '并不存在的文字',
+        steps[-2]['intent'] = {'type': 'text_equals', 'target': '新页按钮', 'value': '并不存在的文字',
                                'seconds': None}
         with self.assertRaises(ReplayError) as ctx:
             replay(steps, headless=True)
         self.assertIn('第 9 步', str(ctx.exception))
+
+    def test_replay_report_uses_rf_locators_for_robot_framework(self):
+        # RF 的候选本来就是用 Playwright 的 xpath= / css= 计的，所以不需要 Selenium 也能校验。
+        # 这条守的是「RF 回放必须真的换成 rf_* 候选」，而不是偷用 PW 主定位假装通过。
+        session = self._record()
+        report = replay_checked(session.ir(), framework='robot-selenium', headless=True)
+        self.assertTrue(report['ok'], report['error'])
+        self.assertEqual(report['done'], 10)
+        used = [s['used'] for s in report['steps'] if s['used']]
+        self.assertTrue(used, '报告里应该有带定位的步骤')
+        self.assertTrue(all(u['kind'].startswith('rf_') for u in used),
+                        'RF 回放用了非 RF 候选：%s' % [u['kind'] for u in used])
+        # 提示词里给的定位和回放实际用的必须一致，否则「校验通过」不等于「生成的脚本能跑」。
+        for step, entry in zip(session.ir(), report['steps']):
+            info = step.get('target') and _locator_info(step['target'], 'robot-selenium')
+            if info and entry['used']:
+                self.assertEqual(entry['used']['syntax'], info['locator'])
+
+    def test_replay_report_keeps_successful_steps_before_failure(self):
+        session = self._record()
+        steps = session.ir()
+        steps[-1]['intent'] = {'type': 'text_equals', 'target': '新页按钮', 'value': '不存在的文字',
+                               'seconds': None}
+        report = replay_checked(steps, headless=True)
+        self.assertFalse(report['ok'])
+        self.assertEqual(report['failed_no'], 10)
+        self.assertEqual(report['total'], 10)
+        # 失败之前的步骤要保留，前端才能显示「前 9 步走通、第 10 步失效」
+        self.assertEqual(len([s for s in report['steps'] if s['ok']]), 9)
+        self.assertEqual(report['steps'][-1]['ok'], False)
+
+
+    def test_replay_supports_page_text_assertion(self):
+        # 整页文字断言没有目标元素，回放里也要能跑（body 文字包含即可）。
+        session = self._record()
+        session.add_intent_step({'type': 'page_text_contains', 'target': None, 'value': '新页按钮',
+                                 'seconds': None}, text='新页面包含按钮文字')
+        steps = session.ir()
+        # 断言落在最后一步所在的标签页（新标签页），不是主页面。
+        self.assertEqual(steps[-1]['page_index'], 1)
+        self.assertEqual(replay(steps, headless=True), 11)
+        steps[-1]['intent'] = {'type': 'page_text_contains', 'target': None, 'value': '并不存在的文字',
+                               'seconds': None}
+        with self.assertRaises(ReplayError):
+            replay(steps, headless=True)
 
 
 if __name__ == '__main__':

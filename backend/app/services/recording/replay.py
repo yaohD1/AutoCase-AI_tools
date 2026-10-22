@@ -1,16 +1,25 @@
 """按 IR 在浏览器中重放一遍，验证录制结果与断言意图是否成立。
 
 只用于验收和预览，不生成代码、不写文件。任一步失败即抛出 ReplayError，并带上步骤号。
+
+回放校验的是「这份录制在真实页面上还能不能走通」，也就是定位有没有失效，
+而不是「生成的脚本写得对不对」。所以两个框架都能校验：RF 的 rf_* 候选本来就是
+用 Playwright 的 xpath= / css= 在浏览器里数出来的，换一套候选即可，不需要 Selenium。
 """
 from playwright.sync_api import expect, sync_playwright
 
-from app.services.recording.locators import best_effort
+from app.services.recording.locators import best_effort, pick_for
 
 ASSERT_TIMEOUT_MS = 5000
+PW_FRAMEWORK = 'playwright-ts'
+RF_FRAMEWORK = 'robot-selenium'
 
 
 class ReplayError(Exception):
-    pass
+    def __init__(self, message, step_no=None, step_type=None):
+        super().__init__(message)
+        self.step_no = step_no
+        self.step_type = step_type
 
 
 def _page_for(context, step):
@@ -20,34 +29,70 @@ def _page_for(context, step):
     return pages[index] if index < len(pages) else pages[-1]
 
 
-def _locator(page, target):
+def _frame_of(page, snap):
+    """按录制时记下的 url / name 找 iframe。
+
+    老数据只有 frame_url；新数据还带 frame_name，url 匹配不上时用它兜底
+    （SPA 换路由、带临时 query 都会让 url 全等匹配失效）。
+    """
+    frame_url = snap.get('frame_url')
+    frame_name = snap.get('frame_name')
+    for frame in page.frames:
+        if frame_url and frame.url == frame_url:
+            return frame
+    if frame_name:
+        return next((f for f in page.frames if f.name == frame_name), None)
+    return None
+
+
+def choose_locator(target, framework=PW_FRAMEWORK):
+    """按框架挑回放要用的候选。
+
+    Playwright 用录制时判定的主定位；Robot 必须换成 RF 组的候选 —— 两组是不同写法，
+    PW 的 getByRole 在 SeleniumLibrary 里没有对应物，拿主定位去回放 RF 等于没验证。
+    都不唯一时和生成保持一致：降级到最窄候选 + 录制时的序号。
+    """
+    candidates = target.get('candidates') or []
+    if framework == RF_FRAMEWORK:
+        chosen = pick_for(framework, candidates) or best_effort(framework, candidates)
+    else:
+        chosen = target.get('primary') or best_effort(framework, candidates)
+    # 老数据可能没有 candidates（或 RF 组为空），退回主定位，至少有东西可试。
+    return chosen or target.get('primary')
+
+
+def _locator(page, target, framework=PW_FRAMEWORK):
+    """返回 (locator, 选中的候选)。候选一并返回，回放报告要知道用的是哪条、命中几个。"""
     if not target:
         raise ReplayError('这一步没有目标元素')
+    snap = target.get('snap') or {}
     root = page
-    frame_url = (target.get('snap') or {}).get('frame_url')
-    if frame_url:
-        root = next((f for f in page.frames if f.url == frame_url), None)
+    if snap.get('frame_url') or snap.get('frame_name'):
+        root = _frame_of(page, snap)
         if root is None:
-            raise ReplayError('找不到目标 iframe：%s' % frame_url)
-    # 优先用唯一候选；不唯一时与生成保持一致，降级到最窄候选 + 录制时的序号。
-    chosen = target.get('primary') or best_effort('playwright-ts', target.get('candidates') or [])
+            raise ReplayError('找不到目标 iframe：%s' % (snap.get('frame_name') or snap.get('frame_url')))
+    chosen = choose_locator(target, framework)
     if not chosen:
         raise ReplayError('目标没有可用的定位')
     spec = chosen['spec']
     locator = getattr(root, spec['method'])(*spec['args'], **spec['kwargs'])
     index = chosen.get('index')
     if index is not None and chosen.get('count', 1) > 1:
-        return locator.nth(index)
-    return locator
+        locator = locator.nth(index)
+    return locator, chosen
 
 
-def _assert(intent, target, page):
+def _assert(intent, target, page, framework=PW_FRAMEWORK):
     kind = intent['type']
     value = intent.get('value')
     if kind == 'url_contains':
         page.wait_for_url(lambda url: value in url, timeout=ASSERT_TIMEOUT_MS)
-        return
-    loc = _locator(page, target)
+        return None
+    if kind == 'page_text_contains':
+        # 整页文字断言没有目标元素：body 的文字里包含即可，和生成时写的 expect(body).toContainText 同口径。
+        expect(page.locator('body')).to_contain_text(value, timeout=ASSERT_TIMEOUT_MS)
+        return None
+    loc, chosen = _locator(page, target, framework)
     timeout = ASSERT_TIMEOUT_MS
     if kind in ('visible', 'wait_visible'):
         expect(loc).to_be_visible(timeout=timeout)
@@ -63,28 +108,67 @@ def _assert(intent, target, page):
         expect(loc).to_have_value(value, timeout=timeout)
     else:
         raise ReplayError('未知的断言意图：%s' % kind)
+    return chosen
 
 
-def _run_step(step, page):
+def _run_step(step, page, framework=PW_FRAMEWORK):
+    """执行一步，返回这一步实际用到的定位候选（没有目标元素时返回 None）。"""
     kind = step['type']
     if kind == 'goto':
         page.goto(step['url'], wait_until='domcontentloaded')
-    elif kind == 'click':
-        _locator(page, step['target']).click()
-    elif kind == 'fill':
-        _locator(page, step['target']).fill(step.get('value') or '')
-    elif kind == 'select':
-        _locator(page, step['target']).select_option(step.get('value'))
-    elif kind == 'sleep':
+        return None
+    if kind == 'click':
+        loc, chosen = _locator(page, step['target'], framework)
+        loc.click()
+        return chosen
+    if kind == 'fill':
+        loc, chosen = _locator(page, step['target'], framework)
+        loc.fill(step.get('value') or '')
+        return chosen
+    if kind == 'select':
+        loc, chosen = _locator(page, step['target'], framework)
+        loc.select_option(step.get('value'))
+        return chosen
+    if kind == 'sleep':
         page.wait_for_timeout(float(step['intent']['seconds']) * 1000)
-    elif kind in ('assert', 'wait'):
-        _assert(step['intent'], step.get('target'), page)
-    else:
-        raise ReplayError('回放不支持的步骤：%s' % kind)
+        return None
+    if kind in ('assert', 'wait'):
+        return _assert(step['intent'], step.get('target'), page, framework)
+    raise ReplayError('回放不支持的步骤：%s' % kind)
 
 
-def replay(steps, headless=True):
-    """steps 为 RecordingSession.ir() 的结果。返回执行过的步骤数。"""
+def _entry(step, chosen, ok, error=None):
+    """回放报告里的一行：这一步行不行、用哪条定位、命中几个、取第几个。"""
+    target = step.get('target') or {}
+    used = None
+    if chosen:
+        matches = chosen.get('count')
+        spec = chosen.get('spec') or {}
+        # syntax 是真正会被写进脚本的写法（RF 为 xpath= / css=，PW 为 getByRole(...)），
+        # 前端拿它和生成结果对照，避免「回放用的定位」和「生成的定位」各说各话。
+        syntax = spec['args'][0] if spec.get('method') == 'locator' and spec.get('args') else chosen['desc']
+        used = {
+            'kind': chosen['kind'],
+            'desc': chosen['desc'],
+            'syntax': syntax,
+            'matches': matches,
+            # 命中多个时才记录取第几个，和生成的语义保持一致（0 基 → 展示 1 基）
+            'nth': (chosen.get('index') + 1) if (matches or 0) > 1 and chosen.get('index') is not None else None,
+            'degraded': (matches or 0) > 1,
+        }
+    return {
+        'no': step.get('no'),
+        'type': step.get('type'),
+        'alias': target.get('alias'),
+        # goto 没有目标元素，报告里用 URL 代替 alias，否则明细里只剩一个破折号
+        'url': step.get('url'),
+        'ok': ok,
+        'error': error,
+        'used': used,
+    }
+
+
+def _run(steps, framework, headless, on_step):
     done = 0
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -99,16 +183,48 @@ def replay(steps, headless=True):
                     if upcoming and upcoming['type'] == 'new_page':
                         # 录制时这一步打开了新标签页，回放时同样要接住它，并等它加载完。
                         with context.expect_page() as info:
-                            _run_step(step, _page_for(context, step))
+                            chosen = _run_step(step, _page_for(context, step), framework)
                         info.value.wait_for_load_state()
+                        if on_step:
+                            on_step(_entry(step, chosen, True))
+                            on_step(_entry(upcoming, None, True))
                         i += 2
                         done += 2
                         continue
-                    _run_step(step, _page_for(context, step))
+                    chosen = _run_step(step, _page_for(context, step), framework)
                 except Exception as exc:
-                    raise ReplayError('第 %s 步（%s）失败：%s' % (step.get('no'), step.get('type'), exc))
+                    if on_step:
+                        on_step(_entry(step, None, False, str(exc)))
+                    raise ReplayError('第 %s 步（%s）失败：%s' % (step.get('no'), step.get('type'), exc),
+                                      step_no=step.get('no'), step_type=step.get('type'))
+                if on_step:
+                    on_step(_entry(step, chosen, True))
                 i += 1
                 done += 1
         finally:
             browser.close()
     return done
+
+
+def replay(steps, headless=True, framework=PW_FRAMEWORK):
+    """steps 为 RecordingSession.ir() 的结果。返回执行过的步骤数。失败抛 ReplayError。"""
+    return _run(steps, framework, headless, None)
+
+
+def replay_checked(steps, framework=PW_FRAMEWORK, headless=True):
+    """回放并把每一步的结果收集成报告。
+
+    失败不抛异常（前端需要展示「前面几步走通了、第 N 步定位失效」），
+    返回 {'ok', 'done', 'total', 'steps': [...], 'error', 'failed_no'}。
+    """
+    trace = []
+    payload = {'framework': framework, 'total': len(steps), 'steps': trace}
+    try:
+        done = _run(steps, framework, headless, trace.append)
+    except ReplayError as exc:
+        payload.update({'ok': False, 'done': len(trace), 'error': str(exc),
+                        'failed_no': exc.step_no, 'failed_type': exc.step_type})
+        return payload
+    payload.update({'ok': True, 'done': done, 'error': None, 'failed_no': None})
+    return payload
+

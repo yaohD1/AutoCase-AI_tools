@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app.services.recording import emit, toolchain
+from app.services.recording import emit, ir, toolchain
 
 TARGET = 'tests/login.robot'
 
@@ -199,6 +199,17 @@ class EmitTest(unittest.TestCase):
         plain = emit._steps_for_prompt([_rf_step()], 'robot-selenium')[0]
         self.assertNotIn('frame', plain['target'])
         self.assertNotIn('page_index', plain)
+
+    def test_prompt_maps_page_text_assertion_for_both_frameworks(self):
+        """整页文字断言没有目标元素，提示词必须给出各自的写法，否则模型会自己编一个 locator。"""
+        step = ir.make_step('assert', no=1)
+        step['intent'] = {'type': 'page_text_contains', 'target': None, 'value': '登录成功', 'seconds': None}
+        for framework, keyword in (('robot-selenium', 'Wait Until Page Contains'),
+                                   ('playwright-ts', 'expect(page.locator("body")).toContainText')):
+            prompt = emit._prompt({'framework': framework,
+                                   'steps': emit._steps_for_prompt([step], framework)})
+            self.assertIn(keyword, prompt, framework)
+            self.assertIn('page_text_contains', prompt, framework)
 
 
 if __name__ == '__main__':
