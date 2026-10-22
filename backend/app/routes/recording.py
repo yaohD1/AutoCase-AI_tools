@@ -219,6 +219,21 @@ def add_recording_step():
         return _error(str(exc), 400)
 
 
+@recording_bp.route('/automation/recording/reload', methods=['POST'])
+def add_recording_reload():
+    """插入一步「刷新页面」。录制中会顺带真的刷新，让后续步骤落在刷新后的页面上。"""
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        after_no = body.get('after_no')
+        after_no = int(after_no) if after_no is not None else None
+        return jsonify(session.add_reload_step(after_no)), 200
+    except (RecordingError, TypeError, ValueError) as exc:
+        return _error(str(exc), 400)
+
+
 @recording_bp.route('/automation/recording/intent', methods=['POST'])
 def parse_recording_intent():
     """用所选模型把自然语言描述解析为意图。只返回预览，不写入录制。"""

@@ -18,6 +18,7 @@ LOCATOR_RULES = (
     '- 定位优先用 target.locator；不要自己编造选择器，需要更精确时只能从 target.candidates 里挑或组合。\n'
     '- intent.type 为 url_contains / page_text_contains / sleep 时没有 target：'
     'url_contains 断言整条地址，page_text_contains 断言整个页面的文字，不要为它们编造元素定位。\n'
+    '- step.type 为 reload 表示「刷新当前标签页」：这一步没有 target 也没有 url。\n'
     '- target.match_count > 1 表示这条定位在页面上匹配了多个元素，属于「不唯一但仍可用」：\n'
     '  · 给了 target.nth，就取第 nth 个（下标从 0 开始）：\n'
     '    playwright-ts 写 locator.nth(n)；\n'
@@ -45,6 +46,16 @@ FRAMEWORK_RULES = {
         'url_contains → Wait Until Location Contains；enabled → Wait Until Keyword Succeeds + Element Should Be Enabled；'
         'page_text_contains → Wait Until Page Contains。\n'
         '- 新标签页用 Switch Window 配合 Wait Until Keyword Succeeds；frame 内操作前先 Select Frame。\n'
+        '- 刷新页面（type 为 reload）用 Reload Page，不要写成 Go To 同一地址（重新请求的语义不同）。'
+        '刷新后文档是新的，后续每条交互仍要先 Wait Until Element Is Visible。\n'
+        '- 轮询等待（type 为 wait，且 intent 带 timeout）：等待超时必须写成 intent.timeout 秒，'
+        '不要用默认的 5 秒。\n'
+        '  · intent.reload 为 false：Wait Until Element Is Visible（或 Not Visible）    ${loc}    ${timeout}s\n'
+        '  · intent.reload 为 true：这类是「页面不会自己更新，要反复刷新才知道结果」，写\n'
+        '    Wait Until Keyword Succeeds    ${timeout}s    ${interval}s    Reload And Check\n'
+        '    并在 *** Keywords *** 里定义 Reload And Check：先 Reload Page，再用一个**小于 interval** 的超时判断'
+        '（interval 为 5s 就写 3s）。内层超时若大于等于 interval，单次判断就吃满整个节奏，轮询会退化成慢速串行。\n'
+        '    不要用 Sleep 拼循环，也不要用 FOR 手写重试。\n'
         '- target.locator 已带 xpath= 前缀，原样使用，不要再包 css= 或再拼前缀。\n'
     ),
     'playwright-ts': (
@@ -53,6 +64,16 @@ FRAMEWORK_RULES = {
         '- 断言用 expect(locator)：toBeVisible / toBeHidden / toHaveText / toHaveValue；'
         '地址断言用 expect(page).toHaveURL(...)；整页文字断言用 expect(page.locator("body")).toContainText(...)。\n'
         '- 新标签页用 context.waitForEvent("page")；frame 内用 page.frameLocator(目标 frame 的 url)。\n'
+        '- 刷新页面（type 为 reload）用 page.reload()，不要写成 page.goto(page.url())：'
+        '后者在 SPA 里可能根本不重载。\n'
+        '- 轮询等待（type 为 wait，且 intent 带 timeout）：超时必须用 intent.timeout 换算成毫秒，'
+        '不要用默认的 5 秒。\n'
+        '  · intent.reload 为 false：expect(loc).toBeVisible({ timeout: <timeout*1000> })\n'
+        '  · intent.reload 为 true：Playwright 没有「刷到满足为止」的原生 API，用 expect.poll：\n'
+        '    await expect.poll(async () => { await page.reload(); return <loc>.isVisible(); },'
+        ' { timeout: <timeout*1000>, intervals: [<interval*1000>] }).toBe(true);\n'
+        '    poll 的回调里只做「刷新 + 立即判断」，不要在里面再套 toBeVisible（它自己会等，会把间隔吃掉）；'
+        '也不要用 while(true) 手写循环。\n'
     ),
 }
 

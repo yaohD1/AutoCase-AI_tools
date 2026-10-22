@@ -212,5 +212,20 @@ class EmitTest(unittest.TestCase):
             self.assertIn('page_text_contains', prompt, framework)
 
 
+    def test_prompt_maps_reload_for_both_frameworks(self):
+        """刷新在脚本里不等于「打开同一个地址」，提示词必须给出各自的关键字，
+        否则模型会写成 Go To / page.goto(page.url())，SPA 里可能根本不重载。"""
+        step = ir.make_step('reload', no=1)
+        rf = emit._prompt({'framework': 'robot-selenium',
+                           'steps': emit._steps_for_prompt([step], 'robot-selenium')})
+        self.assertIn('Reload Page', rf)
+        pw = emit._prompt({'framework': 'playwright-ts',
+                           'steps': emit._steps_for_prompt([step], 'playwright-ts')})
+        self.assertIn('page.reload()', pw)
+        # reload 没有目标元素也没有地址，别让模型去编一个
+        self.assertNotIn('target', emit._steps_for_prompt([step], 'playwright-ts')[0])
+        self.assertNotIn('url', emit._steps_for_prompt([step], 'playwright-ts')[0])
+
+
 if __name__ == '__main__':
     unittest.main()

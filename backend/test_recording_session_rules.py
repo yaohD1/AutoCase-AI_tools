@@ -153,5 +153,40 @@ class AliasTest(unittest.TestCase):
         self.assertEqual([i['hint'] for i in items], ['第 1 步 · 点击', '第 2 步 · 点击'])
 
 
+class ReloadStepTest(unittest.TestCase):
+    """刷新是独立步骤类型：它要能插、能删、没有可编辑字段，也不能插错位置。"""
+
+    def _flow(self):
+        return [_step('click', 'open'), _step('new_page', None), _step('click', 'next')]
+
+    def test_reload_is_inserted_after_the_anchor(self):
+        s = _session(self._flow())
+        s._add_reload(after_no=1)
+        # 和断言一样，不能插进「点击 → 标签页切换」之间，否则那一步的绑定就断了
+        self.assertEqual([x['type'] for x in s._steps], ['click', 'new_page', 'reload', 'click'])
+
+    def test_reload_appends_to_the_end_when_no_anchor(self):
+        s = _session(self._flow())
+        s._add_reload()
+        self.assertEqual([x['type'] for x in s._steps], ['click', 'new_page', 'click', 'reload'])
+        self.assertEqual([x['no'] for x in s._steps], [1, 2, 3, 4])
+
+    def test_insert_after_a_trailing_new_page_does_not_raise(self):
+        # 旧写法在锚点就是最后一步的 new_page 时会越界（self._steps[idx + 1]）
+        s = _session([_step('click', 'open'), _step('new_page', None)])
+        s._add_reload(after_no=2)
+        self.assertEqual([x['type'] for x in s._steps], ['click', 'new_page', 'reload'])
+
+    def test_reload_has_nothing_to_edit(self):
+        s = _session([_step('reload', None)])
+        with self.assertRaises(RecordingError):
+            s.update_step(1, {'url': 'http://x'})
+
+    def test_reload_can_be_removed(self):
+        s = _session([_step('goto', None), _step('reload', None)])
+        s.remove_step(2)
+        self.assertEqual([x['type'] for x in s._steps], ['goto'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -191,7 +191,14 @@ class RecordingRoutesTest(unittest.TestCase):
                                return_value='{"type": "url_contains", "value": "index"}') as ask:
             r = self.client.post('/api/automation/recording/intent', json={'text': 'URL 包含 index', 'model': MODEL})
         self.assertEqual(r.status_code, 200, r.get_json())
-        self.assertEqual(r.get_json()['intent'], {'type': 'url_contains', 'target': None, 'value': 'index', 'seconds': None})
+        intent = r.get_json()['intent']
+        self.assertEqual(intent['type'], 'url_contains')
+        self.assertEqual(intent['value'], 'index')
+        # 轮询字段只对 wait_visible / wait_hidden 有意义，其他意图必须是空值——
+        # 否则生成端会以为这一步要等 N 秒或者要刷新。
+        self.assertIsNone(intent['timeout'])
+        self.assertIsNone(intent['interval'])
+        self.assertFalse(intent['reload'])
         self.assertEqual(r.get_json()['model'], MODEL)
         self.assertEqual(ask.call_args[0][0], MODEL)
         after = len(self.client.get('/api/automation/recording/current').get_json()['steps'])
@@ -212,6 +219,23 @@ class RecordingRoutesTest(unittest.TestCase):
         self.assertEqual(r.status_code, 502)
         self.assertIn('serve 未启动', r.get_json()['error'])
         self._stop()
+
+    def test_reload_step_is_inserted_and_does_not_double_record(self):
+        """浏览器里的刷新会被自动检测到，工具栏按钮又自己刷一次：只该产生一条步骤。"""
+        self._start()
+        r = self.client.post('/api/automation/recording/reload', json={})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        types = [s['type'] for s in r.get_json()['steps']]
+        self.assertEqual(types, ['goto', 'reload'])
+        # 刷新后的导航事件由录制线程处理，等它过去再确认没有多记一条
+        import time
+        time.sleep(1.0)
+        again = self.client.get('/api/automation/recording/current').get_json()
+        self.assertEqual([s['type'] for s in again['steps']], ['goto', 'reload'])
+        self._stop()
+
+    def test_reload_requires_a_session(self):
+        self.assertEqual(self.client.post('/api/automation/recording/reload', json={}).status_code, 404)
 
     def test_no_session_is_not_found(self):
         self.assertEqual(self.client.get('/api/automation/recording/current').status_code, 404)

@@ -198,8 +198,19 @@
           </el-button>
           <el-button v-if="canCloseBrowser" :loading="closingBrowser" @click="closeBrowser">关闭浏览器</el-button>
           <span class="toolbar-sep"></span>
+          <!-- 刷新只由这个按钮添加：不自动检测（SPA 一次刷新会触发多个导航事件，分不清真假），
+               点了会真的刷新，后续步骤就落在刷新后的页面上 -->
+          <el-button
+            :icon="Refresh"
+            :disabled="!canEdit"
+            :loading="addingReload"
+            :title="isRecording ? '插入一步「刷新页面」，并真的刷新浏览器（在浏览器里按 F5 不会被录制）' : '插入一步「刷新页面」（浏览器已停止录制，不会真的刷新）'"
+            @click="insertReload()"
+          >
+            刷新页面
+          </el-button>
           <el-button :disabled="!canEdit" @click="openDraft('assert')">添加断言</el-button>
-          <el-button :disabled="!canEdit" @click="openDraft('wait')">添加等待</el-button>
+          <el-button :disabled="!canEdit" @click="openDraft('wait')">添加等待 / 轮询</el-button>
           <el-button :disabled="!canEdit" @click="openDraft('sleep')">固定等待</el-button>
         </div>
 
@@ -291,14 +302,15 @@
                 class="step-insert-btn"
                 trigger="click"
                 placement="bottom-end"
-                @command="kind => openDraft(kind, step.no)"
+                @command="kind => onInsertCommand(kind, step.no)"
               >
-                <el-button text :icon="Plus" title="在这一步之后插入断言 / 等待" />
+                <el-button text :icon="Plus" title="在这一步之后插入断言 / 等待 / 刷新" />
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="assert">插入断言</el-dropdown-item>
-                    <el-dropdown-item command="wait">插入条件等待</el-dropdown-item>
+                    <el-dropdown-item command="wait">插入等待 / 轮询</el-dropdown-item>
                     <el-dropdown-item command="sleep">插入固定等待</el-dropdown-item>
+                    <el-dropdown-item command="reload" divided>插入刷新页面</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -414,11 +426,47 @@
             />
           </div>
 
+          <!-- 轮询等待：最长等多久 + 要不要靠刷新推进。默认不刷新，因为刷新会冲掉页面状态。 -->
+          <div v-if="isPollType(draft.intentType)" class="poll-box">
+            <div class="poll-row">
+              <span class="poll-label">最长等</span>
+              <el-input-number
+                v-model="draft.timeout"
+                :min="1"
+                :max="MAX_WAIT_SECONDS"
+                :step="5"
+                controls-position="right"
+                size="small"
+              />
+              <span class="poll-unit">秒</span>
+              <span class="poll-hint">到点还没满足就算失败</span>
+            </div>
+            <div class="poll-row">
+              <el-checkbox v-model="draft.reload">等不到就刷新页面</el-checkbox>
+              <template v-if="draft.reload">
+                <span class="poll-label">每</span>
+                <el-input-number
+                  v-model="draft.interval"
+                  :min="1"
+                  :max="MAX_POLL_INTERVAL"
+                  :step="1"
+                  controls-position="right"
+                  size="small"
+                />
+                <span class="poll-unit">秒刷一次</span>
+              </template>
+            </div>
+            <div class="poll-note">
+              被测页面自己会更新（前端轮询接口）时不要勾刷新——刷新会重置表单、登录态和滚动位置，越刷越等不到。
+              设备重启、后台任务这类「页面不会自己变」的场景才需要刷。
+            </div>
+          </div>
+
           <!-- 插入前验证：只回答「此刻成不成立」，口径必须写清楚，否则会被当成回放结论 -->
-          <div v-if="draft.verify" :class="['verify-box', draft.verify.ok ? 'ok' : 'bad']">
+          <div v-if="draft.verify" :class="['verify-box', verifyTone]">
             <div class="verify-head">
               <span class="verify-dot"></span>
-              <span class="verify-title">当前页面状态：{{ draft.verify.ok ? '成立' : '不成立' }}</span>
+              <span class="verify-title">{{ verifyTitle }}</span>
               <code v-if="draft.verify.locator" class="verify-loc" :title="draft.verify.locator">{{ draft.verify.locator }}</code>
               <button type="button" class="verify-close" title="关掉这条结果" @click="draft.verify = null">×</button>
             </div>
@@ -432,7 +480,9 @@
             </div>
             <div v-if="draft.verify.detail" class="verify-detail">{{ draft.verify.detail }}</div>
             <div class="verify-note">
-              只反映点「验证」这一刻的页面，不是回放结论；断言写在操作之后时，现在不成立是正常的。
+              {{ draft.verify.poll
+                ? '轮询等待在插入时通常还没到那一步，现在不成立是正常的；它会在回放时按「最长等待」自己等到满足或超时。'
+                : '只反映点「验证」这一刻的页面，不是回放结论；断言写在操作之后时，现在不成立是正常的。' }}
             </div>
           </div>
 
@@ -542,9 +592,9 @@
             <ul v-if="replayOpen" class="gen-replay-steps">
               <li v-for="item in replayResult.steps" :key="item.no" :class="{ bad: !item.ok }">
                 <span class="gen-replay-no">{{ item.no }}</span>
-                <span class="gen-replay-type">{{ item.type }}</span>
-                <span class="gen-replay-alias" :title="item.alias || item.url || ''">
-                  {{ item.alias || item.url || '—' }}
+                <span class="gen-replay-type">{{ stepKindLabel(item.type) }}</span>
+                <span class="gen-replay-alias" :title="item.alias || item.label || item.url || ''">
+                  {{ item.alias || item.label || item.url || '—' }}
                 </span>
                 <code v-if="item.used" class="gen-replay-loc" :title="item.used.syntax">
                   {{ item.used.syntax }}
@@ -552,6 +602,9 @@
                 <span v-else class="gen-replay-loc is-empty">—</span>
                 <span v-if="item.used && item.used.nth" class="gen-replay-nth">
                   匹配 {{ item.used.matches }} 取第 {{ item.used.nth }}
+                </span>
+                <span v-if="item.poll" class="gen-replay-poll">
+                  轮询 {{ item.poll.elapsed }}s / 刷新 {{ item.poll.attempts - 1 }} 次
                 </span>
                 <span v-if="!item.ok && item.error" class="gen-replay-why">{{ item.error }}</span>
               </li>
@@ -580,7 +633,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, Expand, Fold, FolderOpened, Plus, Tickets, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, Expand, Fold, FolderOpened, Plus, Refresh, Tickets, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -595,16 +648,21 @@ const WAIT_TYPES = ['wait_visible', 'wait_hidden']
 const SLEEP_TYPES = ['sleep']
 const NEEDS_TARGET = new Set(['visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled', 'wait_visible', 'wait_hidden'])
 const NEEDS_VALUE = new Set(['text_contains', 'text_equals', 'value_equals', 'url_contains', 'page_text_contains'])
+// 轮询等待：可以配「最长等多久」和「等不到就刷新」。设备重启、异步任务这类场景靠它，
+// 用「固定等待 360 秒」硬顶是错的：等完了只判断一次，早了晚了都会误判。
+const POLL_TYPES = new Set(['wait_visible', 'wait_hidden'])
+const MAX_WAIT_SECONDS = 3600
+const MAX_POLL_INTERVAL = 300
 const INTENT_LABELS = {
   visible: '元素可见', hidden: '元素隐藏', text_contains: '文字包含', text_equals: '文字等于',
   value_equals: '值等于', enabled: '元素可用', url_contains: '地址包含',
   page_text_contains: '页面包含文字', wait_visible: '等待出现', wait_hidden: '等待消失', sleep: '固定等待'
 }
 const STEP_LABELS = {
-  goto: '打开页面', click: '点击', fill: '输入', select: '选择', new_page: '新标签页',
+  goto: '打开页面', reload: '刷新', click: '点击', fill: '输入', select: '选择', new_page: '新标签页',
   assert: '断言', wait: '等待', sleep: '固定等待'
 }
-const STEP_TONES = { goto: 'info', click: 'primary', fill: 'primary', select: 'primary', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger' }
+const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger' }
 const STATE_LABELS = {
   idle: '未开始', starting: '启动中', recording: '录制中', stopping: '停止中', stopped: '已停止',
   cancelled: '已取消', failed: '失败', idle_timeout: '超时已停止', closed: '浏览器已关闭'
@@ -738,6 +796,8 @@ const session = ref(null)
 const starting = ref(false)
 const stopping = ref(false)
 const closingBrowser = ref(false)
+// 插入「刷新页面」用的是命令通道（后端要真的刷一次浏览器），和断言草稿分开计数。
+const addingReload = ref(false)
 const draft = ref(null)
 // 刚插入的那一步短暂高亮，用来「指认」插入结果
 const flashingNo = ref(0)
@@ -1128,16 +1188,33 @@ function draftKindTypes(kind) {
 }
 
 const draftTypes = computed(() => draft.value ? draftKindTypes(draft.value.kind) : [])
-const draftTitle = computed(() => ({ assert: '添加断言', wait: '添加等待', sleep: '固定等待' })[draft.value?.kind] || '')
-const insertLabel = computed(() => ({ assert: '插入断言', wait: '插入等待', sleep: '插入固定等待' })[draft.value?.kind] || '插入')
+const draftTitle = computed(() => ({ assert: '添加断言', wait: '添加等待 / 轮询', sleep: '固定等待' })[draft.value?.kind] || '')
+const insertLabel = computed(() => ({ assert: '插入断言', wait: '插入等待 / 轮询', sleep: '插入固定等待' })[draft.value?.kind] || '插入')
 
 // 表单当前签名：解析结果会填进表单，之后用户改没改过，靠这个签名对比。
 const formSig = computed(() => {
   const current = draft.value
   if (!current) return ''
-  return [current.intentType, current.target || '', current.value || '', current.seconds ?? ''].join('\u0001')
+  return [current.intentType, current.target || '', current.value || '', current.seconds ?? '',
+    current.timeout ?? '', current.interval ?? '', current.reload ? 1 : 0].join('\u0001')
 })
 const formDirty = computed(() => !!draft.value?.parsed && formSig.value !== (draft.value?.parsedSig || ''))
+
+// 轮询等待的「此刻」几乎必然不成立，用红色会给错误信号，单独一档中性色。
+const verifyTone = computed(() => {
+  const result = draft.value?.verify
+  if (!result) return ''
+  if (result.poll) return 'neutral'
+  return result.ok ? 'ok' : 'bad'
+})
+const verifyTitle = computed(() => {
+  const result = draft.value?.verify
+  if (!result) return ''
+  if (result.poll) {
+    return result.ok ? '此刻已满足：这一步会立刻通过，不会真的等' : '此刻未满足：插入后由它自己等到满足或超时'
+  }
+  return `当前页面状态：${result.ok ? '成立' : '不成立'}`
+})
 
 // 表单一动，上一次「验证当前页面」的结论就过期了，留着会比没有更误导。
 watch(formSig, () => {
@@ -1155,6 +1232,10 @@ function openDraft(kind, afterNo = null) {
     target: null,
     value: '',
     seconds: 1,
+    // 轮询等待的默认值：30 秒比框架默认的 5 秒实用，且默认不刷新（刷新会冲掉页面状态）。
+    timeout: 30,
+    interval: 5,
+    reload: false,
     parsed: null,
     parsedSig: '',
     verify: null,
@@ -1196,6 +1277,7 @@ function revealStep(no) {
 
 function needsTarget(type) { return NEEDS_TARGET.has(type) }
 function needsValue(type) { return NEEDS_VALUE.has(type) }
+function isPollType(type) { return POLL_TYPES.has(type) }
 
 async function parseDraft() {
   const current = draft.value
@@ -1229,6 +1311,9 @@ function applyParsed(current, intent) {
   current.target = intent.target || null
   current.value = intent.value || ''
   if (intent.seconds != null) current.seconds = Number(intent.seconds)
+  if (intent.timeout != null) current.timeout = Number(intent.timeout)
+  if (intent.interval != null) current.interval = Number(intent.interval)
+  if (intent.reload != null) current.reload = !!intent.reload
   current.parsed = intent
   // 等 DOM 更新后再记签名，否则 computed 立即求值会被当成「用户改过了」。
   nextTick(() => {
@@ -1289,6 +1374,26 @@ async function closeBrowser() {
   }
 }
 
+// 行内「+」的四个入口：刷新走独立通道，其余三种打开草稿卡。
+function onInsertCommand(kind, afterNo) {
+  if (kind === 'reload') return insertReload(afterNo)
+  openDraft(kind, afterNo)
+}
+
+async function insertReload(afterNo = null) {
+  if (addingReload.value) return
+  addingReload.value = true
+  try {
+    const { data } = await api.addRecordingReload(afterNo)
+    applySession(data)
+    revealInserted(afterNo)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    addingReload.value = false
+  }
+}
+
 async function insertIntent(intent, text) {
   draft.value.inserting = true
   try {
@@ -1324,7 +1429,8 @@ function revealInserted(afterNo) {
 
 function buildFormIntent(current) {
   const type = current.intentType
-  const intent = { type, target: null, value: null, seconds: null }
+  const intent = { type, target: null, value: null, seconds: null,
+    timeout: null, interval: null, reload: false }
   if (needsTarget(type)) {
     if (!current.target) throw new Error('请选择目标元素，或点击「拾取元素」')
     intent.target = current.target
@@ -1338,6 +1444,22 @@ function buildFormIntent(current) {
     const seconds = Number(current.seconds)
     if (!(seconds > 0 && seconds <= 60)) throw new Error('固定等待需在 0 到 60 秒之间')
     intent.seconds = seconds
+  }
+  if (isPollType(type)) {
+    const timeout = Number(current.timeout)
+    if (!(timeout > 0 && timeout <= MAX_WAIT_SECONDS)) {
+      throw new Error(`最长等待需在 1 到 ${MAX_WAIT_SECONDS} 秒之间`)
+    }
+    intent.timeout = timeout
+    intent.reload = !!current.reload
+    if (current.reload) {
+      const interval = Number(current.interval)
+      if (!(interval >= 1 && interval <= MAX_POLL_INTERVAL)) {
+        throw new Error(`刷新间隔需在 1 到 ${MAX_POLL_INTERVAL} 秒之间`)
+      }
+      if (interval > timeout) throw new Error('刷新间隔不能大于最长等待')
+      intent.interval = interval
+    }
   }
   return intent
 }
@@ -1382,6 +1504,14 @@ function intentDescription(intent, target) {
   if (alias) parts.push(`「${alias}」`)
   if (intent.value !== null && intent.value !== undefined && intent.value !== '') parts.push(`：${intent.value}`)
   if (intent.type === 'sleep') parts.push(`${intent.seconds} 秒`)
+  // 轮询等待把「等多久、靠不靠刷新推进」写清楚，否则列表里和普通等待长得一模一样。
+  // 接在最后一段后面而不是 push 新段：parts 用空格 join，新段会在逗号前多出一个空格。
+  if (POLL_TYPES.has(intent.type) && intent.timeout) {
+    let tail = `，最多 ${intent.timeout} 秒`
+    if (intent.reload) tail += `，每 ${intent.interval || 5} 秒刷新一次`
+    if (parts.length) parts[parts.length - 1] += tail
+    else parts.push(tail)
+  }
   return parts.join(' ')
 }
 
@@ -1391,6 +1521,7 @@ function stepTone(type) { return STEP_TONES[type] || 'info' }
 function stepDescription(step) {
   switch (step.type) {
     case 'goto': return `打开 ${step.url || ''}`
+    case 'reload': return '刷新当前页面'
     case 'click': return `点击「${step.target ? step.target.alias : '元素'}」`
     case 'fill': return `在「${step.target ? step.target.alias : '输入框'}」中输入 ${step.value ?? ''}`
     case 'select': return `在「${step.target ? step.target.alias : '下拉框'}」中选择 ${step.label || step.value || ''}`
@@ -1942,6 +2073,20 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .verify-box { margin-top:12px; padding:10px 12px; border-radius:10px; background:#f6f9ff; border:1px solid #dbe7fa; }
 .verify-box.ok { background:#f2fbf5; border-color:#cdebd8; }
 .verify-box.bad { background:#fff8f0; border-color:#f3ddc2; }
+/* 轮询等待既不是通过也不是失败：此刻不成立是它的常态，单独一档中性色 */
+.verify-box.neutral { background:#f6f9ff; border-color:#dbe7fa; }
+.verify-box.neutral .verify-dot { background:#3b82f6; }
+.verify-box.neutral .verify-title { color:#1d4f9a; }
+.verify-box.neutral .verify-detail { color:#5c6675; }
+
+/* 轮询等待参数 */
+.poll-box { margin-top:10px; padding:10px 12px; border-radius:10px; background:#f7f9fc; border:1px dashed #d5e0ee; }
+.poll-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.poll-row + .poll-row { margin-top:8px; }
+.poll-label { font-size:12px; color:#5c6675; }
+.poll-unit { font-size:12px; color:#5c6675; }
+.poll-hint { font-size:11.5px; color:#a0a8b6; }
+.poll-note { margin-top:8px; font-size:11.5px; line-height:1.6; color:#8a94a6; }
 .verify-head { display:flex; align-items:center; gap:8px; min-width:0; }
 .verify-dot { flex:none; width:8px; height:8px; border-radius:50%; background:#e0a03a; }
 .verify-box.ok .verify-dot { background:#12a150; }
@@ -2018,6 +2163,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 }
 .gen-replay-loc.is-empty { background:none; color:#b4bcc8; padding:1px 0; }
 .gen-replay-nth { flex:none; color:#a15c07; }
+.gen-replay-poll { flex:none; color:#1d4f9a; }
 /* 失败原因是整句，独占一行，否则会把定位挤成省略号 */
 .gen-replay-why { flex-basis:100%; padding-left:27px; color:#c0271d; font-size:11.5px; line-height:1.5; }
 

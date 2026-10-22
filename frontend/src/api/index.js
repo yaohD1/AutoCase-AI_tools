@@ -204,6 +204,10 @@ batchDeleteTestcases(ids) {
   addRecordingStep(payload) {
     return api.post('/automation/recording/steps', payload)
   },
+  // 刷新页面要后端点一次浏览器（录制中会真的刷），所以有独立接口，超时给宽一点。
+  addRecordingReload(afterNo = null) {
+    return api.post('/automation/recording/reload', { after_no: afterNo }, { timeout: 30000 })
+  },
   parseRecordingIntent(text, model) {
     return api.post('/automation/recording/intent', { text, model }, { timeout: 180000 })
   },

@@ -6,13 +6,18 @@
 import json
 import re
 
-from app.services.recording.ir import INTENT_TYPES
+from app.services.recording.ir import INTENT_TYPES, POLL_INTENT_TYPES
 
 # 需要目标元素的意图。url_contains / page_text_contains 不需要目标。sleep 只需要秒数。
 NEEDS_TARGET = {'visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled',
                 'wait_visible', 'wait_hidden'}
 NEEDS_VALUE = {'text_contains', 'text_equals', 'value_equals', 'url_contains', 'page_text_contains'}
 MAX_SLEEP_SECONDS = 60
+# 轮询等待的上限。设备重启这类场景常见 300~600 秒，留到 1 小时。
+MAX_WAIT_SECONDS = 3600
+MIN_POLL_INTERVAL = 1
+MAX_POLL_INTERVAL = 300
+DEFAULT_POLL_INTERVAL = 5
 
 # 给模型看的一句话说明：哪些要目标元素、哪些只看整页/地址。
 # 之前的提示词只列了类型名，模型只能靠猜，常常把「页面提示出现」解析成需要选元素的 text_contains。
@@ -25,10 +30,19 @@ TYPE_HINTS = {
     'enabled': '某个元素可用、未被禁用（需要 target）',
     'url_contains': '当前地址包含 value（不需要 target）',
     'page_text_contains': '整个页面的文字里包含 value（不需要 target）',
-    'wait_visible': '等到某个元素出现（需要 target）',
-    'wait_hidden': '等到某个元素消失（需要 target）',
+    'wait_visible': '等到某个元素出现（需要 target，可带 timeout / interval / reload）',
+    'wait_hidden': '等到某个元素消失（需要 target，可带 timeout / interval / reload）',
     'sleep': '固定等待 seconds 秒',
 }
+
+POLL_FIELD_HINT = (
+    '（仅 wait_visible / wait_hidden 可选，其余类型不要输出这三个字段）'
+    'timeout：最长等待秒数，不填则沿用框架默认（约 5 秒）；'
+    'reload：true 表示等待期间反复刷新页面；'
+    'interval：每隔几秒刷新一次，只在 reload 为 true 时有意义。'
+    '描述里出现「最多等 360 秒」「每 5 秒刷新一次」时，要分别写进 timeout 和 interval，并把 reload 置为 true；'
+    '只说「等到某元素出现」不提刷新时，reload 必须是 false。'
+)
 
 
 SYSTEM_PROMPT = (
@@ -52,9 +66,10 @@ def build_prompt(text, aliases):
         '字段：type（必填）、target（已录元素别名，只能从下面的别名里选；不需要 target 的类型必须省略或写 null）、'
         'value（文字或值，text_contains / text_equals / value_equals / url_contains / page_text_contains 必填）、'
         'seconds（仅 sleep 使用，0 到 %d 之间的数字）。\n'
+        '%s\n'
         '描述里说的是「页面上出现/包含某段文字」而不是某个具体元素时，用 page_text_contains，不要硬选一个别名。\n'
         '已录元素别名：\n%s\n'
-        '描述：%s\n' % (type_lines, MAX_SLEEP_SECONDS, alias_lines, text)
+        '描述：%s\n' % (type_lines, MAX_SLEEP_SECONDS, POLL_FIELD_HINT, alias_lines, text)
     )
 
 
@@ -80,7 +95,8 @@ def validate(obj, aliases):
     if kind not in INTENT_TYPES:
         raise IntentError('未知的意图类型：%r' % kind)
 
-    intent = {'type': kind, 'target': None, 'value': None, 'seconds': None}
+    intent = {'type': kind, 'target': None, 'value': None, 'seconds': None,
+              'timeout': None, 'interval': None, 'reload': False}
 
     if kind in NEEDS_TARGET:
         target = obj.get('target')
@@ -103,7 +119,45 @@ def validate(obj, aliases):
             raise IntentError('sleep 秒数需在 0 到 %d 之间' % MAX_SLEEP_SECONDS)
         intent['seconds'] = seconds
 
+    if kind in POLL_INTENT_TYPES:
+        intent.update(_poll_fields(obj))
+
     return intent
+
+
+def _number(raw, what):
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise IntentError('%s必须是秒数' % what)
+
+
+def _poll_fields(obj):
+    """轮询等待的三个可选参数。
+
+    timeout 缺省表示「沿用框架默认超时」（PW/RF 都约 5 秒），保持老行为不变；
+    但勾了 reload 就必须显式给 timeout —— 每 5 秒刷一次却只等 5 秒，等于没等。
+    """
+    out = {'timeout': None, 'interval': None, 'reload': bool(obj.get('reload'))}
+    raw_timeout = obj.get('timeout')
+    if raw_timeout in (None, ''):
+        if out['reload']:
+            raise IntentError('勾了「等不到就刷新页面」就必须填写最长等待秒数')
+        return out
+    timeout = _number(raw_timeout, '最长等待')
+    if not 0 < timeout <= MAX_WAIT_SECONDS:
+        raise IntentError('最长等待需在 0 到 %d 秒之间' % MAX_WAIT_SECONDS)
+    out['timeout'] = timeout
+    if not out['reload']:
+        return out
+    raw_interval = obj.get('interval')
+    interval = DEFAULT_POLL_INTERVAL if raw_interval in (None, '') else _number(raw_interval, '刷新间隔')
+    if not MIN_POLL_INTERVAL <= interval <= MAX_POLL_INTERVAL:
+        raise IntentError('刷新间隔需在 %d 到 %d 秒之间' % (MIN_POLL_INTERVAL, MAX_POLL_INTERVAL))
+    if interval > timeout:
+        raise IntentError('刷新间隔不能大于最长等待')
+    out['interval'] = interval
+    return out
 
 
 def parse_intent(text, aliases, ask_model):

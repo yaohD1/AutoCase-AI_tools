@@ -6,11 +6,15 @@
 而不是「生成的脚本写得对不对」。所以两个框架都能校验：RF 的 rf_* 候选本来就是
 用 Playwright 的 xpath= / css= 在浏览器里数出来的，换一套候选即可，不需要 Selenium。
 """
+import time
+
 from playwright.sync_api import expect, sync_playwright
 
 from app.services.recording.locators import best_effort, pick_for
 
 ASSERT_TIMEOUT_MS = 5000
+# 刷新轮询里单次判断的窗口：只等渲染，不等结果。结果要靠下一轮刷新。
+POLL_CHECK_MS = 1000
 PW_FRAMEWORK = 'playwright-ts'
 RF_FRAMEWORK = 'robot-selenium'
 
@@ -83,17 +87,56 @@ def _locator(page, target, framework=PW_FRAMEWORK):
 
 
 def _assert(intent, target, page, framework=PW_FRAMEWORK):
+    """执行一条断言/等待，返回 (选中的候选, 轮询信息或 None)。
+
+    分两种口径：
+    - 不刷新：交给 Playwright 自己的等待，一次调用等到超时，行为最接近生成的脚本；
+    - 刷新轮询：Playwright 没有「刷到满足条件为止」的原生 API，得自己循环。
+      单次判断只给 1 秒窗口，失败就刷新再来，周期约等于 interval，不会因为
+      单次判断吃掉整个超时。
+    """
+    if intent.get('reload'):
+        return _poll_with_reload(intent, target, page, framework)
+    timeout_ms = int(float(intent['timeout']) * 1000) if intent.get('timeout') else ASSERT_TIMEOUT_MS
+    return _assert_once(intent, target, page, framework, timeout_ms), None
+
+
+def _poll_with_reload(intent, target, page, framework):
+    timeout = float(intent['timeout'])
+    interval = float(intent.get('interval') or 5)
+    started = time.monotonic()
+    deadline = started + timeout
+    attempts = 0
+    last = None
+    while True:
+        attempts += 1
+        try:
+            # reload 之后 DOM 已经就绪，这里只是给渲染留一点余量，不能给太长，
+            # 否则「1 秒判断 + 间隔」会让实际周期明显大于用户设的间隔。
+            chosen = _assert_once(intent, target, page, framework, POLL_CHECK_MS)
+            return chosen, {'attempts': attempts, 'reload': True,
+                            'interval': interval, 'elapsed': round(time.monotonic() - started, 1)}
+        except Exception as exc:  # noqa: BLE001 - 判断失败就是还没好，继续下一轮
+            last = exc
+        if time.monotonic() >= deadline:
+            raise ReplayError(
+                '轮询等待 %g 秒仍未成立（每 %g 秒刷新一次，共尝试 %d 次）：%s'
+                % (timeout, interval, attempts, last))
+        page.reload(wait_until='domcontentloaded')
+        page.wait_for_timeout(interval * 1000)
+
+
+def _assert_once(intent, target, page, framework, timeout):
     kind = intent['type']
     value = intent.get('value')
     if kind == 'url_contains':
-        page.wait_for_url(lambda url: value in url, timeout=ASSERT_TIMEOUT_MS)
+        page.wait_for_url(lambda url: value in url, timeout=timeout)
         return None
     if kind == 'page_text_contains':
         # 整页文字断言没有目标元素：body 的文字里包含即可，和生成时写的 expect(body).toContainText 同口径。
-        expect(page.locator('body')).to_contain_text(value, timeout=ASSERT_TIMEOUT_MS)
+        expect(page.locator('body')).to_contain_text(value, timeout=timeout)
         return None
     loc, chosen = _locator(page, target, framework)
-    timeout = ASSERT_TIMEOUT_MS
     if kind in ('visible', 'wait_visible'):
         expect(loc).to_be_visible(timeout=timeout)
     elif kind in ('hidden', 'wait_hidden'):
@@ -112,32 +155,39 @@ def _assert(intent, target, page, framework=PW_FRAMEWORK):
 
 
 def _run_step(step, page, framework=PW_FRAMEWORK):
-    """执行一步，返回这一步实际用到的定位候选（没有目标元素时返回 None）。"""
+    """执行一步，返回 (这一步实际用到的定位候选, 附加信息)。
+
+    附加信息目前只有轮询等待用得上（试了几次、刷了几轮），没有的话是 None。
+    """
     kind = step['type']
     if kind == 'goto':
         page.goto(step['url'], wait_until='domcontentloaded')
-        return None
+        return None, None
+    if kind == 'reload':
+        # 和 goto 不等价：这里要的正是「重新加载当前文档」，而不是重新请求一个地址。
+        page.reload(wait_until='domcontentloaded')
+        return None, None
     if kind == 'click':
         loc, chosen = _locator(page, step['target'], framework)
         loc.click()
-        return chosen
+        return chosen, None
     if kind == 'fill':
         loc, chosen = _locator(page, step['target'], framework)
         loc.fill(step.get('value') or '')
-        return chosen
+        return chosen, None
     if kind == 'select':
         loc, chosen = _locator(page, step['target'], framework)
         loc.select_option(step.get('value'))
-        return chosen
+        return chosen, None
     if kind == 'sleep':
         page.wait_for_timeout(float(step['intent']['seconds']) * 1000)
-        return None
+        return None, None
     if kind in ('assert', 'wait'):
         return _assert(step['intent'], step.get('target'), page, framework)
     raise ReplayError('回放不支持的步骤：%s' % kind)
 
 
-def _entry(step, chosen, ok, error=None):
+def _entry(step, chosen, ok, error=None, poll=None):
     """回放报告里的一行：这一步行不行、用哪条定位、命中几个、取第几个。"""
     target = step.get('target') or {}
     used = None
@@ -162,9 +212,13 @@ def _entry(step, chosen, ok, error=None):
         'alias': target.get('alias'),
         # goto 没有目标元素，报告里用 URL 代替 alias，否则明细里只剩一个破折号
         'url': step.get('url'),
+        # reload 既没有 alias 也没有 url，给它一句说明，别让明细里空着。
+        'label': '刷新当前页面' if step.get('type') == 'reload' else None,
         'ok': ok,
         'error': error,
         'used': used,
+        # 轮询等待才有的明细：等了几秒、刷新了几轮。失败时靠它区分「设备没起来」和「定位写错了」。
+        'poll': poll,
     }
 
 
@@ -183,22 +237,22 @@ def _run(steps, framework, headless, on_step):
                     if upcoming and upcoming['type'] == 'new_page':
                         # 录制时这一步打开了新标签页，回放时同样要接住它，并等它加载完。
                         with context.expect_page() as info:
-                            chosen = _run_step(step, _page_for(context, step), framework)
+                            chosen, poll = _run_step(step, _page_for(context, step), framework)
                         info.value.wait_for_load_state()
                         if on_step:
-                            on_step(_entry(step, chosen, True))
+                            on_step(_entry(step, chosen, True, poll=poll))
                             on_step(_entry(upcoming, None, True))
                         i += 2
                         done += 2
                         continue
-                    chosen = _run_step(step, _page_for(context, step), framework)
+                    chosen, poll = _run_step(step, _page_for(context, step), framework)
                 except Exception as exc:
                     if on_step:
                         on_step(_entry(step, None, False, str(exc)))
                     raise ReplayError('第 %s 步（%s）失败：%s' % (step.get('no'), step.get('type'), exc),
                                       step_no=step.get('no'), step_type=step.get('type'))
                 if on_step:
-                    on_step(_entry(step, chosen, True))
+                    on_step(_entry(step, chosen, True, poll=poll))
                 i += 1
                 done += 1
         finally:

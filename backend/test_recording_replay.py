@@ -176,5 +176,17 @@ class ReplayScenarioTest(unittest.TestCase):
             replay(steps, headless=True)
 
 
+    def test_replay_supports_reload(self):
+        # 刷新是独立步骤：回放必须真的 reload 当前页，而不是当成 goto 重开一次。
+        session = self._record()
+        session.add_reload_step()
+        report = replay_checked(session.ir(), headless=True)
+        self.assertTrue(report['ok'], report['error'])
+        self.assertEqual(report['done'], 11)
+        entry = [s for s in report['steps'] if s['type'] == 'reload'][0]
+        self.assertIsNone(entry['used'], '刷新没有目标元素')
+        self.assertEqual(entry['label'], '刷新当前页面')
+
+
 if __name__ == '__main__':
     unittest.main()

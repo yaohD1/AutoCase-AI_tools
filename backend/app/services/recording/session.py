@@ -41,7 +41,21 @@ PICK_OFF_TAGS = ('select', 'label')
 NON_TEXT_INPUT_TYPES = ('button', 'submit', 'reset', 'checkbox', 'radio')
 # 被录制页面里的浮层：只显示最近几步，避免面板过高挡住应用。
 HUD_RECENT_STEPS = 3
-STEP_TITLES = {'goto': '打开', 'click': '点击', 'fill': '输入', 'select': '选择',
+# 浏览器自己知道这次导航的起因（刷新 / 前进后退 / 普通跳转），读它比拿「URL 变没变」猜准。
+# 同时带回 timeOrigin：它是当前 document 的身份。SPA 在启动时会做 same-document 导航
+# （pushState / hash 变化），Playwright 对每一次都会再发一个 framenavigated，但
+# performance 里那条 navigation entry 始终是首次加载的，于是「刷一次」会被上报三四遍。
+# 用 timeOrigin 判「是不是同一个 document」，重复上报就一眼能看出来。
+NAV_INFO_JS = (
+    "() => { try { const e = performance.getEntriesByType('navigation')[0];"
+    ' return { type: e ? e.type : null, origin: performance.timeOrigin || null } }'
+    ' catch (err) { return null } }'
+)
+# 点击之后这么短时间内到达的导航算「这次点击的结果」，不单独记一步 goto。
+# 用一次性窗口而不是「上一步是不是 click」：后者会让点击之后的刷新、以及任何
+# 「点完按钮页面自己跳」都永久丢失（刷新那条 bug 的根因）。
+NAV_FROM_CLICK_SECONDS = 1.5
+STEP_TITLES = {'goto': '打开', 'reload': '刷新', 'click': '点击', 'fill': '输入', 'select': '选择',
                'new_page': '标签页', 'assert': '断言', 'wait': '等待', 'sleep': '等待'}
 STATUS_LABELS = {'unique': '唯一定位', 'fragile': '结构定位', 'ambiguous': '定位不唯一', 'stale': '定位已变化'}
 STATUS_TONES = {'unique': 'ok', 'fragile': 'warn', 'ambiguous': 'bad'}
@@ -101,6 +115,13 @@ class RecordingSession(object):
         self._alias_keys = {}
         self._wired = set()
         self._last_url = {}
+        # frame id → 当前 document 的身份（performance.timeOrigin）。同一个 document
+        # 只会有一条 navigation entry，重复的 framenavigated 靠它去重。
+        self._doc_stamp = {}
+        # 新标签页已经由 new_page 那一步表示过的首次导航，不该再判成一次跳转。
+        self._skip_nav = set()
+        # frame id → 最近一次点击的时间。用来判断「这次导航是不是点击引起的」，取用即失效。
+        self._pending_click = {}
         self._pick = False
         # 暂停录制：浏览器照常可用，但操作不再记为步骤（同 Playwright codegen 的 Pause）。
         self._paused = False
@@ -422,16 +443,60 @@ class RecordingSession(object):
                                 page_index=page_index, source='manual')
             step['intent'] = intent
             step['text'] = text
-            if after_no is None:
-                self._steps.append(step)
-            else:
-                idx = self._index_of(after_no)
-                # 不能插进「点击 → 标签页切换」之间。
-                pos = idx + 2 if self._tied(idx) and self._steps[idx + 1]['type'] == 'new_page' else idx + 1
-                self._steps.insert(pos, step)
+            self._insert_step(step, after_no)
             self._renumber()
         self._schedule_hud()
         return self.snapshot()
+
+    def _insert_step(self, step, after_no):
+        """插到 after_no 之后（None 表示追加到末尾）。调用方需持有 self._lock。"""
+        if after_no is None:
+            self._steps.append(step)
+            return
+        idx = self._index_of(after_no)
+        # 不能插进「点击 → 标签页切换」之间，否则那一步的绑定就断了。
+        if idx + 1 < len(self._steps) and self._steps[idx + 1]['type'] == 'new_page':
+            idx += 1
+        self._steps.insert(idx + 1, step)
+
+    def add_reload_step(self, after_no=None):
+        """插入一步「刷新页面」，录制中顺带真的刷新一次。
+
+        刷新只走这条路，不做自动检测：自动检测分不清「SPA 启动时的同文档导航」
+        和「用户真的刷了」，已经证明会多记。显式添加还有个好处是能补录——
+        行内「+」可以让它落在任意一步之后。
+        """
+        return self._call('reload', after_no=after_no)
+
+    def _add_reload(self, after_no=None):
+        page = self._current_page()
+        with self._lock:
+            step = ir.make_step('reload', no=0, source='manual',
+                                page_index=self._page_index(page) if page is not None else 0)
+            self._insert_step(step, after_no)
+            self._renumber()
+        # 只有录制中才真的刷：停止后插这一步只是编辑列表，没有「当前状态」需要对齐。
+        if page is not None and self.status == 'recording':
+            try:
+                self._reload_page(page)
+            except Exception as exc:
+                self._schedule_hud()
+                raise RecordingError('刷新页面失败：%s' % exc)
+        self._schedule_hud()
+        return self.snapshot()
+
+    def _reload_page(self, page):
+        """真的刷新一次。嵌入模式刷 iframe——外壳页刷新不代表被测系统刷新过。"""
+        frame = None
+        if self._embed:
+            for item in page.frames:
+                if item is not page.main_frame and self._is_app_frame(item):
+                    frame = item
+        if frame is not None:
+            # 用 setTimeout 把刷新推到 evaluate 返回之后，避免「执行上下文已销毁」的报错。
+            frame.evaluate('setTimeout(function () { location.reload(); }, 0)')
+            return
+        page.reload(wait_until='domcontentloaded')
 
     def _page_index_near(self, after_no=None):
         """断言落在哪个标签页：插在某步之后就用那一步的页，追加就用最后一步的页。"""
@@ -582,6 +647,8 @@ class RecordingSession(object):
                     result = {'laid_out': self.layout_windows()}
                 elif name == 'verify':
                     result = self._verify_now(kwargs['intent'])
+                elif name == 'reload':
+                    result = self._add_reload(kwargs.get('after_no'))
                 else:
                     raise RecordingError('未知命令：%s' % name)
                 reply.put((True, result))
@@ -789,6 +856,8 @@ class RecordingSession(object):
         kind = step.get('type')
         if kind in ('goto', 'new_page'):
             title = step.get('url') or ('新标签页' if kind == 'new_page' else '')
+        elif kind == 'reload':
+            title = '刷新页面'
         elif kind == 'sleep':
             title = '固定等待'
         elif kind in ('assert', 'wait'):
@@ -886,7 +955,8 @@ class RecordingSession(object):
         self._inbox.put(lambda: self._handle_new_page(page))
 
     def _handle_new_page(self, page):
-        if self._opened and id(page) not in self._wired:
+        # 停止后浏览器还开着，用户可能又开新标签页；那时不该再往列表里加步骤。
+        if self._opened and id(page) not in self._wired and self.status == 'recording':
             with self._lock:
                 index = self._page_index(page)
                 self._steps.append(ir.make_step('new_page', no=0, page_index=index))
@@ -900,6 +970,9 @@ class RecordingSession(object):
                 if last and last['type'] == 'new_page' and last.get('url') is None:
                     last['url'] = url
                     self._last_url[id(page.main_frame)] = url
+                    # 这个 frame 的第一次导航就是它自己打开的那次，已经由 new_page 表示。
+                    # 显式记一笔，避免「新 document + 地址没变」被下面的兜底逻辑当成刷新。
+                    self._skip_nav.add(id(page.main_frame))
         # 新标签页的文档是新的，浮层需要按当前步骤重画一次。
         self._schedule_hud()
 
@@ -933,19 +1006,97 @@ class RecordingSession(object):
         url = frame.url
         if not url or url.startswith('about:'):
             return
-        if self._last_url.get(id(frame)) == url:
+        info = self._nav_info(frame, self._doc_stamp.get(id(frame)))
+        nav_type = info.get('type') if info else None
+        stamp = info.get('origin') if info else None
+        key = id(frame)
+        # 新标签页打开时的第一次导航已由 new_page 表示，这里只登记身份。
+        if key in self._skip_nav:
+            self._skip_nav.discard(key)
+            self._last_url[key] = url
+            if stamp is not None:
+                self._doc_stamp[key] = stamp
             return
-        self._last_url[id(frame)] = url
+        same_url = self._last_url.get(key) == url
+        # 同一个 document 的又一次上报：SPA 启动时的 pushState / hash 变化都会各自触发
+        # 一次 framenavigated，但它们并不产生新的 navigation entry。真正的导航一定是
+        # 新 document，所以 timeOrigin 会变。靠它把「一次导航多条上报」压成一条。
+        if stamp is not None and self._doc_stamp.get(key) == stamp:
+            self._last_url[key] = url
+            return
+        if stamp is not None:
+            self._doc_stamp[key] = stamp
+        self._last_url[key] = url
+        # 停止 / 暂停期间浏览器还开着，用户照样会点，但这些动作不该入库。
+        if self.status != 'recording' or self._paused:
+            return
         with self._lock:
             prev = self._steps[-1] if self._steps else None
-            # 点击触发的跳转不单独记为 goto；新标签页的第一次跳转只补全 url。
+            # 新标签页的第一次跳转只补全 url，不单独记一步。
             if prev and prev['type'] == 'new_page' and prev.get('url') is None:
                 prev['url'] = url
-            elif not (prev and prev['type'] == 'click'):
-                self._steps.append(ir.make_step('goto', no=0, url=url, page_index=self._page_index(page)))
-                self._renumber()
+                self._schedule_hud()
+                return
+            # 刷新不自动记：用户按 F5 只影响浏览器里的当前状态，步骤由工具栏的
+            # 「刷新页面」显式添加（那一步同时保证刷新后的页面与后续步骤对得上）。
+            # 这里一并吞掉「按钮自己刷出来的那次」，避免它退化成一条 goto。
+            if nav_type == 'reload':
+                return
+            if nav_type == 'back_forward':
+                # Playwright 不告诉你方向；goto 在脚本语义上已经够了（测试不关心历史栈）。
+                step_type = 'goto'
+            elif same_url:
+                # 地址没变却换了 document：刷新（已由按钮负责）或地址栏重输同一地址。
+                # 两者都不该自动变成「打开页面」。
+                return
+            elif self._clicked_recently(frame):
+                # 点击引起的跳转不单独记 goto：脚本里点完自然会跳。
+                return
+            else:
+                step_type = 'goto'
+            self._steps.append(ir.make_step(step_type, no=0, url=url,
+                                            page_index=self._page_index(page)))
+            self._renumber()
         # 导航后文档是新的，浮层得按当前步骤重画一次。
         self._schedule_hud()
+
+    def _nav_info(self, frame, prev_stamp=None):
+        """这次导航的起因：navigate / reload / back_forward，外加当前 document 的 timeOrigin。
+
+        读 performance 是唯一可靠的办法——URL 变没变区分不了「谁发起的导航」，
+        而刷新恰恰就是「地址没变的导航」。
+
+        刚提交导航的那一瞬，evaluate 有可能还落在旧 document 上（读到的是上一次的
+        timeOrigin）。那就等一小会儿再读一次：新 document 的身份一定不同。
+        """
+        info = self._read_nav_info(frame)
+        if prev_stamp is None or info is None or info.get('origin') != prev_stamp:
+            return info
+        try:
+            frame.wait_for_timeout(80)
+        except Exception:
+            return info
+        retry = self._read_nav_info(frame)
+        return retry or info
+
+    def _read_nav_info(self, frame):
+        try:
+            value = frame.evaluate(NAV_INFO_JS)
+        except Exception:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _clicked_recently(self, frame):
+        """这一步导航是不是刚发生的点击引起的。一次性窗口，不再用「上一步是不是 click」判。"""
+        now = time.time()
+        key = id(frame)
+        at = self._pending_click.get(key)
+        if at is None:
+            return False
+        if now - at > NAV_FROM_CLICK_SECONDS:
+            self._pending_click.pop(key, None)
+            return False
+        return True
 
     def _page_index(self, page):
         try:
@@ -1047,6 +1198,10 @@ class RecordingSession(object):
             step['_key'] = key
             step['_frame'] = frame
             self._steps.append(step)
+            if kind == 'click':
+                # 记下时刻而不是「上一步是点击」：只有紧跟着的这次导航才算它引起的，
+                # 之后用户再刷新/页面自己跳，仍然照记。
+                self._pending_click[id(frame)] = time.time()
             self._renumber()
             no = step['no']
         # 徽标要读计数结果，`_count` 已经算完；这里排进队列，避免在锁里做 Playwright 调用。

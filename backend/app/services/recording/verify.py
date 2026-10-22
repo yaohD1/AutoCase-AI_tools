@@ -70,10 +70,26 @@ def _result(kind, ok, actual, expected=None, detail=None, chosen=None, matches=N
 
 
 def check(frame, target, intent):
-    """在当前 frame 上判断一条断言。返回 {'ok', 'kind', 'expected', 'actual', 'detail', ...}。
+    """在当前 frame 上判断一条断言，返回 {'ok', 'kind', 'expected', 'actual', 'detail', ...}。
 
     ok 只代表「此刻成立」，语义由调用方在界面里说明清楚。
+
+    轮询等待例外：它等的是「之后」的状态，此刻不成立完全是正常的，
+    所以额外带一个 poll 字段，前端据此换掉红色结论和提示语。
     """
+    result = _check(frame, target, intent)
+    if intent.get('timeout'):
+        result['poll'] = {
+            'timeout': intent.get('timeout'),
+            'interval': intent.get('interval'),
+            'reload': bool(intent.get('reload')),
+        }
+        if not result.get('ok'):
+            result['detail'] = '这是轮询等待，等的是之后的页面状态，此刻不成立属正常'
+    return result
+
+
+def _check(frame, target, intent):
     if frame is None:
         raise VerifyError('没有可用的页面')
     kind = intent.get('type')

@@ -3,13 +3,18 @@
 框架无关：只描述用户做了什么、目标是什么、用哪种定位。代码由后续的 adapter 生成。
 """
 
-STEP_TYPES = ('goto', 'click', 'fill', 'select', 'new_page', 'assert', 'wait', 'sleep')
+STEP_TYPES = ('goto', 'reload', 'click', 'fill', 'select', 'new_page', 'assert', 'wait', 'sleep')
 
 # 断言 / 等待的意图类型，固定 schema。代码片段由生成 agent 按框架写。
 INTENT_TYPES = (
     'visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled',
     'url_contains', 'page_text_contains', 'wait_visible', 'wait_hidden', 'sleep',
 )
+
+# 轮询等待：这两个意图可以带「最长等待」与「刷新间隔」。
+# 和普通断言的区别是「暂时不成立」在预期内，只有到点还没成立才算失败。
+# 设备重启、异步任务、报表生成这类场景都属于它，用 sleep 硬等是错的：既慢又不可靠。
+POLL_INTENT_TYPES = ('wait_visible', 'wait_hidden')
 
 
 def step_type_for_intent(kind):
