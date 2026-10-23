@@ -118,7 +118,7 @@ class NavigationRecordingTest(unittest.TestCase):
         return [step['type'] for step in session.ir()]
 
     def _record(self):
-        session = RecordingSession.start_new(self.base, headless=True, driver=_idle_scenario)
+        session = RecordingSession.start_new(self.base, headless=True, ask_daemon=False, driver=_idle_scenario)
         self.assertEqual(self._types(session), ['goto'])
         return session
 
@@ -209,7 +209,7 @@ class SpaNavigationTest(unittest.TestCase):
 
     def _record(self):
         """打开 SPA 页，并记录期间收到过几次导航事件（用来确认测试真的踩到了重复上报）。"""
-        session = RecordingSession.start_new(self.base, headless=True, driver=_idle_scenario)
+        session = RecordingSession.start_new(self.base, headless=True, ask_daemon=False, driver=_idle_scenario)
         seen = []
         original = session._handle_navigated
         session._handle_navigated = lambda page, frame: (seen.append(frame.url), original(page, frame))[1]

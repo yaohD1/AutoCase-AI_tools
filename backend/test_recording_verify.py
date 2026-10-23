@@ -138,7 +138,7 @@ class VerifyOnLivePageTest(unittest.TestCase):
         RecordingSession.dispose_current()
 
     def _record(self):
-        return RecordingSession.start_new(self.base, headless=True, driver=_scenario)
+        return RecordingSession.start_new(self.base, headless=True, ask_daemon=False, driver=_scenario)
 
     def test_text_contains_reports_the_actual_text(self):
         session = self._record()
@@ -213,7 +213,7 @@ class AliasOnLivePageTest(unittest.TestCase):
         RecordingSession.dispose_current()
 
     def _record(self):
-        return RecordingSession.start_new(self.base, headless=True, driver=_table_scenario)
+        return RecordingSession.start_new(self.base, headless=True, ask_daemon=False, driver=_table_scenario)
 
     def _pick_second(self, session):
         session.set_pick(True)
@@ -266,7 +266,7 @@ class PickPassthroughTest(unittest.TestCase):
         RecordingSession.dispose_current()
 
     def test_plain_click_is_blocked_and_alt_click_passes_through(self):
-        session = RecordingSession.start_new(self.base, headless=True, driver=_idle_scenario)
+        session = RecordingSession.start_new(self.base, headless=True, ask_daemon=False, driver=_idle_scenario)
         session.set_pick(True)
         try:
             _in_recording_thread(session, lambda: session._test_page.click('#more'))

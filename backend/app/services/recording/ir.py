@@ -3,7 +3,8 @@
 框架无关：只描述用户做了什么、目标是什么、用哪种定位。代码由后续的 adapter 生成。
 """
 
-STEP_TYPES = ('goto', 'reload', 'click', 'fill', 'select', 'new_page', 'assert', 'wait', 'sleep')
+STEP_TYPES = ('goto', 'reload', 'click', 'fill', 'select', 'press', 'dialog',
+              'new_page', 'assert', 'wait', 'sleep')
 
 # 断言 / 等待的意图类型，固定 schema。代码片段由生成 agent 按框架写。
 INTENT_TYPES = (
@@ -11,17 +12,28 @@ INTENT_TYPES = (
     'url_contains', 'page_text_contains', 'wait_visible', 'wait_hidden', 'sleep',
 )
 
-# 轮询等待：这两个意图可以带「最长等待」与「刷新间隔」。
-# 和普通断言的区别是「暂时不成立」在预期内，只有到点还没成立才算失败。
+# 轮询等待：带「最长等待」的条件判断。
+# 和立即断言的区别只有一条：暂时不成立在预期内，到点还没成立才算失败。
 # 设备重启、异步任务、报表生成这类场景都属于它，用 sleep 硬等是错的：既慢又不可靠。
+# wait_visible / wait_hidden 是合并前的老写法，只为读旧数据保留，前端不再产出。
 POLL_INTENT_TYPES = ('wait_visible', 'wait_hidden')
 
+# 给用户和模型看的类型集合：等待不再是独立类型，而是任意条件 + timeout。
+CONDITION_INTENT_TYPES = tuple(t for t in INTENT_TYPES if t not in POLL_INTENT_TYPES)
 
-def step_type_for_intent(kind):
-    """断言 / 等待 / 睡眠三类步骤由意图类型决定。"""
+
+def step_type_for_intent(kind, intent=None):
+    """断言 / 等待 / 睡眠三类步骤由意图决定。
+
+    「断言」和「等待」在语义上只差一件事：容不容忍「此刻还没成立」。
+    所以不再让用户先选是断言还是等待，而是看有没有给最长等待：
+    给了就是 wait（生成端据此写等待 / 轮询代码），没给就是立即断言的 assert。
+    """
     if kind == 'sleep':
         return 'sleep'
     if kind in ('wait_visible', 'wait_hidden'):
+        return 'wait'
+    if intent and intent.get('timeout'):
         return 'wait'
     return 'assert'
 
@@ -42,8 +54,13 @@ def make_target(snap, candidates, primary, status):
     }
 
 
-def make_step(step_type, no, target=None, value=None, label=None, url=None, page_index=0, source='record'):
-    """一步操作。source 为 record（录制得到）或 manual（用户在工具栏添加）。"""
+def make_step(step_type, no, target=None, value=None, label=None, url=None, page_index=0,
+              source='record', dialog=None):
+    """一步操作。source 为 record（录制得到）或 manual（用户在工具栏添加）。
+
+    press 用 value 存键名（Playwright 写法，如 Enter / Control+Enter）；
+    dialog 用 dialog 存 {'kind', 'message', 'action'}，value 另存一遍 action 便于前端直接读。
+    """
     if step_type not in STEP_TYPES:
         raise ValueError('unknown step type: %s' % step_type)
     return {
@@ -57,6 +74,7 @@ def make_step(step_type, no, target=None, value=None, label=None, url=None, page
         'page_index': page_index,
         'intent': None,
         'text': None,
+        'dialog': dialog,
     }
 
 

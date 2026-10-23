@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from app.services.recording import intent as intent_mod
+from app.services.recording import ir
 from app.services.recording.emit import FRAMEWORK_RULES
 from app.services.recording.replay import replay_checked
 
@@ -139,11 +140,20 @@ class PollIntentValidateTest(unittest.TestCase):
                            'timeout': 10, 'interval': 30, 'reload': True})
 
     def test_timeout_range(self):
-        for bad in (0, -1, intent_mod.MAX_WAIT_SECONDS + 1):
+        # 0 不算越界：模型常用 0 表示「不等待」，等价于没填（见下一条用例）。
+        for bad in (-1, intent_mod.MAX_WAIT_SECONDS + 1):
             with self.assertRaises(intent_mod.IntentError):
                 self.validate({'type': 'wait_visible', 'target': '判定元素', 'timeout': bad})
         with self.assertRaises(intent_mod.IntentError):
             self.validate({'type': 'wait_visible', 'target': '判定元素', 'timeout': 'abc'})
+
+    def test_zero_timeout_means_no_wait(self):
+        """模型返回 timeout: 0 是「别等」，不是非法值，不该弹一条看不懂的报错。"""
+        result = self.validate({'type': 'visible', 'target': '判定元素', 'timeout': 0})
+        self.assertIsNone(result['timeout'])
+        # 但勾了刷新就必须给真超时，0 秒等于没等。
+        with self.assertRaises(intent_mod.IntentError):
+            self.validate({'type': 'visible', 'target': '判定元素', 'timeout': 0, 'reload': True})
 
     def test_interval_range(self):
         for bad in (0, intent_mod.MAX_POLL_INTERVAL + 1):
@@ -151,13 +161,53 @@ class PollIntentValidateTest(unittest.TestCase):
                 self.validate({'type': 'wait_visible', 'target': '判定元素',
                                'timeout': 360, 'interval': bad, 'reload': True})
 
-    def test_other_intents_ignore_poll_fields(self):
-        # 断言和固定等待不吃这三个字段，模型多给了也不能悄悄生效。
-        for obj in ({'type': 'visible', 'target': '判定元素', 'timeout': 100, 'reload': True},
-                    {'type': 'sleep', 'seconds': 1, 'timeout': 100, 'reload': True}):
+    def test_sleep_ignores_poll_fields(self):
+        # 固定等待没有条件可判断，模型多给了这三个字段也不能悄悄生效。
+        result = self.validate({'type': 'sleep', 'seconds': 1, 'timeout': 100, 'reload': True})
+        self.assertIsNone(result['timeout'])
+        self.assertFalse(result['reload'])
+
+    def test_any_condition_can_carry_timeout(self):
+        """合并后等待不再是独立类型：八种条件都能带最长等待，不再只有 wait_* 能用。"""
+        cases = (
+            ('visible', {}),
+            ('text_contains', {'value': '运行中'}),
+            ('url_contains', {'value': '/device'}),
+            ('page_text_contains', {'value': '完成'}),
+        )
+        for kind, extra in cases:
+            obj = dict({'type': kind, 'target': '判定元素', 'timeout': 100}, **extra)
             result = self.validate(obj)
-            self.assertIsNone(result['timeout'])
-            self.assertFalse(result['reload'])
+            self.assertEqual(result['timeout'], 100, kind)
+            self.assertEqual(result['type'], kind)
+
+    def test_step_type_follows_timeout(self):
+        """有没有 timeout 决定它是立即断言还是等待，前端不再让用户选两次。"""
+        self.assertEqual(ir.step_type_for_intent('visible', {'timeout': None}), 'assert')
+        self.assertEqual(ir.step_type_for_intent('visible', {'timeout': 30}), 'wait')
+        self.assertEqual(ir.step_type_for_intent('visible', {}), 'assert')
+        # 老类型仍然映射到 wait，历史数据不受影响。
+        self.assertEqual(ir.step_type_for_intent('wait_visible'), 'wait')
+        self.assertEqual(ir.step_type_for_intent('sleep'), 'sleep')
+
+    def test_apply_poll_back_and_forth(self):
+        """就地改：30 秒 → 立即断言 → 再改回 60 秒，类型跟着在 wait / assert 之间切。"""
+        intent = self.validate({'type': 'visible', 'target': '判定元素', 'timeout': 30})
+        self.assertEqual(ir.step_type_for_intent(intent['type'], intent), 'wait')
+
+        off = intent_mod.apply_poll(intent, {'timeout': None, 'reload': False})
+        self.assertIsNone(off['timeout'])
+        self.assertEqual(ir.step_type_for_intent(off['type'], off), 'assert')
+
+        back = intent_mod.apply_poll(off, {'timeout': 60, 'reload': True, 'interval': 5})
+        self.assertEqual(back['timeout'], 60)
+        self.assertTrue(back['reload'])
+        self.assertEqual(ir.step_type_for_intent(back['type'], back), 'wait')
+
+    def test_apply_poll_rejects_reload_without_timeout(self):
+        intent = self.validate({'type': 'visible', 'target': '判定元素', 'timeout': 30})
+        with self.assertRaises(intent_mod.IntentError):
+            intent_mod.apply_poll(intent, {'timeout': None, 'reload': True})
 
     def test_prompt_explains_poll_fields(self):
         prompt = intent_mod.build_prompt('等重启完成，最多 360 秒，每 5 秒刷新一次', ['判定元素'])

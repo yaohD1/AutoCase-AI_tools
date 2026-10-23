@@ -154,6 +154,49 @@ def _assert_once(intent, target, page, framework, timeout):
     return chosen
 
 
+def _arm_dialog(page, step, probe):
+    """在触发弹窗的那一步之前注册处理方式。
+
+    Playwright 一旦有 dialog 监听就不再自动接管，而等走到 dialog 步骤再注册已经晚了：
+    页面在弹窗出现的那一刻就挂起了。所以必须提前一步装好。
+    """
+    action = step.get('value') or 'accept'
+
+    def on_dialog(dialog):
+        try:
+            probe['seen'].append({'kind': dialog.type, 'message': dialog.message})
+        except Exception:
+            pass
+        try:
+            if action == 'dismiss':
+                dialog.dismiss()
+            else:
+                dialog.accept()
+        except Exception:
+            pass
+
+    probe['page'] = page
+    probe['handler'] = on_dialog
+    page.on('dialog', on_dialog)
+    return probe
+
+
+def _disarm_dialog(probe):
+    """卸掉没用上的监听。
+
+    多余注册的 handler 会替后面的弹窗拿主意（把 Playwright 默认的 auto-dismiss 改成 accept），
+    而这一步其实没有弹窗，必须清掉，否则会悄悄改变后续步骤的行为。
+    """
+    if not probe:
+        return
+    page, handler = probe.get('page'), probe.get('handler')
+    if page is not None and handler is not None:
+        try:
+            page.remove_listener('dialog', handler)
+        except Exception:
+            pass
+
+
 def _run_step(step, page, framework=PW_FRAMEWORK):
     """执行一步，返回 (这一步实际用到的定位候选, 附加信息)。
 
@@ -179,12 +222,36 @@ def _run_step(step, page, framework=PW_FRAMEWORK):
         loc, chosen = _locator(page, step['target'], framework)
         loc.select_option(step.get('value'))
         return chosen, None
+    if kind == 'press':
+        loc, chosen = _locator(page, step['target'], framework)
+        loc.press(step.get('value'))
+        return chosen, None
+    if kind == 'dialog':
+        # accept / dismiss 在触发它的前一步之前就注册好了（见 _run）。
+        # 这里只把事件循环转一下，让那个回调落地——同步 API 只在调用期间分发事件。
+        page.wait_for_timeout(200)
+        return None, None
     if kind == 'sleep':
         page.wait_for_timeout(float(step['intent']['seconds']) * 1000)
         return None, None
     if kind in ('assert', 'wait'):
         return _assert(step['intent'], step.get('target'), page, framework)
     raise ReplayError('回放不支持的步骤：%s' % kind)
+
+
+def _step_label(step):
+    """给明细里没有 alias / url 的步骤补一句人话，否则报告里只剩一个破折号。"""
+    kind = step.get('type')
+    if kind == 'reload':
+        return '刷新当前页面'
+    if kind == 'press':
+        return '按键：%s' % (step.get('value') or '')
+    if kind == 'dialog':
+        info = step.get('dialog') or {}
+        action = '确定' if (info.get('action') or step.get('value')) == 'accept' else '取消'
+        message = (info.get('message') or '').strip()
+        return '弹窗（%s）：%s' % (action, message[:40] or info.get('kind') or '未捕获')
+    return None
 
 
 def _entry(step, chosen, ok, error=None, poll=None):
@@ -213,7 +280,7 @@ def _entry(step, chosen, ok, error=None, poll=None):
         # goto 没有目标元素，报告里用 URL 代替 alias，否则明细里只剩一个破折号
         'url': step.get('url'),
         # reload 既没有 alias 也没有 url，给它一句说明，别让明细里空着。
-        'label': '刷新当前页面' if step.get('type') == 'reload' else None,
+        'label': _step_label(step),
         'ok': ok,
         'error': error,
         'used': used,
@@ -230,9 +297,14 @@ def _run(steps, framework, headless, on_step):
             context = browser.new_context()
             context.new_page()
             i = 0
+            # 下一步要是弹窗步骤，处理方式必须在当前步执行之前交给浏览器，所以在这里拿着。
+            probe = None
             while i < len(steps):
                 step = steps[i]
                 upcoming = steps[i + 1] if i + 1 < len(steps) else None
+                if upcoming and upcoming['type'] == 'dialog' and probe is None:
+                    probe = _arm_dialog(_page_for(context, upcoming), upcoming,
+                                        {'seen': [], 'no': upcoming.get('no')})
                 try:
                     if upcoming and upcoming['type'] == 'new_page':
                         # 录制时这一步打开了新标签页，回放时同样要接住它，并等它加载完。
@@ -246,7 +318,15 @@ def _run(steps, framework, headless, on_step):
                         done += 2
                         continue
                     chosen, poll = _run_step(step, _page_for(context, step), framework)
+                    if step['type'] == 'dialog' and probe and probe.get('no') == step.get('no'):
+                        # 弹窗没出现就别装作成功：多半是上一步没点中，或者页面改成了自定义弹层。
+                        if not probe['seen']:
+                            raise ReplayError('这一步应该有弹窗，但实际没有弹出来（上一步可能没点中）')
+                        _disarm_dialog(probe)
+                        probe = None
                 except Exception as exc:
+                    _disarm_dialog(probe)
+                    probe = None
                     if on_step:
                         on_step(_entry(step, None, False, str(exc)))
                     raise ReplayError('第 %s 步（%s）失败：%s' % (step.get('no'), step.get('type'), exc),

@@ -13,10 +13,36 @@ from app.models import db
 from app.models.recording_generation import RecordingGeneration
 from app.services.recording import detect, emit, records, replay
 from app.services.recording import intent, verify
+from app.services.recording.ask_pool import AskUnavailable
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
 
 
 recording_bp = Blueprint('recording', __name__)
+
+# 解析进程要用的 OpenCode 启动参数：只传存在的那几项，其余走 OpenCodeRunner 的默认值。
+OPENCODE_CONFIG_KEYS = ('OPENCODE_BIN', 'OPENCODE_CONFIG', 'OPENCODE_PURE', 'OPENCODE_SERVE_HOST')
+
+
+def _opencode_config():
+    return {key: current_app.config.get(key) for key in OPENCODE_CONFIG_KEYS
+            if current_app.config.get(key) is not None}
+
+
+def _ask_text(session, model, system, prompt):
+    """断言解析的模型调用：优先用录制期常驻的进程，不可用就退回一次性的。
+
+    常驻进程把 5 秒多的「进程首次调用」提前到录制开始时做掉了，这里只要 1.5–3 秒；
+    退回路径慢（约 7 秒）但功能完全一样，所以常驻进程挂了也不影响用户把断言插进去。
+    """
+    pool = session.ask_pool() if session is not None else None
+    if pool is not None and pool.is_ready():
+        pool.note_model(model)
+        try:
+            return pool.ask(system, prompt)
+        except AskUnavailable as exc:
+            # 判死而不是留着重试：同一个坏进程再问一次只会让用户多等几秒。
+            pool.fail(str(exc))
+    return OpenCodeRunner(current_app.config).ask_text(model, system, prompt)
 
 
 def _error(message, status):
@@ -50,6 +76,9 @@ def start_recording():
             panel_url=_panel_url(body, base_url) if layout == 'split' else None,
             panel_ratio=current_app.config.get('RECORDING_PANEL_RATIO', 0.45),
             hud_panel=bool(current_app.config.get('RECORDING_HUD_PANEL', False)),
+            # 断言解析器：录制一开始就在后台起并预热，开始录制时选的模型先用来热身。
+            ask_model=body.get('model'),
+            ask_config=_opencode_config(),
         )
     except RecordingBusy as exc:
         return _error(str(exc), 409)
@@ -244,12 +273,11 @@ def parse_recording_intent():
     model = (body.get('model') or '').strip()
     if '/' not in model:
         return _error('请先选择模型；不选模型时请使用结构化表单', 400)
-    runner = OpenCodeRunner(current_app.config)
     try:
         parsed = intent.parse_intent(
             body.get('text') or '',
             session.aliases(),
-            lambda system, prompt: runner.ask_text(model, system, prompt),
+            lambda system, prompt: _ask_text(session, model, system, prompt),
         )
     except intent.IntentError as exc:
         return _error(str(exc), 422)

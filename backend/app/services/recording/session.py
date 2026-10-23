@@ -15,7 +15,10 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
+from app.services.recording import intent as intent_mod
 from app.services.recording import ir, verify
+from app.services.recording.ask_pool import STOP_DELAY_SECONDS as ASK_STOP_DELAY_SECONDS
+from app.services.recording.ask_pool import AskPool, disabled_snapshot
 from app.services.recording.locators import build_specs, rank, stale_check, status_of
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +59,7 @@ NAV_INFO_JS = (
 # 「点完按钮页面自己跳」都永久丢失（刷新那条 bug 的根因）。
 NAV_FROM_CLICK_SECONDS = 1.5
 STEP_TITLES = {'goto': '打开', 'reload': '刷新', 'click': '点击', 'fill': '输入', 'select': '选择',
+               'press': '按键', 'dialog': '弹窗',
                'new_page': '标签页', 'assert': '断言', 'wait': '等待', 'sleep': '等待'}
 STATUS_LABELS = {'unique': '唯一定位', 'fragile': '结构定位', 'ambiguous': '定位不唯一', 'stale': '定位已变化'}
 STATUS_TONES = {'unique': 'ok', 'fragile': 'warn', 'ambiguous': 'bad'}
@@ -65,8 +69,52 @@ EDITABLE_FIELDS = {
     'select': ('value', 'label'),
     'goto': ('url',),
     'sleep': ('seconds',),
+    # 按键改键名；弹窗改「确定 / 取消」——录制时一律 accept，要 cancel 只能在这里改。
+    'press': ('value',),
+    'dialog': ('value',),
+    # 断言和等待只差「最长等待」这一个参数，所以两者都能就地改等待与刷新节奏。
+    # 改成 0 秒会从等待退回立即断言，step type 跟着变。
+    'assert': ('timeout', 'interval', 'reload'),
+    'wait': ('timeout', 'interval', 'reload'),
 }
 MAX_VALUE_LENGTH = 500
+# 文本框里这些键只改文本或移光标，结果由紧随其后的 fill 全量表达（见 _press_only_edits_text）。
+TEXT_EDIT_KEYS = frozenset([
+    'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'Home', 'End', 'PageUp', 'PageDown', 'Space',
+])
+# textarea 里回车是换行，同样被 fill 覆盖；单行输入框里的回车是提交，必须保留。
+TEXTAREA_EDIT_KEYS = TEXT_EDIT_KEYS | {'Enter'}
+
+
+def _press_only_edits_text(step):
+    """这条 press 是否只是「改文本 / 移光标」，其结果会被紧接着的 fill 完整覆盖。
+
+    只看按键和元素类型。单行输入框里的 Enter 是提交表单，Escape 是取消浮层，
+    都不能吞；Tab 是跳焦点，更不能吞。
+    """
+    key = (step.get('value') or '').split('+')[-1]
+    snap = ((step.get('target') or {}).get('snap') or {})
+    tag = snap.get('tag')
+    if tag == 'textarea':
+        return key in TEXTAREA_EDIT_KEYS
+    if tag == 'input':
+        return key in TEXT_EDIT_KEYS
+    return False
+
+
+def vanished_primary(ordered):
+    """点击 / 回车把页面带走了：这一步的元素已经不在当前 document 上，所有候选都数不到。
+
+    这不是「定位写错了」，而是「计数的时候页面已经翻篇」。用快照里语义最强的那条顶上，
+    count 记 0 表示没核实过，界面上会提示复核。
+
+    不这么兜底的话，凡是会跳转的步骤（点链接、回车提交表单）都会因为没有唯一候选
+    而在生成时被整体拒绝——而这恰恰是录制里最常见的一类步骤。
+    """
+    if not ordered or any(c.get('count', 0) > 0 for c in ordered):
+        return None
+    return dict(ordered[0], count=0)
 
 
 class RecordingError(Exception):
@@ -82,12 +130,20 @@ class RecordingSession(object):
     _current_lock = threading.Lock()
 
     def __init__(self, base_url, headless=False, driver=None, panel_url=None,
-                 panel_ratio=0.45, hud_panel=False, embed_url=None):
+                 panel_ratio=0.45, hud_panel=False, embed_url=None,
+                 ask_daemon=None, ask_model=None, ask_config=None):
         self.id = uuid.uuid4().hex
         self.base_url = base_url
         self.status = 'starting'
         self.error = None
         self._headless = headless
+        # 录制期常驻的解析进程：起停都跟着录制走，失败只影响解析速度。
+        # 测试里传 False 关掉，否则每个浏览器用例都会真起一个 opencode。
+        self._ask_enabled = (os.environ.get('RECORDING_ASK_DAEMON', '1').lower()
+                             not in ('0', 'false', 'no')) if ask_daemon is None else bool(ask_daemon)
+        self._ask_model = ask_model
+        self._ask_config = ask_config or {}
+        self._ask = None
         # 仅供测试：在录制线程内、进入循环前调用 driver(session, page) 模拟用户操作。
         self._driver = driver
         # 嵌入模式：主页面是 AutoCase 外壳页，被测系统在它的 iframe 里。
@@ -135,7 +191,8 @@ class RecordingSession(object):
 
     @classmethod
     def start_new(cls, base_url, headless=False, driver=None, panel_url=None,
-                  panel_ratio=0.45, hud_panel=False, embed_url=None):
+                  panel_ratio=0.45, hud_panel=False, embed_url=None,
+                  ask_daemon=None, ask_model=None, ask_config=None):
         with cls._current_lock:
             current = cls._current
             if current is not None and current.status in ('starting', 'recording'):
@@ -144,7 +201,8 @@ class RecordingSession(object):
         if current is not None:
             current.dispose()
         session = cls(base_url, headless=headless, driver=driver, panel_url=panel_url,
-                      panel_ratio=panel_ratio, hud_panel=hud_panel, embed_url=embed_url)
+                      panel_ratio=panel_ratio, hud_panel=hud_panel, embed_url=embed_url,
+                      ask_daemon=ask_daemon, ask_model=ask_model, ask_config=ask_config)
         with cls._current_lock:
             cls._current = session
         session._thread.start()
@@ -218,6 +276,8 @@ class RecordingSession(object):
     # ---- 读取（任意线程，只读内存）----
 
     def snapshot(self):
+        # 有些测试/工具会绕过 __init__ 直接造会话，取值一律走 getattr。
+        pool = getattr(self, '_ask', None)
         with self._lock:
             steps = [ir.public_step(s) for s in self._steps]
             picks = [{'seq': p['seq'], 'target': ir.public_step({'no': 0, 'type': 'pick', 'target': p['target']})['target']}
@@ -239,6 +299,8 @@ class RecordingSession(object):
                 'panel': self._panel_page is not None,
                 # 浏览器的生命周期比录制长：停止后仍开着，前端据此决定能否继续拾取 / 验证。
                 'browser_open': self._browser_open(),
+                # 断言解析器（录制期常驻的 opencode）状态：就绪 / 启动中 / 不可用。
+                'ask': pool.snapshot() if pool is not None else disabled_snapshot(),
             }
 
     def _browser_open(self):
@@ -299,6 +361,19 @@ class RecordingSession(object):
         """
         if primary is not None:
             return ('locator', primary['desc'])
+        return ('path', snap.get('css') or '', snap.get('tag') or '', id(frame))
+
+    @staticmethod
+    def _merge_key(snap, primary, frame):
+        """「同一元素的连续输入合并成一步」用的身份。
+
+        不能用 CSS 路径：真实页面在第一次输入之后几乎都会改 DOM——包一层 div、
+        插一个隐藏 input（自动填充/验证码）、冒出校验错误态——路径一变，一次输入就
+        被切成好几条 fill。主定位唯一时选择器本身就是身份，DOM 怎么重排都不变；
+        没有唯一候选时才退回结构路径（那时确实只能靠结构区分同名元素）。
+        """
+        if primary is not None:
+            return ('locator', primary['desc'], id(frame))
         return ('path', snap.get('css') or '', snap.get('tag') or '', id(frame))
 
     def _alias_for(self, target, key):
@@ -412,6 +487,28 @@ class RecordingSession(object):
                     raise RecordingError('等待时间需在 0.1 ~ 600 秒之间')
                 step['intent'] = dict(step.get('intent') or {'type': 'sleep'}, seconds=seconds)
                 step['text'] = '固定等待 %s 秒' % seconds
+            elif kind == 'press':
+                key = (changes.get('value') or '').strip()
+                if not key:
+                    raise RecordingError('按键不能为空')
+                if len(key) > 40:
+                    raise RecordingError('按键名太长')
+                step['value'] = key
+            elif kind == 'dialog':
+                action = (changes.get('value') or '').strip()
+                if action not in ('accept', 'dismiss'):
+                    raise RecordingError('弹窗动作只能是 accept 或 dismiss')
+                step['value'] = action
+                step['dialog'] = dict(step.get('dialog') or {}, action=action)
+            elif kind in ('assert', 'wait'):
+                try:
+                    merged = intent_mod.apply_poll(step.get('intent') or {}, changes)
+                except intent_mod.IntentError as exc:
+                    raise RecordingError(str(exc))
+                step['intent'] = merged
+                # 等待时长决定它到底是「立即断言」还是「等到成立」，类型跟着变，
+                # 生成端才能挑对模板（expect 一次 vs Wait Until / expect.poll）。
+                step['type'] = ir.step_type_for_intent(merged['type'], merged)
             else:  # fill / select
                 value = changes.get('value')
                 if not isinstance(value, str):
@@ -431,7 +528,7 @@ class RecordingSession(object):
         text 保存用户原文；after_no 为空则追加到末尾，否则插入到该步骤之后。
         断言的标签页跟着锚点走：以前固定写 0，多标签页录制时断言会被写到主标签页上。
         """
-        step_type = ir.step_type_for_intent(intent['type'])
+        step_type = ir.step_type_for_intent(intent['type'], intent)
         with self._lock:
             target = None
             if intent.get('target'):
@@ -564,6 +661,7 @@ class RecordingSession(object):
                     self._wait_app_frame(page)
                 self._open_panel()
                 self.status = 'recording'
+                self._start_ask_pool()
                 if self._driver is not None:
                     self._driver(self, page)
                 self._process_inbox()
@@ -573,7 +671,29 @@ class RecordingSession(object):
             self.error = str(exc)
             self.status = 'failed'
         finally:
+            self._stop_ask_pool()
             self._ready.set()
+
+    # ---- 解析进程（断言智能识别）----
+
+    def _start_ask_pool(self):
+        """录制一开始就把解析用的 opencode 拉起来并预热。
+
+        只起一个线程，不阻塞录制：起进程 + 预热要 7 秒，用户这会儿正在看页面。
+        """
+        if not self._ask_enabled:
+            return
+        pool = AskPool(self._ask_config, self._ask_model)
+        self._ask = pool
+        pool.start()
+
+    def _stop_ask_pool(self, delay=0):
+        pool = getattr(self, '_ask', None)
+        if pool is not None:
+            pool.stop(delay=delay)
+
+    def ask_pool(self):
+        return getattr(self, '_ask', None)
 
     def _process_inbox(self):
         while True:
@@ -626,6 +746,9 @@ class RecordingSession(object):
                     # 停止是幂等的：浏览器还开着，再点一次不该报错。
                     if self.status == 'recording':
                         result = self._mark_stopped('stopped', revalidate=True)
+                        # 停止后浏览器还开着，用户可能补一条断言再解析，所以延迟杀；
+                        # 关浏览器 / 闲置超时会走 _shutdown，那里是立即杀。
+                        self._stop_ask_pool(delay=ASK_STOP_DELAY_SECONDS)
                     else:
                         result = self.snapshot()
                 elif name == 'close':
@@ -672,6 +795,8 @@ class RecordingSession(object):
 
     def _shutdown(self):
         """关面板窗口与浏览器；状态保持不变（录到的结果仍然有效）。"""
+        # 解析进程跟着浏览器一起收：浏览器都关了，没人会再插断言。
+        self._stop_ask_pool()
         try:
             for page in list(self._context.pages) if self._context is not None else []:
                 try:
@@ -860,6 +985,12 @@ class RecordingSession(object):
             title = '刷新页面'
         elif kind == 'sleep':
             title = '固定等待'
+        elif kind == 'press':
+            title = ('%s 上按 %s' % (alias, step.get('value') or '')).strip()
+        elif kind == 'dialog':
+            info = step.get('dialog') or {}
+            action = '确定' if (info.get('action') or step.get('value')) == 'accept' else '取消'
+            title = '弹窗「%s」→ %s' % ((info.get('message') or '')[:24], action)
         elif kind in ('assert', 'wait'):
             title = alias or (step.get('text') or '')
         else:
@@ -910,8 +1041,9 @@ class RecordingSession(object):
                 return
             idx = len(self._steps) - 1
             drop = {idx}
-            # 「点击 → 标签页切换」是绑定的，撤销时一起删，保持结构合法。
-            if self._steps[idx]['type'] == 'new_page' and idx > 0:
+            # 「点击 → 标签页切换」和「点击 → 弹窗」都是绑定的：单独删掉后一半会留下一个
+            # 无处安放的 dialog 步骤，撤销时一起删，保持结构合法。
+            if self._steps[idx]['type'] in ('new_page', 'dialog') and idx > 0:
                 drop.add(idx - 1)
             self._steps = [step for i, step in enumerate(self._steps) if i not in drop]
             self._renumber()
@@ -990,6 +1122,8 @@ class RecordingSession(object):
         except Exception:
             pass
         page.on('framenavigated', lambda frame, pg=page: self._on_navigated(pg, frame))
+        # 弹窗是浏览器自己的对话框，注入的 recorder.js 拿不到，只能在 Playwright 这层接。
+        page.on('dialog', lambda dialog, pg=page: self._on_dialog(pg, dialog))
         if self._pick:
             self._apply_pick(page)
         if self._paused:
@@ -998,6 +1132,49 @@ class RecordingSession(object):
 
     def _on_navigated(self, page, frame):
         self._inbox.put(lambda: self._handle_navigated(page, frame))
+
+    def _on_dialog(self, page, dialog):
+        """接住 alert / confirm / prompt。
+
+        必须在这个回调里就把弹窗处理掉：Playwright 一旦有 dialog 监听，就不再自动接管，
+        不 accept / dismiss 的话页面会一直挂着，用户看到的是「点了按钮就卡死」。
+        默认自动接受（用户录制时本来就是在点「确定」），录制结果里再记一步 dialog。
+
+        代价是用户没法在录制时点「取消」：Playwright 不把弹窗交给浏览器 UI，我们也就
+        无从得知用户点了哪个。录到的动作固定是 accept，需要取消时在步骤上改。
+        """
+        info = {'kind': None, 'message': None, 'action': 'accept'}
+        try:
+            info['kind'] = dialog.type
+            info['message'] = (dialog.message or '')[:200]
+        except Exception:
+            pass
+        try:
+            dialog.accept()
+        except Exception:
+            # 已经关掉了或者被别处处理了：不影响录制，只是这一步标成 failed。
+            info['action'] = 'failed'
+        self._inbox.put(lambda: self._handle_dialog(page, info))
+
+    def _handle_dialog(self, page, info):
+        # 停止/暂停期间弹的框不该变成步骤，但上面已经 accept 了，页面不会卡。
+        if self.status != 'recording' or self._paused:
+            return
+        # beforeunload 是「确定离开此页」的浏览器确认框，不是用户主动的交互。
+        # 记成步骤会让回放多一次确认，而且它出现与否跟时序有关，比步骤本身还脆。
+        if info.get('kind') == 'beforeunload':
+            return
+        self._touch()
+        action = info.get('action') or 'accept'
+        with self._lock:
+            step = ir.make_step('dialog', no=0, value=action,
+                                page_index=self._page_index(page),
+                                dialog={'kind': info.get('kind'),
+                                        'message': info.get('message'),
+                                        'action': action})
+            self._steps.append(step)
+            self._renumber()
+        self._schedule_hud()
 
     def _handle_navigated(self, page, frame):
         # 嵌入模式下被测页面是外壳里的 iframe，也要按「页面跳转」记录。
@@ -1150,7 +1327,12 @@ class RecordingSession(object):
         page = source['page']
         self._touch()
 
-        if kind == 'click' and snap['tag'] == 'input' and snap.get('type') not in NON_TEXT_INPUT_TYPES:
+        # 点可写入的文本框只是聚焦，值由随后的 fill 表达，记成 click 会多一步。
+        # 只读框例外：点它是展开日期面板 / 下拉筛选，那一步是流程的一部分。
+        if (kind == 'click' and snap['tag'] == 'input'
+                and snap.get('type') not in NON_TEXT_INPUT_TYPES and not snap.get('readonly')):
+            return
+        if kind == 'click' and snap['tag'] == 'textarea' and not snap.get('readonly'):
             return
         if kind == 'click' and snap['tag'] in PICK_OFF_TAGS:
             return
@@ -1167,8 +1349,14 @@ class RecordingSession(object):
         mark = snap.pop('_mark', None)
         counted = self._count(frame, build_specs(snap), mark=mark)
         primary, ordered = rank(counted)
-        status = status_of(primary)
+        unverified = False
+        if primary is None:
+            primary = vanished_primary(ordered)
+            unverified = primary is not None
+        status = 'stale' if unverified else status_of(primary)
         target = ir.make_target(snap, ordered, primary, status)
+        if unverified:
+            target['unverified'] = True
         index = self._page_index(page)
 
         with self._lock:
@@ -1184,8 +1372,15 @@ class RecordingSession(object):
                 self._schedule_hud()
                 return
 
-            key = (snap.get('css'), id(frame))
+            key = self._merge_key(snap, primary, frame)
             prev = self._steps[-1] if self._steps else None
+            if (kind == 'fill' and prev and prev['type'] == 'press'
+                    and prev.get('_key') == key and _press_only_edits_text(prev)):
+                # 用户在文本框里退格改字：按键的结果已经完整落在下面这条 fill 里了，
+                # 留着它不但多一步，还会把「同一元素连续输入」切成两段。
+                self._steps.pop()
+                self._renumber()
+                prev = self._steps[-1] if self._steps else None
             if kind == 'fill' and prev and prev['type'] == 'fill' and prev.get('_key') == key:
                 prev['value'] = data.get('value')
                 prev['target'] = target
@@ -1195,12 +1390,17 @@ class RecordingSession(object):
 
             step = ir.make_step(kind, no=0, target=target, value=data.get('value'),
                                 label=data.get('label'), page_index=index)
+            if kind == 'press':
+                # 键名走 value：生成端两种框架都是「对元素发一个键」，只需要一个字符串。
+                step['value'] = data.get('key')
+                step['label'] = None
             step['_key'] = key
             step['_frame'] = frame
             self._steps.append(step)
-            if kind == 'click':
+            if kind in ('click', 'press'):
                 # 记下时刻而不是「上一步是点击」：只有紧跟着的这次导航才算它引起的，
                 # 之后用户再刷新/页面自己跳，仍然照记。
+                # 按键也要记：搜索框按 Enter 提交后页面会跳转，那不该再录一条「打开 URL」。
                 self._pending_click[id(frame)] = time.time()
             self._renumber()
             no = step['no']
@@ -1278,7 +1478,14 @@ class RecordingSession(object):
                 if item.get('index') is None and kept_index.get(item['desc']) is not None:
                     item['index'] = kept_index[item['desc']]
             primary, ordered = rank(counted)
+            if target.get('unverified'):
+                # 录制当场就没数到（页面跳走了），复核同样数不到是正常的，保留降级主定位；
+                # 否则这里会把 primary 清空，生成时又变成「元素已找不到」。
+                primary = vanished_primary(ordered) or target.get('primary')
+                if primary is not None:
+                    primary = dict(primary, count=0)
             with self._lock:
                 target['candidates'] = ordered
                 target['primary'] = primary
-                target['status'] = stale_check(previous, primary)
+                # 没核实过的定位不能报成 unique：界面上要能看出「这条要回放确认」。
+                target['status'] = 'stale' if target.get('unverified') else stale_check(previous, primary)

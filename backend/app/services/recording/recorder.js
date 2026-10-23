@@ -89,6 +89,9 @@
       text: text,
       id: el.id || null,
       attr_name: el.getAttribute('name'),
+      // 只读框（日期选择器、下拉筛选的载体）点它是要展开面板，不是聚焦输入：
+      // 这类元素上的 click 和按键都要如实记录。
+      readonly: !!(el.readOnly || el.getAttribute('readonly') !== null),
       css: cssPath(el),
       _mark: mark,
     };
@@ -98,6 +101,85 @@
   };
   const INTERACTIVE = 'a,button,input,select,textarea,label,[role=button],[role=link],[role=checkbox],[role=option]';
 
+  // ---- 按键 ----
+  // 只录「有语义的键」：文字输入本身已经由 fill 覆盖，如果把 keydown 全录下来，
+  // 打一个词就会变成十几个步骤。Playwright 的键名和 KeyboardEvent.key 基本一致，
+  // 少数几个（Esc / Left / Space）需要映射。
+  const KEY_ALIASES = {
+    ' ': 'Space', 'Spacebar': 'Space', 'Esc': 'Escape',
+    'Left': 'ArrowLeft', 'Right': 'ArrowRight', 'Up': 'ArrowUp', 'Down': 'ArrowDown', 'Del': 'Delete'
+  };
+  const RECORD_KEYS = new Set([
+    'Enter', 'Escape', 'Tab', 'Backspace', 'Delete',
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'Home', 'End', 'PageUp', 'PageDown', 'Space'
+  ]);
+  // 单独按下修饰键没有意义，它只作为组合键的前缀，单独触发时丢掉。
+  const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'CapsLock']);
+  // 光标在文本框里时，这些键只改文本或移动光标，不构成独立动作：
+  // 值的变化已经由 input 事件的全量快照（fill）表达，回放时 fill 是直接赋值，
+  // 多出来的退格 / 方向键不但没用，还会打断「同一元素连续输入合并成一条」的规则
+  // （输错一个字改一下，就变成 退格 + 输入、退格 + 输入 好几条）。
+  const TEXT_EDIT_KEYS = new Set([
+    'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'Home', 'End', 'PageUp', 'PageDown', 'Space'
+  ]);
+  // 只有能被 fill 赋值的文本框才算「文本编辑」；contenteditable / 富文本没有 fill 步骤，
+  // 它上面的按键仍然是唯一能表达动作的东西，不能吞。
+  const isTextEntry = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    // 只读框里的按键不是「改文本」：它多半是日期/下拉组件自己的快捷键，值也不由 fill 表达。
+    if (el.readOnly === true) return false;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'textarea') return true;
+    if (tag === 'input') return FILL_INPUT_TYPES.has((el.type || 'text').toLowerCase());
+    return false;
+  };
+  let lastKeyDownAt = 0;
+  // 上次按下的键落在哪个元素上。区分两种「键盘合成的 click」：
+  // 焦点本来就在按钮上（要的就是这次点击），还是回车提交表单顺带点了提交按钮（不该另记一步）。
+  let lastKeyOnClickable = false;
+
+  const isClickable = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'button') return true;
+    if (tag === 'a' && el.hasAttribute('href')) return true;
+    if (tag === 'input') {
+      const ty = (el.type || '').toLowerCase();
+      return ty === 'button' || ty === 'submit' || ty === 'reset' || ty === 'image'
+        || ty === 'checkbox' || ty === 'radio';
+    }
+    return !!el.closest('[role=button],[role=link],[role=checkbox],[role=tab]');
+  };
+
+  document.addEventListener('keydown', (e) => {
+    if (isHudEvent(e)) return;
+    lastKeyDownAt = Date.now();
+    lastKeyOnClickable = isClickable(e.target);
+    // 拾取模式里 Alt 是「只拾取不拦截」的修饰键，按下去不该产生步骤。
+    if (state.paused || state.pick) return;
+    if (MODIFIER_KEYS.has(e.key)) return;
+    const base = KEY_ALIASES[e.key] || e.key;
+    if (!RECORD_KEYS.has(base)) return;
+    const el = e.target || {};
+    // 焦点在按钮/链接上按 Enter 或空格，浏览器会合成一次 click；click 那边已经录过了，
+    // 再记一条 press 会让回放点两次（提交表单、删两次）。
+    if ((base === 'Enter' || base === 'Space') && lastKeyOnClickable) return;
+    const combo = [];
+    if (e.ctrlKey) combo.push('Control');
+    if (e.altKey) combo.push('Alt');
+    if (e.shiftKey) combo.push('Shift');
+    if (e.metaKey) combo.push('Meta');
+    combo.push(base);
+    // 文本框里的退格、方向键、空格：记下来只会把一次输入切成几段，结果由 fill 表达。
+    // Enter / Escape / Tab 例外——它们在单行输入框里是「提交 / 取消 / 跳焦点」，有独立语义。
+    if (isTextEntry(el) && TEXT_EDIT_KEYS.has(base)) return;
+    lastPoint = { x: e.clientX || 0, y: e.clientY || 0 };
+    lastEl = el;
+    emit({ type: 'press', snap: snap(el), key: combo.join('+') });
+  }, true);
+
   // ---- 录制浮层：常驻面板（只在顶层文档）+ 即时徽标（每个 frame 各自一份）----
   // 面板状态由 Python 推送（__pwHudUpdate），徽标由 Python 在算出唯一定位后推送（__pwHudBadge）。
   const HUD_ID = '__autocase_hud';
@@ -105,7 +187,7 @@
   const hudPanelOn = window.__AUTOCASE_HUD_PANEL !== false;
   const isTopFrame = (() => { try { return window.top === window; } catch (e) { return false; } })();
   const hudState = { status: 'recording', pick: false, total: 0, ambiguous: 0, steps: [] };
-  const KIND_LABEL = { goto: '打开', click: '点击', fill: '输入', select: '选择', new_page: '标签页', assert: '断言', wait: '等待', sleep: '等待' };
+  const KIND_LABEL = { goto: '打开', click: '点击', fill: '输入', select: '选择', press: '按键', dialog: '弹窗', new_page: '标签页', assert: '断言', wait: '等待', sleep: '等待' };
   const STATUS_LABEL = { unique: '唯一', fragile: '结构', ambiguous: '不唯一', stale: '已变化' };
   const STATE_LABEL = { recording: '录制中', stopped: '已停止', cancelled: '已取消', idle_timeout: '已超时', closed: '浏览器已关闭', failed: '录制失败' };
   let hudHost = null;
@@ -377,6 +459,11 @@
 
   document.addEventListener('click', (e) => {
     if (isHudEvent(e)) return;
+    // 键盘触发的 click（在搜索框按 Enter 提交表单时，浏览器会给提交按钮补一次 click）
+    // detail 是 0，鼠标点击至少是 1。这条如果也录下来，回放就会在 press 之后又点一次提交，
+    // 表单被提交两遍、后端收到两条记录。
+    // 但焦点本来就在按钮上时的那次 click 是用户真正要的操作，必须留下。
+    if (e.detail === 0 && !lastKeyOnClickable && Date.now() - lastKeyDownAt < 800) return;
     const el = e.target.closest(INTERACTIVE) || e.target;
     lastPoint = { x: e.clientX, y: e.clientY };
     lastEl = el;

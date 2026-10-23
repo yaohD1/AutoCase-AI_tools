@@ -97,7 +97,7 @@ class ReplayScenarioTest(unittest.TestCase):
         RecordingSession.dispose_current()
 
     def _record(self):
-        session = RecordingSession.start_new(self.base, headless=True, driver=_scenario)
+        session = RecordingSession.start_new(self.base, headless=True, ask_daemon=False, driver=_scenario)
         # 追加在末尾的断言会落在「最后一步所在的标签页」——这里流程最后停在新标签页，
         # 所以断言的目标必须是新页面上的元素（以前固定写 page 0，等于在主页面里找）。
         session.add_intent_step({'type': 'visible', 'target': '新页按钮', 'value': None, 'seconds': None},

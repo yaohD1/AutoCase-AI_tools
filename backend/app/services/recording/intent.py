@@ -6,7 +6,7 @@
 import json
 import re
 
-from app.services.recording.ir import INTENT_TYPES, POLL_INTENT_TYPES
+from app.services.recording.ir import CONDITION_INTENT_TYPES, INTENT_TYPES, POLL_INTENT_TYPES
 
 # 需要目标元素的意图。url_contains / page_text_contains 不需要目标。sleep 只需要秒数。
 NEEDS_TARGET = {'visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled',
@@ -18,6 +18,7 @@ MAX_WAIT_SECONDS = 3600
 MIN_POLL_INTERVAL = 1
 MAX_POLL_INTERVAL = 300
 DEFAULT_POLL_INTERVAL = 5
+POLL_KEYS = ('timeout', 'interval', 'reload')
 
 # 给模型看的一句话说明：哪些要目标元素、哪些只看整页/地址。
 # 之前的提示词只列了类型名，模型只能靠猜，常常把「页面提示出现」解析成需要选元素的 text_contains。
@@ -30,18 +31,19 @@ TYPE_HINTS = {
     'enabled': '某个元素可用、未被禁用（需要 target）',
     'url_contains': '当前地址包含 value（不需要 target）',
     'page_text_contains': '整个页面的文字里包含 value（不需要 target）',
-    'wait_visible': '等到某个元素出现（需要 target，可带 timeout / interval / reload）',
-    'wait_hidden': '等到某个元素消失（需要 target，可带 timeout / interval / reload）',
+    'wait_visible': '（已废弃，用 visible + timeout 代替）',
+    'wait_hidden': '（已废弃，用 hidden + timeout 代替）',
     'sleep': '固定等待 seconds 秒',
 }
 
 POLL_FIELD_HINT = (
-    '（仅 wait_visible / wait_hidden 可选，其余类型不要输出这三个字段）'
-    'timeout：最长等待秒数，不填则沿用框架默认（约 5 秒）；'
+    'timeout：最长等待秒数，可选。不填表示「此刻必须成立」，填了表示「最多等到几秒后成立」；'
     'reload：true 表示等待期间反复刷新页面；'
-    'interval：每隔几秒刷新一次，只在 reload 为 true 时有意义。'
+    'interval：每隔几秒刷新一次，只在 reload 为 true 时有意义；'
+    '这三个字段对除 sleep 外的所有类型都有效。'
     '描述里出现「最多等 360 秒」「每 5 秒刷新一次」时，要分别写进 timeout 和 interval，并把 reload 置为 true；'
-    '只说「等到某元素出现」不提刷新时，reload 必须是 false。'
+    '只说「等到某元素出现」不提刷新时，给 timeout、reload 写 false。'
+    '不要再输出 wait_visible / wait_hidden，它们已合并进 visible / hidden + timeout。'
 )
 
 
@@ -58,10 +60,10 @@ class IntentError(ValueError):
 def build_prompt(text, aliases):
     """aliases: 已录入的目标别名列表。模型只能从中选择，不能编造。"""
     alias_lines = '\n'.join('- %s' % a for a in aliases) or '- （暂无已录元素）'
-    type_lines = '\n'.join('- %s：%s' % (kind, TYPE_HINTS.get(kind, '')) for kind in INTENT_TYPES)
+    type_lines = '\n'.join('- %s：%s' % (kind, TYPE_HINTS.get(kind, '')) for kind in CONDITION_INTENT_TYPES)
     return (
         '把下面的中文描述转换为一个 JSON 对象，只输出 JSON，不要解释。\n'
-        '可用的 type 只有：' + ', '.join(INTENT_TYPES) + '\n'
+        '可用的 type 只有：' + ', '.join(CONDITION_INTENT_TYPES) + '\n'
         '各类型的含义：\n%s\n'
         '字段：type（必填）、target（已录元素别名，只能从下面的别名里选；不需要 target 的类型必须省略或写 null）、'
         'value（文字或值，text_contains / text_equals / value_equals / url_contains / page_text_contains 必填）、'
@@ -119,10 +121,25 @@ def validate(obj, aliases):
             raise IntentError('sleep 秒数需在 0 到 %d 之间' % MAX_SLEEP_SECONDS)
         intent['seconds'] = seconds
 
-    if kind in POLL_INTENT_TYPES:
+    # 除 sleep 外都能带「最长等待」：填了就从立即断言变成轮询等待，不用选两次。
+    if kind != 'sleep':
         intent.update(_poll_fields(obj))
 
     return intent
+
+
+def apply_poll(intent, changes):
+    """就地改「最长等待 / 刷新间隔」，返回新的 intent。
+
+    changes 里出现的键才覆盖，没出现的保持原值；timeout 显式给 null 表示改回立即断言。
+    校验仍然走 _poll_fields，避免编辑入口和插入入口出现两套规则。
+    """
+    merged = dict(intent or {})
+    for key in POLL_KEYS:
+        if key in changes:
+            merged[key] = changes[key]
+    merged.update(_poll_fields(merged))
+    return merged
 
 
 def _number(raw, what):
@@ -145,6 +162,12 @@ def _poll_fields(obj):
             raise IntentError('勾了「等不到就刷新页面」就必须填写最长等待秒数')
         return out
     timeout = _number(raw_timeout, '最长等待')
+    # 模型有时用 0 表达「不等待」。这和没填是同一个意思，不该变成一个莫名其妙的报错；
+    # 但勾了「等不到就刷新」时 0 秒仍然不成立，按缺省处理继续报错。
+    if timeout == 0:
+        if out['reload']:
+            raise IntentError('勾了「等不到就刷新页面」就必须填写最长等待秒数')
+        return out
     if not 0 < timeout <= MAX_WAIT_SECONDS:
         raise IntentError('最长等待需在 0 到 %d 秒之间' % MAX_WAIT_SECONDS)
     out['timeout'] = timeout

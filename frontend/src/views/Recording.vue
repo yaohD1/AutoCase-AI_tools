@@ -173,49 +173,68 @@
           </div>
         </template>
 
+        <!-- 工具栏分两组：左边「现在对浏览器做什么」，右边「往步骤里插什么」。
+             组本身是一块浅色底，按钮常态无边框，悬停才浮起——少一档样式，视觉就不会碎。 -->
         <div :class="['toolbar', { 'is-lean': stepsCollapsed }]">
-          <!-- 开始/停止紧挨拾取：录制控制都在同一排，页头只留「生成记录 / 返回首页」 -->
-          <el-button v-if="!isRecording" class="lean-wide" type="primary" :loading="starting" @click="startRecording">开始录制</el-button>
-          <el-button v-else type="danger" plain :loading="stopping" @click="stopRecording">停止录制</el-button>
-          <el-button
-            v-if="isRecording"
-            :type="paused ? 'success' : 'default'"
-            :icon="paused ? VideoPlay : VideoPause"
-            :loading="pausing"
-            :title="paused ? '继续把操作记录为步骤' : '浏览器照常可用，但操作不再记为步骤'"
-            @click="togglePause"
-          >
-            {{ paused ? '继续录制' : '暂停录制' }}
-          </el-button>
-          <!-- 停止后浏览器不关，所以拾取与验证仍然可用；关掉窗口才真正结束 -->
-          <el-button
-            :type="picking ? 'warning' : 'default'"
-            :disabled="!canInspect"
-            :title="canInspect ? '' : '浏览器已关闭，无法再拾取元素'"
-            @click="togglePick(!picking)"
-          >
-            {{ picking ? '退出拾取' : '拾取元素' }}
-          </el-button>
-          <el-button v-if="canCloseBrowser" :loading="closingBrowser" @click="closeBrowser">关闭浏览器</el-button>
+          <div class="toolbar-group">
+            <!-- 录制 / 拾取 / 关闭浏览器：这一组都不改步骤，改的是浏览器状态 -->
+            <el-button v-if="!isRecording" class="lean-wide" type="primary" :icon="VideoCamera" :loading="starting" @click="startRecording">开始</el-button>
+            <!-- 停止用实心红 + 白色方块，这是录制的通用记号；暂停/继续用浅色描边，避免两个重色按钮打架 -->
+            <el-button v-else type="danger" :loading="stopping" title="停止录制，步骤保留；浏览器不会关" @click="stopRecording">
+              <span class="rec-stop" aria-hidden="true"></span>停止
+            </el-button>
+            <el-button
+              v-if="isRecording"
+              :type="paused ? 'success' : 'default'"
+              :plain="paused"
+              :icon="paused ? VideoPlay : VideoPause"
+              :loading="pausing"
+              :title="paused ? '继续把操作记录为步骤' : '浏览器照常可用，但操作不再记为步骤'"
+              @click="togglePause"
+            >
+              {{ paused ? '继续' : '暂停' }}
+            </el-button>
+            <!-- 停止后浏览器不关，所以拾取与验证仍然可用；关掉窗口才真正结束 -->
+            <el-button
+              :type="picking ? 'warning' : 'default'"
+              :plain="picking"
+              :icon="Aim"
+              :disabled="!canInspect"
+              :title="canInspect ? '在浏览器里点元素，只登记为可引用的元素，不记为步骤' : '浏览器已关闭，无法再拾取元素'"
+              @click="togglePick(!picking)"
+            >
+              {{ picking ? '退出拾取' : '拾取元素' }}
+            </el-button>
+            <el-button v-if="canCloseBrowser" :icon="Close" :loading="closingBrowser" title="关闭被测浏览器，结束这次录制" @click="closeBrowser">关闭浏览器</el-button>
+          </div>
+
           <span class="toolbar-sep"></span>
-          <!-- 刷新只由这个按钮添加：不自动检测（SPA 一次刷新会触发多个导航事件，分不清真假），
-               点了会真的刷新，后续步骤就落在刷新后的页面上 -->
-          <el-button
-            :icon="Refresh"
-            :disabled="!canEdit"
-            :loading="addingReload"
-            :title="isRecording ? '插入一步「刷新页面」，并真的刷新浏览器（在浏览器里按 F5 不会被录制）' : '插入一步「刷新页面」（浏览器已停止录制，不会真的刷新）'"
-            @click="insertReload()"
-          >
-            刷新页面
-          </el-button>
-          <el-button :disabled="!canEdit" @click="openDraft('assert')">添加断言</el-button>
-          <el-button :disabled="!canEdit" @click="openDraft('wait')">添加等待 / 轮询</el-button>
-          <el-button :disabled="!canEdit" @click="openDraft('sleep')">固定等待</el-button>
+
+          <div class="toolbar-group">
+            <!-- 刷新只由这个按钮添加：不自动检测（SPA 一次刷新会触发多个导航事件，分不清真假），
+                 点了会真的刷新，后续步骤就落在刷新后的页面上 -->
+            <el-button
+              :icon="Refresh"
+              :disabled="!canEdit"
+              :loading="addingReload"
+              :title="isRecording ? '插入一步「刷新页面」，并真的刷新浏览器（在浏览器里按 F5 不会被录制）' : '插入一步「刷新页面」（浏览器已停止录制，不会真的刷新）'"
+              @click="insertReload()"
+            >
+              刷新页面
+            </el-button>
+            <el-button :icon="CircleCheck" :disabled="!canEdit" title="插入一步：判断页面上的某个状态是否成立（需要等它慢慢成立时，在表单里展开「等到成立」）" @click="openDraft('assert')">添加断言</el-button>
+            <el-button :icon="Clock" :disabled="!canEdit" title="插入一步：不管条件，先干等指定秒数" @click="openDraft('sleep')">固定等待</el-button>
+          </div>
+        </div>
+
+        <!-- 断言解析器：录制一开始就在后台起进程并预热。状态放这一行，
+             不抢工具栏的宽度（那里一行刚好排满），只有异常时才需要用户注意。 -->
+        <div v-if="askState" class="ask-hint" :class="askState.status" :title="askState.detail || ''">
+          <span class="ask-dot" aria-hidden="true"></span>{{ askHint }}
         </div>
 
         <div v-if="paused" class="pause-hint">
-          已暂停：可以在浏览器里自由操作（关闭弹层、滚动、试填一遍都不算），这些动作不会被记录。点「继续录制」接着录。
+          已暂停：可以在浏览器里自由操作（关闭弹层、滚动、试填一遍都不算），这些动作不会被记录。点「继续」接着录。
         </div>
 
         <div v-if="isStopped && browserOpen" class="keep-open-hint">
@@ -230,7 +249,7 @@
 
         <div v-if="!steps.length && !draft" class="steps-empty">
           <span class="steps-empty-dot"></span>
-          <span>还没有步骤 · 点「开始录制」后，在弹出的浏览器里操作</span>
+          <span>还没有步骤 · 点「开始」后，在弹出的浏览器里操作</span>
         </div>
 
         <ol v-if="steps.length" ref="timelineEl" class="timeline">
@@ -264,6 +283,23 @@
                   @keyup.enter="saveEdit"
                   @keyup.esc="cancelEdit"
                 />
+                <el-input
+                  v-else-if="step.type === 'press'"
+                  v-model="editing.value"
+                  size="small"
+                  placeholder="键名，如 Enter / Control+Enter / ArrowDown"
+                  @keyup.enter="saveEdit"
+                  @keyup.esc="cancelEdit"
+                />
+                <el-select
+                  v-else-if="step.type === 'dialog'"
+                  v-model="editing.value"
+                  size="small"
+                  placeholder="弹窗怎么处理"
+                >
+                  <el-option label="点「确定」(accept)" value="accept" />
+                  <el-option label="点「取消」(dismiss)" value="dismiss" />
+                </el-select>
                 <el-input-number
                   v-else-if="step.type === 'sleep'"
                   v-model="editing.seconds"
@@ -274,6 +310,34 @@
                   size="small"
                   controls-position="right"
                 />
+                <!-- 断言 / 等待就地改节奏：不勾「允许等待」就是立即断言 -->
+                <div v-else-if="step.type === 'assert' || step.type === 'wait'" class="step-editor-poll">
+                  <el-checkbox v-model="editing.allowWait" size="small">允许等待</el-checkbox>
+                  <template v-if="editing.allowWait">
+                    <span class="poll-label">最多</span>
+                    <el-input-number
+                      v-model="editing.timeout"
+                      :min="1"
+                      :max="MAX_WAIT_SECONDS"
+                      :step="5"
+                      size="small"
+                      controls-position="right"
+                    />
+                    <span class="poll-label">秒</span>
+                    <el-checkbox v-model="editing.reload" size="small">期间刷新</el-checkbox>
+                    <template v-if="editing.reload">
+                      <span class="poll-label">每</span>
+                      <el-input-number
+                        v-model="editing.interval"
+                        :min="1"
+                        :max="MAX_POLL_INTERVAL"
+                        size="small"
+                        controls-position="right"
+                      />
+                      <span class="poll-label">秒</span>
+                    </template>
+                  </template>
+                </div>
                 <div class="step-editor-actions">
                   <el-button size="small" type="primary" :loading="editing.saving" @click="saveEdit">保存</el-button>
                   <el-button size="small" @click="cancelEdit">取消</el-button>
@@ -281,7 +345,10 @@
               </div>
               <template v-else>
                 <div class="step-main">
-                  <span :class="['kind-tag', 'kind-' + stepTone(step.type)]">{{ stepKindLabel(step.type) }}</span>
+                  <span :class="['kind-tag', 'kind-' + stepTone(step.type)]">
+                    <!-- 带等待的断言和立即断言在列表里必须一眼分得开，加个小钟做标识 -->
+                    <el-icon v-if="step.type === 'wait'" class="kind-icon"><Timer /></el-icon>{{ stepKindLabel(step.type) }}
+                  </span>
                   <span class="step-text">{{ stepDescription(step) }}</span>
                 </div>
                 <div v-if="step.text" class="step-note">{{ step.text }}</div>
@@ -295,8 +362,8 @@
               </template>
             </div>
             <div class="step-actions">
-              <!-- 「在这一步之后插入」：hover 才出现，点开选断言/等待/固定等待。
-                  拖拽只能挪已录的步骤，中途补一步才是高频动作，所以入口放在行尾。 -->
+              <!-- 「在这一步之后插入」：hover 才出现，点开选断言 / 固定等待 / 刷新。
+                   拖拽只能挪已录的步骤，中途补一步才是高频动作，所以入口放在行尾。 -->
               <el-dropdown
                 v-if="canEdit"
                 class="step-insert-btn"
@@ -304,11 +371,10 @@
                 placement="bottom-end"
                 @command="kind => onInsertCommand(kind, step.no)"
               >
-                <el-button text :icon="Plus" title="在这一步之后插入断言 / 等待 / 刷新" />
+                <el-button text :icon="Plus" title="在这一步之后插入断言 / 固定等待 / 刷新" />
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="assert">插入断言</el-dropdown-item>
-                    <el-dropdown-item command="wait">插入等待 / 轮询</el-dropdown-item>
                     <el-dropdown-item command="sleep">插入固定等待</el-dropdown-item>
                     <el-dropdown-item command="reload" divided>插入刷新页面</el-dropdown-item>
                   </el-dropdown-menu>
@@ -348,7 +414,22 @@
             <el-button text :icon="Close" @click="closeDraft" />
           </div>
 
-          <div class="draft-nl">
+          <!-- 固定等待没有「内容」可解析：不摆文本框和「解析」按钮，
+               也去掉只有一个选项的类型下拉，一行秒数就够。 -->
+          <div v-if="draft.kind === 'sleep'" class="sleep-row">
+            <span class="sleep-label">等待</span>
+            <el-input-number
+              v-model="draft.seconds"
+              :min="0.1"
+              :max="MAX_SLEEP_SECONDS"
+              :step="0.5"
+              controls-position="right"
+            />
+            <span class="sleep-unit">秒</span>
+            <span class="sleep-hint">不看页面状态，直接等这么久</span>
+          </div>
+
+          <div v-if="draft.kind !== 'sleep'" class="draft-nl">
             <el-input
               v-model="draft.text"
               type="textarea"
@@ -360,7 +441,7 @@
               解析
             </el-button>
           </div>
-          <div class="field-hint">
+          <div v-if="draft.kind !== 'sleep'" class="field-hint">
             {{ config.model ? '解析结果会填进下面的表单，改完再插入；插入的永远是表单里的内容。' : '未选择模型：直接在下面的表单里填写。' }}
           </div>
 
@@ -372,8 +453,8 @@
             </div>
           </div>
 
-          <el-divider content-position="left">断言内容（可修改）</el-divider>
-          <div class="form-grid">
+          <el-divider v-if="draft.kind !== 'sleep'" content-position="left">断言内容（可修改）</el-divider>
+          <div v-if="draft.kind !== 'sleep'" class="form-grid">
             <el-select v-model="draft.intentType" placeholder="意图类型">
               <el-option
                 v-for="type in draftTypes"
@@ -382,6 +463,7 @@
                 :value="type"
               />
             </el-select>
+
             <!-- 不需要目标元素的断言（地址 / 整页文字）：与其摆一个灰掉的下拉，不如直接不显示 -->
             <el-select
               v-if="needsTarget(draft.intentType)"
@@ -416,49 +498,60 @@
               placeholder="文字或值"
               maxlength="500"
             />
-            <el-input-number
-              v-if="draft.intentType === 'sleep'"
-              v-model="draft.seconds"
-              :min="0.1"
-              :max="60"
-              :step="0.5"
-              controls-position="right"
-            />
           </div>
 
-          <!-- 轮询等待：最长等多久 + 要不要靠刷新推进。默认不刷新，因为刷新会冲掉页面状态。 -->
-          <div v-if="isPollType(draft.intentType)" class="poll-box">
-            <div class="poll-row">
-              <span class="poll-label">最长等</span>
-              <el-input-number
-                v-model="draft.timeout"
-                :min="1"
-                :max="MAX_WAIT_SECONDS"
-                :step="5"
-                controls-position="right"
-                size="small"
-              />
-              <span class="poll-unit">秒</span>
-              <span class="poll-hint">到点还没满足就算失败</span>
+          <!-- 高级：把「等待」收进断言。断言与等待本来就只差「容不容忍此刻还没成立」，
+               所以不再单开一个按钮，默认不勾就是立即判定，勾上才变成轮询。 -->
+          <div
+            v-if="draft.intentType !== 'sleep'"
+            :class="['advanced-box', { 'is-open': draft.pollOpen, 'is-on': draft.allowWait }]"
+          >
+            <div class="advanced-head" @click="draft.pollOpen = !draft.pollOpen">
+              <span :class="['advanced-caret', { 'is-open': draft.pollOpen }]"></span>
+              <span class="advanced-title">等到成立</span>
+              <span class="advanced-summary">{{ pollSummary }}</span>
+              <el-tooltip placement="top-end" effect="dark" :show-after="200">
+                <template #content>
+                  <div class="advanced-tip">
+                    勾上后，条件暂时不成立不算失败，会一直等到「最多」的秒数用尽才报错。
+                    <br>被测页面自己会更新时（前端轮询接口）不要勾刷新，越刷越等不到；
+                    设备重启、后台任务这类「页面不会自己变」的场景才需要刷。
+                  </div>
+                </template>
+                <span class="advanced-help" @click.stop>?</span>
+              </el-tooltip>
             </div>
-            <div class="poll-row">
-              <el-checkbox v-model="draft.reload">等不到就刷新页面</el-checkbox>
-              <template v-if="draft.reload">
-                <span class="poll-label">每</span>
-                <el-input-number
-                  v-model="draft.interval"
-                  :min="1"
-                  :max="MAX_POLL_INTERVAL"
-                  :step="1"
-                  controls-position="right"
-                  size="small"
-                />
-                <span class="poll-unit">秒刷一次</span>
-              </template>
-            </div>
-            <div class="poll-note">
-              被测页面自己会更新（前端轮询接口）时不要勾刷新——刷新会重置表单、登录态和滚动位置，越刷越等不到。
-              设备重启、后台任务这类「页面不会自己变」的场景才需要刷。
+            <div v-if="draft.pollOpen" class="advanced-body">
+              <div class="poll-row">
+                <el-checkbox v-model="draft.allowWait">允许等待</el-checkbox>
+                <template v-if="draft.allowWait">
+                  <span class="poll-label">最多</span>
+                  <el-input-number
+                    v-model="draft.timeout"
+                    :min="1"
+                    :max="MAX_WAIT_SECONDS"
+                    :step="5"
+                    controls-position="right"
+                    size="small"
+                  />
+                  <span class="poll-unit">秒</span>
+                </template>
+              </div>
+              <div v-if="draft.allowWait" class="poll-row">
+                <el-checkbox v-model="draft.reload">期间刷新页面</el-checkbox>
+                <template v-if="draft.reload">
+                  <span class="poll-label">每</span>
+                  <el-input-number
+                    v-model="draft.interval"
+                    :min="1"
+                    :max="MAX_POLL_INTERVAL"
+                    :step="1"
+                    controls-position="right"
+                    size="small"
+                  />
+                  <span class="poll-unit">秒刷一次</span>
+                </template>
+              </div>
             </div>
           </div>
 
@@ -633,7 +726,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowUp, ArrowDown, Delete, Close, Connection, Document, EditPen, Expand, Fold, FolderOpened, Plus, Refresh, Tickets, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowUp, ArrowDown, CircleCheck, Clock, Close, Connection, Delete, Document, EditPen, Expand, Fold, FolderOpened, Plus, Refresh, Tickets, Timer, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -644,25 +737,26 @@ const FRAMEWORKS = [
   { value: 'playwright-ts', label: 'Playwright TypeScript' }
 ]
 const ASSERT_TYPES = ['visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled', 'url_contains', 'page_text_contains']
-const WAIT_TYPES = ['wait_visible', 'wait_hidden']
+// 合并前的老类型 wait_visible / wait_hidden 只会从历史数据里读到，不再出现在下拉里，
+// 落到表单时由 LEGACY_WAIT 拆成 visible / hidden + 「允许等待」。
 const SLEEP_TYPES = ['sleep']
 const NEEDS_TARGET = new Set(['visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled', 'wait_visible', 'wait_hidden'])
 const NEEDS_VALUE = new Set(['text_contains', 'text_equals', 'value_equals', 'url_contains', 'page_text_contains'])
-// 轮询等待：可以配「最长等多久」和「等不到就刷新」。设备重启、异步任务这类场景靠它，
-// 用「固定等待 360 秒」硬顶是错的：等完了只判断一次，早了晚了都会误判。
-const POLL_TYPES = new Set(['wait_visible', 'wait_hidden'])
+// 「是不是等待」不再看类型，而是看有没有给最长等待：给了就等到成立，没给就是立即判定。
 const MAX_WAIT_SECONDS = 3600
 const MAX_POLL_INTERVAL = 300
+const MAX_SLEEP_SECONDS = 60
 const INTENT_LABELS = {
   visible: '元素可见', hidden: '元素隐藏', text_contains: '文字包含', text_equals: '文字等于',
   value_equals: '值等于', enabled: '元素可用', url_contains: '地址包含',
   page_text_contains: '页面包含文字', wait_visible: '等待出现', wait_hidden: '等待消失', sleep: '固定等待'
 }
 const STEP_LABELS = {
-  goto: '打开页面', reload: '刷新', click: '点击', fill: '输入', select: '选择', new_page: '新标签页',
+  goto: '打开页面', reload: '刷新', click: '点击', fill: '输入', select: '选择', press: '按键',
+  dialog: '弹窗', new_page: '新标签页',
   assert: '断言', wait: '等待', sleep: '固定等待'
 }
-const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger' }
+const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger' }
 const STATE_LABELS = {
   idle: '未开始', starting: '启动中', recording: '录制中', stopping: '停止中', stopped: '已停止',
   cancelled: '已取消', failed: '失败', idle_timeout: '超时已停止', closed: '浏览器已关闭'
@@ -963,6 +1057,23 @@ function degradePlan(step) {
   return { locator: best.desc, count: best.count, index: best.index }
 }
 
+// 断言解析器（录制期常驻的 opencode 进程）状态。后端每次轮询都会带回 ask 字段。
+const askState = computed(() => {
+  const ask = session.value && session.value.ask
+  return ask && ask.status !== 'off' ? ask : null
+})
+
+const askHint = computed(() => {
+  const ask = askState.value
+  if (!ask) return ''
+  if (ask.status === 'ready') {
+    return ask.detail ? '断言解析器已就绪（预热未完成，第一次解析可能偏慢）' : '断言解析器已就绪，解析约 2 秒'
+  }
+  if (ask.status === 'failed') return '断言解析器不可用，解析将退回慢路径（约 7 秒）'
+  if (ask.status === 'stopped') return '断言解析器已关闭'
+  return `断言解析器${ask.label}`
+})
+
 function applySession(data) {
   session.value = data
   // 拾取模式下，新出现的拾取元素会被草稿自动选中，然后关闭拾取。
@@ -1089,7 +1200,12 @@ async function moveStep(no, direction) {
 
 // ---- 就地编辑（只改值，不动定位）----
 const editing = ref(null)
-const EDITABLE = { fill: ['value'], select: ['value', 'label'], goto: ['url'], sleep: ['seconds'] }
+const EDITABLE = {
+  fill: ['value'], select: ['value', 'label'], goto: ['url'], sleep: ['seconds'],
+  press: ['value'], dialog: ['value'],
+  // 断言和等待只差一个「最长等待」，所以两者都能就地调，不用删了重插。
+  assert: ['timeout', 'interval', 'reload'], wait: ['timeout', 'interval', 'reload']
+}
 
 function editableFields(step) {
   if (!canEdit.value) return []
@@ -1097,6 +1213,7 @@ function editableFields(step) {
 }
 
 function startEdit(step) {
+  const intent = step.intent || {}
   editing.value = {
     no: step.no,
     type: step.type,
@@ -1104,7 +1221,12 @@ function startEdit(step) {
     value: step.value ?? '',
     label: step.label ?? '',
     url: step.url ?? '',
-    seconds: step.intent && step.intent.seconds != null ? Number(step.intent.seconds) : 1
+    seconds: intent.seconds != null ? Number(intent.seconds) : 1,
+    // 断言 / 等待的等待参数：不勾「允许等待」就是立即断言。
+    allowWait: !!intent.timeout,
+    timeout: intent.timeout ? Number(intent.timeout) : 30,
+    interval: intent.interval ? Number(intent.interval) : 5,
+    reload: !!intent.reload
   }
 }
 
@@ -1122,6 +1244,16 @@ async function saveEdit() {
     payload.label = current.label
   } else if (current.type === 'goto') payload.url = (current.url || '').trim()
   else if (current.type === 'sleep') payload.seconds = current.seconds
+  else if (current.type === 'assert' || current.type === 'wait') {
+    // timeout 传 null 表示改回「立即断言」，后端会把 step type 从 wait 换回 assert。
+    payload.timeout = current.allowWait ? Number(current.timeout) : null
+    payload.reload = current.allowWait ? !!current.reload : false
+    payload.interval = current.allowWait && current.reload ? Number(current.interval) : null
+    if (current.allowWait && current.reload && payload.interval > payload.timeout) {
+      ElMessage.warning('刷新间隔不能大于最长等待')
+      return
+    }
+  } else if (current.type === 'press' || current.type === 'dialog') payload.value = current.value
   else {
     editing.value = null
     return
@@ -1181,22 +1313,30 @@ function initSortable() {
 }
 
 // ---- 断言 / 等待 模板 ----
+// 断言与等待共用一个入口：draft.kind 只剩 assert / sleep，等待变成 assert 上的一个开关。
 function draftKindTypes(kind) {
-  if (kind === 'wait') return WAIT_TYPES
   if (kind === 'sleep') return SLEEP_TYPES
   return ASSERT_TYPES
 }
 
 const draftTypes = computed(() => draft.value ? draftKindTypes(draft.value.kind) : [])
-const draftTitle = computed(() => ({ assert: '添加断言', wait: '添加等待 / 轮询', sleep: '固定等待' })[draft.value?.kind] || '')
-const insertLabel = computed(() => ({ assert: '插入断言', wait: '插入等待 / 轮询', sleep: '插入固定等待' })[draft.value?.kind] || '插入')
+const draftTitle = computed(() => ({ assert: '添加断言', sleep: '固定等待' })[draft.value?.kind] || '添加断言')
+const insertLabel = computed(() => ({ sleep: '插入固定等待' })[draft.value?.kind] || '插入断言')
+
+// 收起时也要一眼看出这条会不会等，否则得展开才知道。
+const pollSummary = computed(() => {
+  const current = draft.value
+  if (!current || !current.allowWait) return '立即判定'
+  const tail = `最多 ${current.timeout} 秒`
+  return current.reload ? `${tail} · 每 ${current.interval} 秒刷新` : tail
+})
 
 // 表单当前签名：解析结果会填进表单，之后用户改没改过，靠这个签名对比。
 const formSig = computed(() => {
   const current = draft.value
   if (!current) return ''
   return [current.intentType, current.target || '', current.value || '', current.seconds ?? '',
-    current.timeout ?? '', current.interval ?? '', current.reload ? 1 : 0].join('\u0001')
+    current.allowWait ? 1 : 0, current.timeout ?? '', current.interval ?? '', current.reload ? 1 : 0].join('\u0001')
 })
 const formDirty = computed(() => !!draft.value?.parsed && formSig.value !== (draft.value?.parsedSig || ''))
 
@@ -1232,7 +1372,10 @@ function openDraft(kind, afterNo = null) {
     target: null,
     value: '',
     seconds: 1,
-    // 轮询等待的默认值：30 秒比框架默认的 5 秒实用，且默认不刷新（刷新会冲掉页面状态）。
+    // 高级默认收起，不勾就是立即断言。默认 30 秒比框架默认的 5 秒实用；
+    // 刷新默认不勾——刷新会重置表单和登录态，只会让条件更难成立。
+    allowWait: false,
+    pollOpen: false,
     timeout: 30,
     interval: 5,
     reload: false,
@@ -1277,7 +1420,6 @@ function revealStep(no) {
 
 function needsTarget(type) { return NEEDS_TARGET.has(type) }
 function needsValue(type) { return NEEDS_VALUE.has(type) }
-function isPollType(type) { return POLL_TYPES.has(type) }
 
 async function parseDraft() {
   const current = draft.value
@@ -1296,24 +1438,30 @@ async function parseDraft() {
   }
 }
 
+// 老类型归一：模型或历史数据里可能还是 wait_visible / wait_hidden，
+// 它们等价于 visible / hidden 加一个「允许等待」，落到表单上就拆成这两个字段。
+const LEGACY_WAIT = { wait_visible: 'visible', wait_hidden: 'hidden' }
+
 function kindForIntent(type) {
-  if (type === 'sleep') return 'sleep'
-  return WAIT_TYPES.includes(type) ? 'wait' : 'assert'
+  return type === 'sleep' ? 'sleep' : 'assert'
 }
 
 // 解析结果直接落到表单字段上：用户能改，插入只认表单。
 // 之前预览和表单是两套数据，点了「确认插入」提交的是预览，改表单完全没用。
 function applyParsed(current, intent) {
-  // 模型可能给出别的语义（在「添加断言」里写了「等到遮罩消失」），卡片种类跟着结果走，
-  // 否则下拉列表里没有这个选项，字段就显示不出来。
+  const legacy = LEGACY_WAIT[intent.type]
+  // 模型可能给出别的语义（在「添加断言」里写了「等到遮罩消失」），卡片种类跟着结果走。
   current.kind = kindForIntent(intent.type)
-  current.intentType = intent.type
+  current.intentType = legacy || intent.type
   current.target = intent.target || null
   current.value = intent.value || ''
   if (intent.seconds != null) current.seconds = Number(intent.seconds)
+  current.allowWait = !!legacy || intent.timeout != null
   if (intent.timeout != null) current.timeout = Number(intent.timeout)
   if (intent.interval != null) current.interval = Number(intent.interval)
   if (intent.reload != null) current.reload = !!intent.reload
+  // 解析出等待就展开高级区，否则用户看不到「这条会等 360 秒」。
+  if (current.allowWait) current.pollOpen = true
   current.parsed = intent
   // 等 DOM 更新后再记签名，否则 computed 立即求值会被当成「用户改过了」。
   nextTick(() => {
@@ -1442,10 +1590,13 @@ function buildFormIntent(current) {
   }
   if (type === 'sleep') {
     const seconds = Number(current.seconds)
-    if (!(seconds > 0 && seconds <= 60)) throw new Error('固定等待需在 0 到 60 秒之间')
+    if (!(seconds > 0 && seconds <= MAX_SLEEP_SECONDS)) {
+      throw new Error(`固定等待需在 0 到 ${MAX_SLEEP_SECONDS} 秒之间`)
+    }
     intent.seconds = seconds
   }
-  if (isPollType(type)) {
+  // 勾了「允许等待」才带 timeout：不勾就是立即断言，回放时 5 秒内不成立即失败。
+  if (type !== 'sleep' && current.allowWait) {
     const timeout = Number(current.timeout)
     if (!(timeout > 0 && timeout <= MAX_WAIT_SECONDS)) {
       throw new Error(`最长等待需在 1 到 ${MAX_WAIT_SECONDS} 秒之间`)
@@ -1504,9 +1655,9 @@ function intentDescription(intent, target) {
   if (alias) parts.push(`「${alias}」`)
   if (intent.value !== null && intent.value !== undefined && intent.value !== '') parts.push(`：${intent.value}`)
   if (intent.type === 'sleep') parts.push(`${intent.seconds} 秒`)
-  // 轮询等待把「等多久、靠不靠刷新推进」写清楚，否则列表里和普通等待长得一模一样。
+  // 带最长等待就把「等多久、靠不靠刷新推进」写清楚，否则列表里和立即断言长得一样。
   // 接在最后一段后面而不是 push 新段：parts 用空格 join，新段会在逗号前多出一个空格。
-  if (POLL_TYPES.has(intent.type) && intent.timeout) {
+  if (intent.timeout) {
     let tail = `，最多 ${intent.timeout} 秒`
     if (intent.reload) tail += `，每 ${intent.interval || 5} 秒刷新一次`
     if (parts.length) parts[parts.length - 1] += tail
@@ -1523,8 +1674,16 @@ function stepDescription(step) {
     case 'goto': return `打开 ${step.url || ''}`
     case 'reload': return '刷新当前页面'
     case 'click': return `点击「${step.target ? step.target.alias : '元素'}」`
-    case 'fill': return `在「${step.target ? step.target.alias : '输入框'}」中输入 ${step.value ?? ''}`
+    // 空值不是「没录到」，而是用户把输入框删空了，回放时要真的清空它。
+    case 'fill': return `在「${step.target ? step.target.alias : '输入框'}」中${
+      step.value === '' || step.value == null ? '清空内容' : `输入 ${step.value}`}`
     case 'select': return `在「${step.target ? step.target.alias : '下拉框'}」中选择 ${step.label || step.value || ''}`
+    case 'press': return `在「${step.target ? step.target.alias : '元素'}」上按 ${step.value || ''}`
+    case 'dialog': {
+      const action = step.value === 'dismiss' ? '取消' : '确定'
+      const message = (step.dialog && step.dialog.message) || ''
+      return message ? `弹窗「${message}」→ 点${action}` : `弹窗 → 点${action}`
+    }
     case 'new_page': return '切换到新打开的标签页'
     case 'sleep': return `固定等待 ${step.intent ? step.intent.seconds : ''} 秒`
     case 'assert':
@@ -1545,6 +1704,9 @@ function pickFor(framework, candidates = []) {
 
 function effectiveStatus(step) {
   if (!step.target) return null
+  // 录制那一刻页面就被这一步带走了（回车提交、点掉链接）：元素不在新 document 上，
+  // 定位是按快照推出来的、没核实过。单独标出来让用户回放确认，而不是伪装成唯一或不唯一。
+  if (step.target.unverified) return 'unverified'
   const chosen = pickFor(config.framework, step.target.candidates || [])
   if (!chosen) return 'ambiguous'
   if (FRAGILE_KINDS.includes(chosen.kind)) return 'fragile'
@@ -1554,11 +1716,15 @@ function effectiveStatus(step) {
 
 function locatorText(target) {
   const chosen = pickFor(config.framework, target.candidates || [])
-  return chosen ? chosen.desc : '无唯一定位'
+  if (chosen) return chosen.desc
+  // 没核实过的步骤按快照里语义最强的那条显示，和生成时用的是同一条。
+  const first = (target.candidates || [])[0]
+  if (target.unverified && first) return first.desc
+  return '无唯一定位'
 }
 
 function statusLabel(status) {
-  return ({ unique: '唯一', fragile: '结构定位', ambiguous: '不唯一', stale: '页面已变化' })[status] || status
+  return ({ unique: '唯一', fragile: '结构定位', ambiguous: '不唯一', unverified: '未核实', stale: '页面已变化' })[status] || status
 }
 
 // 徽标只写四个字，把「凭什么算唯一」放进 title：role_bare 和普通唯一的前提不一样，
@@ -1572,13 +1738,14 @@ function statusHint(step) {
   if (status === 'unique') return '语义定位，页面上唯一命中'
   if (status === 'fragile') return '结构定位：依赖页面层级，改版后可能失效'
   if (status === 'ambiguous') return '匹配到多个元素，生成时按录制时点的序号取'
+  if (status === 'unverified') return '这一步会让页面跳转，元素已经不在新页面上，定位按快照推出来、没有核实过：请回放确认'
   if (status === 'stale') return '重新校验时还找得到，但已经不是你录制时点的那个元素'
   return ''
 }
 
 function statusTone(status) {
   // ambiguous 现在会降级生成（不再阻断），所以用警告色而不是红色
-  return ({ unique: 'success', fragile: 'warning', ambiguous: 'warning', stale: 'info' })[status] || 'info'
+  return ({ unique: 'success', fragile: 'warning', ambiguous: 'warning', unverified: 'warning', stale: 'info' })[status] || 'info'
 }
 
 // ---- 工作区检测 ----
@@ -1952,9 +2119,33 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .state-stopped, .state-idle_timeout, .state-closed { background:#eaf7ef; color:#1e7a46; }
 .state-failed, .state-cancelled { background:#fff7e6; color:#ad6800; }
 
-/* 工具栏 */
+/* 工具栏：两个浅色底分组（浏览器控制 / 插入步骤）。
+   组内按钮常态无边框无底色，悬停才浮起白底——样式只留两档（实心 + ghost），
+   比原来「八个同权重描边按钮」干净。 */
 .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; transition:gap .2s ease; }
-.toolbar-sep { width:1px; height:22px; background:#e4e7ed; margin:0 4px; }
+.toolbar-group { display:flex; flex-wrap:wrap; align-items:center; gap:2px; padding:4px; border-radius:10px; background:#f5f6f9; border:1px solid #edeff3; }
+.toolbar-group :deep(.el-button) { margin-left:0; height:32px; padding:0 10px; background:transparent; border-color:transparent; box-shadow:none; color:#3c4450; }
+.toolbar-group :deep(.el-button + .el-button) { margin-left:0; }
+/* 图标与文字统一 5px：Element Plus 默认给 icon+span 加 6px margin，和 flex gap 会叠成 11px */
+.toolbar-group :deep(.el-button) { display:inline-flex; align-items:center; justify-content:center; gap:5px; }
+.toolbar-group :deep(.el-button .el-icon + span) { margin-left:0; }
+.toolbar-group :deep(.el-button .el-icon) { font-size:15px; flex:none; }
+.toolbar-group :deep(.el-button:not(.is-disabled):hover) { background:#fff; border-color:#e1e6ef; color:#1d1d1f; box-shadow:0 1px 2px rgba(16,24,40,.08); }
+.toolbar-group :deep(.el-button.is-disabled) { background:transparent; border-color:transparent; color:#b5bcc7; }
+/* 实心按钮和激活态必须写在 ghost 悬停之后：选择器权重相同，靠顺序取胜 */
+.toolbar-group :deep(.el-button--primary) { background:#0071e3; border-color:#0071e3; color:#fff; }
+.toolbar-group :deep(.el-button--primary:not(.is-disabled):hover) { background:#0060c8; border-color:#0060c8; color:#fff; }
+.toolbar-group :deep(.el-button--danger) { background:#e5484d; border-color:#e5484d; color:#fff; }
+.toolbar-group :deep(.el-button--danger:not(.is-disabled):hover) { background:#d33a3f; border-color:#d33a3f; color:#fff; }
+/* 激活态（正在拾取 / 已暂停）用浅色底，不用实心：否则一排里会出现三个重色块 */
+.toolbar-group :deep(.el-button--warning.is-plain) { background:#fff7e6; border-color:#f3c98b; color:#b45309; }
+.toolbar-group :deep(.el-button--warning.is-plain:not(.is-disabled):hover) { background:#fff2d9; border-color:#eebf74; color:#a15c07; }
+.toolbar-group :deep(.el-button--success.is-plain) { background:#eaf7ef; border-color:#bfe3ce; color:#1e7a46; }
+.toolbar-group :deep(.el-button--success.is-plain:not(.is-disabled):hover) { background:#e2f4ea; border-color:#a9dbc0; color:#196b3d; }
+/* 停止录制里的白色方块：录制的通用记号，比再找一个图标更容易认 */
+.rec-stop { width:8px; height:8px; border-radius:2px; background:currentColor; flex:none; }
+/* 分组底块本身就是分隔，展开状态不再画竖线 */
+.toolbar-sep { display:none; }
 /* 单行 flex 切成 3 列网格属于重排，没法补间；给按钮一个归位动画，切换时就不会「啪」地跳。
    两个 keyframes 内容一样但名字不同——名字一变动画就会重播，收起和展开都能各放一次。 */
 .toolbar :deep(.el-button) { animation:toolbar-settle .18s ease both; }
@@ -1963,28 +2154,48 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 @keyframes toolbar-settle-lean { from { opacity:.5; transform:translateY(1.5px); } to { opacity:1; transform:none; } }
 
 /* 收起后工具栏排成两行三列，列宽一致；中间的竖线换成一条通栏细线，
-   正好把「录制控制 / 步骤操作」分成上下两组，窄到 420px 也不会散架。 */
+   正好把「录制控制 / 步骤操作」分成上下两组，窄到 420px 也不会散架。
+   分组容器用 display:contents 退化成排版占位，按钮重新回到同一张网格里排队。 */
 .toolbar.is-lean {
   display:grid;
   grid-template-columns:repeat(3, minmax(0, 1fr));
   gap:6px;
   align-items:stretch;
 }
+.toolbar.is-lean .toolbar-group { display:contents; }
 .toolbar.is-lean :deep(.el-button) {
   width:100%;
   min-width:0;
-  padding:0 6px;
+  padding:0 5px;
   font-size:12.5px;
   overflow:hidden;
+  background:#fff;
+  border-color:#e4e7ed;
 }
-.toolbar.is-lean :deep(.el-button > span) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.toolbar.is-lean .toolbar-sep { grid-column:1 / -1; width:100%; height:1px; margin:2px 0; background:#e6e9ee; }
+.toolbar.is-lean :deep(.el-button:not(.is-disabled):hover) { background:#f7f9fc; border-color:#d8dde6; }
+/* 收起态也要留住实心 / 激活态的底色，否则实心按钮被刷成白底白字 */
+.toolbar.is-lean :deep(.el-button--primary) { background:#0071e3; border-color:#0071e3; color:#fff; }
+.toolbar.is-lean :deep(.el-button--primary:not(.is-disabled):hover) { background:#0060c8; border-color:#0060c8; color:#fff; }
+.toolbar.is-lean :deep(.el-button--danger) { background:#e5484d; border-color:#e5484d; color:#fff; }
+.toolbar.is-lean :deep(.el-button--danger:not(.is-disabled):hover) { background:#d33a3f; border-color:#d33a3f; color:#fff; }
+.toolbar.is-lean :deep(.el-button--warning.is-plain) { background:#fff7e6; border-color:#f3c98b; color:#b45309; }
+.toolbar.is-lean :deep(.el-button--success.is-plain) { background:#eaf7ef; border-color:#bfe3ce; color:#1e7a46; }
+.toolbar.is-lean :deep(.el-button > span) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.toolbar.is-lean .toolbar-sep { display:block; grid-column:1 / -1; width:100%; height:1px; margin:2px 0; background:#e6e9ee; }
 /* 未录制时这一组只有两个按钮：主按钮占两列补齐整行，右边界正好和下面「添加等待」对齐 */
 .toolbar.is-lean :deep(.lean-wide) { grid-column:span 2; }
 .pick-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff7e6; color:#ad6800; font-size:12.5px; line-height:1.5; }
 /* 停止后浏览器还开着：这条提示必须常驻，否则用户会以为窗口是遗留的、直接关掉 */
 .keep-open-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#eef6ff; color:#175cd3; font-size:12.5px; line-height:1.5; }
 .pause-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff4e6; color:#b45309; border:1px dashed #f3c98b; font-size:12.5px; line-height:1.5; }
+/* 解析器状态：一行 16px 的小字，就绪时几乎是背景音，只有启动中/不可用时才显眼 */
+.ask-hint { display:flex; align-items:center; gap:6px; margin-top:7px; font-size:11.5px; color:#9aa1ab; line-height:1.4; }
+.ask-hint .ask-dot { flex:none; width:6px; height:6px; border-radius:50%; background:#c6ccd6; }
+.ask-hint.ready .ask-dot { background:#34a853; }
+.ask-hint.starting .ask-dot, .ask-hint.warming .ask-dot { background:#ef9f1e; animation:ask-pulse 1.2s ease-in-out infinite; }
+.ask-hint.failed { color:#b45309; }
+.ask-hint.failed .ask-dot { background:#e5484d; }
+@keyframes ask-pulse { 0%, 100% { opacity:.35; } 50% { opacity:1; } }
 .session-error { margin-top:12px; }
 
 /* 空状态：一行提示，别用 el-empty 那张大插画占半屏 */
@@ -2041,7 +2252,11 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 就地编辑 */
 .step-editor { display:flex; flex-direction:column; gap:8px; }
 .step-editor-actions { display:flex; justify-content:flex-end; gap:8px; }
-.kind-tag { flex-shrink:0; display:inline-flex; align-items:center; height:22px; padding:0 9px; border-radius:6px; font-size:12px; font-weight:700; }
+.step-editor-poll { display:flex; align-items:center; flex-wrap:wrap; gap:8px; column-gap:10px; }
+.step-editor-poll :deep(.el-checkbox) { margin-right:0; }
+.step-editor-poll :deep(.el-input-number) { width:92px; }
+.kind-tag { flex-shrink:0; display:inline-flex; align-items:center; gap:3px; height:22px; padding:0 9px; border-radius:6px; font-size:12px; font-weight:700; }
+.kind-icon { font-size:12px; }
 .kind-primary { background:#eaf3ff; color:#0071e3; }
 .kind-success { background:#eaf7ef; color:#1e7a46; }
 .kind-warning { background:#fff7e6; color:#ad6800; }
@@ -2056,6 +2271,11 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .draft-title { font-size:14px; font-weight:700; color:#1d1d1f; }
 .draft-nl { display:flex; gap:10px; align-items:flex-start; }
 .draft-nl .el-textarea { flex:1; }
+/* 固定等待没有可解析的内容：一行秒数，不占地方也不用解释 */
+.sleep-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.sleep-label { font-size:13px; color:#303133; }
+.sleep-unit { font-size:13px; color:#606266; }
+.sleep-hint { margin-left:4px; font-size:12px; color:#909399; }
 .parsed-preview { margin-top:12px; padding:12px; border-radius:10px; background:#f0faf4; border:1px solid #d6f0df; }
 .parsed-line { display:flex; gap:10px; align-items:flex-start; font-size:13.5px; color:#1d1d1f; flex-wrap:wrap; }
 .parsed-label { color:#1e7a46; font-weight:700; flex-shrink:0; }
@@ -2080,13 +2300,28 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .verify-box.neutral .verify-detail { color:#5c6675; }
 
 /* 轮询等待参数 */
-.poll-box { margin-top:10px; padding:10px 12px; border-radius:10px; background:#f7f9fc; border:1px dashed #d5e0ee; }
-.poll-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+/* 高级区：默认收起，收起时靠右侧摘要说明「会不会等」 */
+.advanced-box { margin-top:10px; border-radius:10px; border:1px solid #e6e9ef; background:#fcfdff; transition:border-color .18s ease, background .18s ease; }
+.advanced-box.is-on { border-color:#c9dcf5; background:#f7fbff; }
+.advanced-head { display:flex; align-items:center; gap:6px; padding:8px 10px; cursor:pointer; user-select:none; border-radius:10px; }
+.advanced-head:hover { background:rgba(0,113,227,.035); }
+/* 三角用边框画，不用 ▸ 字符：小字号下中文字体会把它渲染成一个点 */
+.advanced-caret { flex:none; width:0; height:0; border-left:5px solid #9aa3b2; border-top:4px solid transparent; border-bottom:4px solid transparent; transition:transform .16s ease; }
+.advanced-caret.is-open { transform:rotate(90deg); }
+.advanced-title { font-size:12.5px; color:#3c4655; }
+.advanced-box.is-on .advanced-title { color:#0b6bcb; font-weight:600; }
+.advanced-summary { margin-left:auto; font-size:12px; color:#9aa3b2; }
+.advanced-box.is-on .advanced-summary { color:#2f7fd0; }
+.advanced-help { flex:none; display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px; border-radius:50%; border:1px solid #cdd5e0; color:#9aa3b2; font-size:10px; line-height:1; cursor:help; }
+.advanced-help:hover { border-color:#8fb8e6; color:#2f7fd0; }
+.advanced-body { padding:0 10px 10px; }
+.advanced-tip { max-width:250px; line-height:1.65; }
+.poll-row { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
 .poll-row + .poll-row { margin-top:8px; }
+.poll-row :deep(.el-checkbox) { margin-right:0; }
+.poll-row :deep(.el-input-number) { width:92px; }
 .poll-label { font-size:12px; color:#5c6675; }
 .poll-unit { font-size:12px; color:#5c6675; }
-.poll-hint { font-size:11.5px; color:#a0a8b6; }
-.poll-note { margin-top:8px; font-size:11.5px; line-height:1.6; color:#8a94a6; }
 .verify-head { display:flex; align-items:center; gap:8px; min-width:0; }
 .verify-dot { flex:none; width:8px; height:8px; border-radius:50%; background:#e0a03a; }
 .verify-box.ok .verify-dot { background:#12a150; }

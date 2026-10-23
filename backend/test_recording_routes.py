@@ -33,7 +33,10 @@ class _PageHandler(http.server.BaseHTTPRequestHandler):
 
 
 def setUpModule():
-    global _SERVER, _BASE
+    global _SERVER, _BASE, _ASK_ENV
+    # 这些用例验证的是接口契约，不需要真的起一个 opencode 解析进程。
+    _ASK_ENV = os.environ.get('RECORDING_ASK_DAEMON')
+    os.environ['RECORDING_ASK_DAEMON'] = '0'
     _SERVER = http.server.ThreadingHTTPServer(('127.0.0.1', 0), _PageHandler)
     threading.Thread(target=_SERVER.serve_forever, daemon=True).start()
     _BASE = 'http://127.0.0.1:%d/index.html' % _SERVER.server_address[1]
@@ -42,6 +45,10 @@ def setUpModule():
 def tearDownModule():
     _SERVER.shutdown()
     _SERVER.server_close()
+    if _ASK_ENV is None:
+        os.environ.pop('RECORDING_ASK_DAEMON', None)
+    else:
+        os.environ['RECORDING_ASK_DAEMON'] = _ASK_ENV
 
 
 class RecordingRoutesTest(unittest.TestCase):
@@ -161,6 +168,47 @@ class RecordingRoutesTest(unittest.TestCase):
         self.assertEqual([s['no'] for s in steps], list(range(1, len(steps) + 1)))
         self._stop()
 
+    def test_assert_with_timeout_becomes_wait_and_can_be_edited(self):
+        """断言和等待是同一个东西：加了最长等待就是 wait，去掉就退回 assert，不用删了重插。"""
+        self._start()
+        r = self.client.post('/api/automation/recording/steps',
+                             json={'intent': {'type': 'page_text_contains', 'value': '登录成功',
+                                              'timeout': 30, 'reload': True, 'interval': 5}})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        step = r.get_json()['steps'][-1]
+        self.assertEqual(step['type'], 'wait')
+        self.assertEqual(step['intent']['timeout'], 30)
+        self.assertTrue(step['intent']['reload'])
+
+        # 改成立即断言：类型跟着退回 assert，等待参数清空
+        patched = self.client.patch('/api/automation/recording/steps/%d' % step['no'],
+                                    json={'timeout': None, 'reload': False})
+        self.assertEqual(patched.status_code, 200, patched.get_json())
+        step = patched.get_json()['steps'][-1]
+        self.assertEqual(step['type'], 'assert')
+        self.assertIsNone(step['intent']['timeout'])
+        self.assertFalse(step['intent']['reload'])
+
+        # 只给 timeout 时，没提到的字段保持原值（刷新仍然是关的）
+        back = self.client.patch('/api/automation/recording/steps/%d' % step['no'],
+                                 json={'timeout': 60})
+        step = back.get_json()['steps'][-1]
+        self.assertEqual(step['type'], 'wait')
+        self.assertFalse(step['intent']['reload'])
+        self._stop()
+
+    def test_edit_rejects_reload_without_timeout(self):
+        """只勾刷新不给最长等待，等于每刷一次就放弃，必须拦下来。"""
+        self._start()
+        created = self.client.post('/api/automation/recording/steps',
+                                   json={'intent': {'type': 'page_text_contains', 'value': '登录成功'}})
+        no = created.get_json()['steps'][-1]['no']
+        r = self.client.patch('/api/automation/recording/steps/%d' % no,
+                              json={'timeout': None, 'reload': True})
+        self.assertEqual(r.status_code, 409, r.get_json())
+        self.assertIn('最长等待', r.get_json()['error'])
+        self._stop()
+
     def test_invalid_intent_is_rejected_before_writing(self):
         self._start()
         before = len(self.client.get('/api/automation/recording/current').get_json()['steps'])
@@ -194,8 +242,7 @@ class RecordingRoutesTest(unittest.TestCase):
         intent = r.get_json()['intent']
         self.assertEqual(intent['type'], 'url_contains')
         self.assertEqual(intent['value'], 'index')
-        # 轮询字段只对 wait_visible / wait_hidden 有意义，其他意图必须是空值——
-        # 否则生成端会以为这一步要等 N 秒或者要刷新。
+        # 模型没提等待时，三个等待字段必须是空值——否则生成端会以为这一步要等 N 秒或者要刷新。
         self.assertIsNone(intent['timeout'])
         self.assertIsNone(intent['interval'])
         self.assertFalse(intent['reload'])
