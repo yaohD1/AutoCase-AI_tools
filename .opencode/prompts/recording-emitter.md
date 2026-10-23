@@ -4,6 +4,7 @@ You write one test file from a recorded flow. Everything you need is in the disp
 
 # Scope (hard rules)
 - Write exactly one file: the `target_path` given in the dispatch. Do not create, edit or delete any other file.
+- This is enforced by the runtime, not just a convention: only `target_path` has write permission. Any attempt to write, patch or create any other file is rejected, and a rejected write fails the whole generation. Do not retry a rejected write — report it and stop.
 - Do not run shell commands. You have no bash tool. Validation is done by the backend after you finish.
 - Do not browse the page, do not open a browser, do not call any browser tool. The locators are already recorded and verified.
 - If a step cannot be expressed in the target framework, do not invent a workaround. Stop and say so in your final message.

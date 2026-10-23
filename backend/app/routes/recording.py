@@ -306,7 +306,7 @@ def generate_recording():
     except ValueError as exc:
         return _error(str(exc), 400)
     if not emit.target_ok(target_path):
-        return _error('目标路径无效：必须是工作区内的相对路径，不能含 ..', 400)
+        return _error('目标路径无效：必须是工作区内的相对路径，不能含 .. 或 * ? [ ]', 400)
     target_abs = workspace / target_path
     # 生成前先保存原内容，未提交时回滚要用到。
     original = target_abs.read_bytes() if target_abs.is_file() else None

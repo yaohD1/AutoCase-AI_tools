@@ -1,6 +1,9 @@
-"""录制生成：收集上下文 → 调用 recording-emitter → 范围检查 → 校验 → 失败还原。
+"""录制生成：收集上下文 → 调用 recording-emitter → 范围检查 → 校验。
 
-任何一步出错都还原工作区（新文件删除，已有文件恢复原内容），并返回具体错误。
+越界靠**预防**而不是事后回滚：emitter 运行时只对目标文件开放写权限（见
+`OpenCodeRunner.emit_config`），其余文件写入会被 opencode 直接拒绝；这里的范围检查是
+事后确认，只报告、不回滚——回滚会把用户在这期间自己的编辑一起抹掉。
+失败时只清理本次产出的目标文件（原本不存在才删），已有文件保留，原内容用 git 恢复。
 """
 import json
 from pathlib import Path
@@ -14,7 +17,8 @@ MAX_REPAIR_ROUNDS = 1
 MAX_CANDIDATES_IN_PROMPT = 5
 LOCATOR_RULES = (
     '要求：\n'
-    '- 只写 target_path 指定的文件，不改其他文件。\n'
+    '- 只写 target_path 指定的那一个文件。运行环境只给它开了写权限，'
+    '写其他任何文件都会被拒绝，并导致本次生成失败；不要尝试创建辅助文件、临时文件或改配置。\n'
     '- 定位优先用 target.locator；不要自己编造选择器，需要更精确时只能从 target.candidates 里挑或组合。\n'
     '- intent.type 为 url_contains / page_text_contains / sleep 时没有 target：'
     'url_contains 断言整条地址，page_text_contains 断言整个页面的文字，不要为它们编造元素定位。\n'
@@ -123,11 +127,15 @@ class EmitError(Exception):
 
 
 def target_ok(target_path):
-    """目标路径必须是相对路径、不含 ..、不指向绝对路径。"""
+    """目标路径必须是相对路径、不含 ..；也不能带 glob 元字符。
+
+    写权限是按路径做模式匹配给的，`*`、`?`、`[`、`]` 在 glob 里有含义，
+    真出现会被当成通配符，等于把写权限放大到别的文件上。
+    """
     path = Path(target_path.replace('\\', '/'))
     if not target_path or path.is_absolute() or '..' in path.parts or target_path.startswith('/'):
         return False
-    return True
+    return not any(ch in target_path for ch in '*?[]')
 
 
 def _steps_for_prompt(steps, framework):
@@ -252,7 +260,7 @@ def _validate(framework, python, workspace, target_path):
 def generate(runner, workspace, model, steps, framework, target_path, title, python=None, overwrite=False):
     """执行一次录制生成。成功返回 {'path', 'changed', 'validated', 'reply'}；失败抛 EmitError（已还原）。"""
     if not target_ok(target_path):
-        raise EmitError('目标路径无效：必须是工作区内的相对路径，不能含 ..')
+        raise EmitError('目标路径无效：必须是工作区内的相对路径，不能含 .. 或 * ? [ ]')
     root = Path(workspace).resolve()
     if not root.is_dir():
         raise EmitError('工作区目录不存在：%s' % workspace)
@@ -303,34 +311,38 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         raise EmitError('目标文件已存在：%s。请选择覆盖或改名。' % target_path,
                         details=['conflict:' + target_path])
 
-    before = guard.snapshot(root)
+    before = None
     try:
+        # 快照本身也可能失败（git 异常、目录不可读），必须放在 try 里，否则会变成没有原因的 500。
+        before = guard.snapshot(root)
         reply = runner.emit_recording(
-            root, model, _prompt(_payload(framework, steps, target_path, title, detected, keywords))
+            root, model,
+            _prompt(_payload(framework, steps, target_path, title, detected, keywords)),
+            writable=target_path,
         )
         if not target_abs.is_file():
             raise EmitError('agent 没有写出目标文件', details=[reply[:500]] if reply else [])
 
-        outside = guard.violations(guard.changed(before, root), target_path)
-        if outside:
-            raise EmitError('agent 修改了目标文件以外的文件，已还原', details=outside)
-
-        validated, output = _check_with_repair(runner, root, model, framework, target_path, detected)
+        validated, output = _check_with_repair(
+            runner, root, model, framework, target_path, detected, writable=target_path
+        )
         if not validated:
-            raise EmitError('校验未通过，已还原', details=[output])
+            raise EmitError('校验未通过，已删除本次写出的文件' if not existed else '校验未通过',
+                            details=[output] + _target_hint(target_path, existed))
     except EmitError as exc:
-        _restore(root, before, target_path, existed)
-        raise
+        raise _abort(target_abs, exc, target_path, existed)
     except toolchain.ToolchainError as exc:
-        _restore(root, before, target_path, existed)
-        raise EmitError(str(exc))
+        raise _abort(target_abs, EmitError(str(exc)), target_path, existed)
     except (RuntimeError, guard.GuardError) as exc:
-        _restore(root, before, target_path, existed)
-        raise EmitError(str(exc))
+        raise _abort(target_abs, EmitError(str(exc)), target_path, existed)
 
+    # 校验之后再取一次：产物目录已在 guard 里排除，剩下的就是真正被动过的文件。
+    after = guard.changed(before)
     return {
         'path': target_path,
-        'changed': guard.changed(before, root),
+        'changed': after,
+        # 目标文件以外的改动：只报告，不回滚。正常情况下它应该为空——不为空说明写权限没拦住。
+        'outside': guard.violations(after, target_path),
         'validated': True,
         'framework': framework,
         'detected': detected.get('framework'),
@@ -340,7 +352,27 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
     }
 
 
-def _check_with_repair(runner, root, model, framework, target_path, detected):
+def _target_hint(target_path, existed):
+    """原本存在的目标文件被覆盖后不回滚，要把恢复办法写清楚。"""
+    if not existed:
+        return []
+    return ['原内容可用 git 恢复：git checkout -- %s' % target_path]
+
+
+def _abort(target_abs, error, target_path, existed):
+    """失败收尾：本次产出的目标文件（原本不存在）删掉；原本存在则保留并说明怎么恢复。"""
+    if existed:
+        error.details = list(error.details) + _target_hint(target_path, existed)
+        return error
+    try:
+        if target_abs.is_file():
+            target_abs.unlink()
+    except OSError:
+        pass
+    return error
+
+
+def _check_with_repair(runner, root, model, framework, target_path, detected, writable=None):
     """校验；失败则把输出交回 agent 修一次；仍失败返回 (False, 输出)。"""
     python = detected.get('python')
     ok, output = _validate(framework, python, root, target_path)
@@ -351,13 +383,6 @@ def _check_with_repair(runner, root, model, framework, target_path, detected):
             '上一次写入的 %s 校验失败。请只修改该文件，修正以下错误，不要改动其他文件。\n'
             '校验输出：\n```\n%s\n```\n' % (target_path, output)
         )
-        runner.emit_recording(root, model, fix)
+        runner.emit_recording(root, model, fix, writable=writable)
         ok, output = _validate(framework, python, root, target_path)
     return ok, output
-
-
-def _restore(root, before, target_path, existed):
-    """失败时还原：只还原 agent 动过的文件，其余保持不动。existed 仅用于说明，还原依据是备份本身。"""
-    changed = guard.changed(before, root)
-    if changed:
-        guard.restore(root, before, changed)

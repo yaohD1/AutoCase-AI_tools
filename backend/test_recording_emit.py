@@ -26,9 +26,11 @@ class FakeRunner(object):
     def __init__(self, *actions):
         self.actions = list(actions)
         self.prompts = []
+        self.writables = []
 
-    def emit_recording(self, workspace, model, prompt, timeout=600):
+    def emit_recording(self, workspace, model, prompt, timeout=600, writable=None):
         self.prompts.append(prompt)
+        self.writables.append(writable)
         if not self.actions:
             return 'no more actions'
         self.actions.pop(0)(Path(workspace))
@@ -69,6 +71,9 @@ class EmitTest(unittest.TestCase):
         result = self._gen(runner, [(True, 'ok')])
         self.assertTrue(result['validated'])
         self.assertEqual(result['changed'], [TARGET])
+        self.assertEqual(result['outside'], [])
+        # 写权限必须按目标文件下发，越界靠 opencode 在工具调用前拒绝。
+        self.assertEqual(runner.writables, [TARGET])
         self.assertTrue((self.ws / TARGET).is_file())
         self.assertIn('Input Text', runner.prompts[0])
 
@@ -80,15 +85,16 @@ class EmitTest(unittest.TestCase):
         self.assertIn('"locator": "css=[id=' + bs + '"user' + bs + '"]"', runner.prompts[0])
         self.assertIn('"target_path": "tests/login.robot"', runner.prompts[0])
 
-    def test_out_of_scope_write_is_reverted_and_reported(self):
+    def test_out_of_scope_write_is_reported_but_not_reverted(self):
         existing = self.ws / 'other.robot'
         existing.write_text('original', encoding='utf-8')
         runner = FakeRunner(lambda root: (write(TARGET, ROBOT())(root), write('other.robot', 'changed')(root)))
-        with self.assertRaises(emit.EmitError) as ctx:
-            self._gen(runner, [(True, 'ok')])
-        self.assertIn('other.robot', ctx.exception.details)
-        self.assertFalse((self.ws / TARGET).exists(), 'new target must be removed')
-        self.assertEqual(existing.read_text(encoding='utf-8'), 'original')
+        result = self._gen(runner, [(True, 'ok')])
+        # 越界只报告不回滚：文件保留 agent 写的内容，由用户决定是否 git checkout。
+        self.assertEqual(existing.read_text(encoding='utf-8'), 'changed')
+        self.assertEqual(result['outside'], ['other.robot'])
+        self.assertIn(TARGET, result['changed'])
+        self.assertTrue((self.ws / TARGET).is_file(), 'target must be kept on success')
 
     def test_validation_failure_is_repaired_once(self):
         runner = FakeRunner(write(TARGET, ROBOT('Input Text Typo    id:user\n')),
@@ -98,7 +104,7 @@ class EmitTest(unittest.TestCase):
         self.assertEqual(len(runner.prompts), 2)
         self.assertIn('Input Text Typo', runner.prompts[1])
 
-    def test_validation_failure_after_repair_restores_original(self):
+    def test_validation_failure_after_repair_keeps_overwritten_target(self):
         existing = self.ws / TARGET
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text('before', encoding='utf-8')
@@ -106,7 +112,9 @@ class EmitTest(unittest.TestCase):
         with self.assertRaises(emit.EmitError) as ctx:
             self._gen(runner, [(False, 'err1'), (False, 'err2')], overwrite=True)
         self.assertIn('err2', ctx.exception.details[0])
-        self.assertEqual(existing.read_text(encoding='utf-8'), 'before')
+        # 原本存在的目标文件不再自动回滚，只把恢复办法写在错误里。
+        self.assertEqual(existing.read_text(encoding='utf-8'), 'still bad')
+        self.assertTrue(any('git checkout' in str(d) for d in ctx.exception.details))
 
     def test_no_target_file_is_an_error(self):
         runner = FakeRunner(lambda root: None)

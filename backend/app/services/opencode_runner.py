@@ -1305,16 +1305,70 @@ class OpenCodeRunner:
             self._terminate_process(process)
             shutil.rmtree(workdir, ignore_errors=True)
 
-    def emit_recording(self, workspace, model, prompt, timeout=600):
+    def _emit_config(self, writable, workspace):
+        """给 recording-emitter 生成一份临时配置：只允许写 writable 这一个文件。
+
+        写权限交给 opencode 自己在工具调用前拦，比事后回滚可靠得多。四个细节（都是实测出来的）：
+        - 权限模式是拿**绝对路径**去匹配的：写 `"allowed.txt"` 这种相对模式永远不命中，
+          必须用 `**/相对路径` 或绝对路径。这里三种形式都写，防止某个工具传的路径形态不同。
+        - 临时配置必须和原配置放在**同一目录**：配置里的 `{file:.opencode/prompts/...}`
+          是按配置文件所在目录解析的，挪到别处会让 agent 的提示词全部加载失败。
+        - `edit` 权限覆盖 edit / write / apply_patch 三种写文件途径，`write` 再写一遍是冗余保险；
+          `*: deny` 必须排在最前，规则是最后命中者生效。
+        - `bash` 必须 deny，否则 `echo > file` 直接绕过 edit 权限；`task` 也要 deny，
+          子 agent 有自己的一套权限，等于开后门。
+        """
+        base_path = self._config_path()
+        if not writable:
+            return base_path, lambda: None
+        try:
+            data = json.loads(base_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f'读取 OpenCode 配置失败：{exc}')
+        agent = (data.get('agent') or {}).get('recording-emitter')
+        if not isinstance(agent, dict):
+            raise RuntimeError('OpenCode 配置里缺少 recording-emitter agent，无法限定写权限')
+        rel = str(writable).replace('\\', '/')
+        absolute = Path(workspace).resolve() / rel
+        rule = {'*': 'deny', f'**/{rel}': 'allow', absolute.as_posix(): 'allow'}
+        native = str(absolute)
+        if native != absolute.as_posix():
+            rule[native] = 'allow'
+        agent['permission'] = {
+            'edit': dict(rule),
+            'write': dict(rule),
+            'bash': {'*': 'deny'},
+            'task': 'deny',
+        }
+        handle, name = tempfile.mkstemp(prefix=base_path.stem + '.emit-', suffix='.json',
+                                        dir=str(base_path.parent))
+        os.close(handle)
+        path = Path(name)
+        try:
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        except OSError as exc:
+            path.unlink(missing_ok=True)
+            raise RuntimeError(f'写入临时 OpenCode 配置失败：{exc}')
+
+        def drop():
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        return path, drop
+
+    def emit_recording(self, workspace, model, prompt, timeout=600, writable=None):
         """录制生成专用：在目标工作区内运行 recording-emitter，等它结束后返回最后的文本回复。
 
         与 run() 不同，这里只有一个 agent、一个会话，不写 manifest，也不做 heal 记录。
         serve 的工作目录就是目标工作区，agent 能读到项目里已有的文件与库。
+        writable 给出时，agent 只被允许写这一个文件，其余写入由 opencode 直接拒绝。
         """
         model_ref = self._split_model(model)
         if model_ref is None:
             raise ValueError('模型格式应为 providerID/modelID')
-        config_path = self._config_path()
+        config_path, drop_config = self._emit_config(writable, workspace)
         port = self._free_port()
         base_url = f'http://{self._serve_host()}:{port}'
         process = None
@@ -1371,6 +1425,7 @@ class OpenCodeRunner:
                 except requests.RequestException:
                     pass
             self._terminate_process(process)
+            drop_config()
 
     @staticmethod
     def _last_text(messages):

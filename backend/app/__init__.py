@@ -1,7 +1,7 @@
 import os
 import json
 import subprocess
-from flask import Flask
+from flask import Flask, jsonify, request
 from datetime import datetime
 from flask_cors import CORS
 from sqlalchemy import or_
@@ -111,5 +111,24 @@ def create_app():
     app.register_blueprint(automation_bp, url_prefix='/api')
     app.register_blueprint(recording_bp, url_prefix='/api')
     app.register_blueprint(browse_bp, url_prefix='/api')
+
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(error):
+        """未捕获异常一律回 JSON。
+
+        默认的 500 是一张 HTML 错误页，前端 axios 拿不到任何文字，只能显示
+        "Request failed with status code 500"，真正的原因（比如工作区检查失败）就被吞掉了。
+        非 /api 的请求保持 Flask 原样（静态资源等）。
+        """
+        from werkzeug.exceptions import HTTPException
+        if isinstance(error, HTTPException):
+            return error
+        if not request.path.startswith('/api'):
+            return 'Internal Server Error', 500
+        app.logger.exception('Unhandled error on %s %s', request.method, request.path)
+        return jsonify({
+            'error': '服务器内部错误：%s' % (error,),
+            'details': [],
+        }), 500
 
     return app

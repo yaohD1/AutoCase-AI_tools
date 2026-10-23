@@ -660,6 +660,15 @@
               </li>
             </ul>
           </div>
+          <div v-if="genResult.outside && genResult.outside.length" class="gen-degraded">
+            <div class="gen-degraded-title">
+              目标文件以外还有 {{ genResult.outside.length }} 个文件被改动，已保留在工作区（未自动还原）
+            </div>
+            <ul>
+              <li v-for="item in genResult.outside" :key="item">{{ item }}</li>
+            </ul>
+            <div class="field-hint">确认不是你要的改动，可用 git checkout -- &lt;路径&gt; 恢复。</div>
+          </div>
           <div class="gen-result-actions">
             <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: genResult.generation_id } })">
               查看生成记录
@@ -1807,7 +1816,11 @@ async function generate(overwrite) {
       overwrite
     })
     genResult.value = data
-    ElMessage.success(`已写入 ${data.path}`)
+    if (data.outside && data.outside.length) {
+      ElMessage.warning(`已写入 ${data.path}，但有 ${data.outside.length} 个目标以外的文件被改动`)
+    } else {
+      ElMessage.success(`已写入 ${data.path}`)
+    }
   } catch (error) {
     const details = (error.response && error.response.data && error.response.data.details) || []
     const isConflict = error.response && error.response.status === 409 && details.some(d => String(d).startsWith('conflict:'))
