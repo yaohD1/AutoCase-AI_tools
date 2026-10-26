@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+from urllib.parse import parse_qs, urlparse
 
 # 用临时数据库启动应用，避免测试改动真实的 storage/app.db。必须在导入 app 之前设置。
 _TMP = tempfile.mkdtemp(prefix='recording-routes-')
@@ -83,6 +84,39 @@ class RecordingRoutesTest(unittest.TestCase):
     def test_start_rejects_non_http_url(self):
         r = self.client.post(START, json={'base_url': 'file:///etc/passwd'})
         self.assertEqual(r.status_code, 400)
+
+    def test_start_prefills_target_path_title_and_python(self):
+        """录制窗口是独立 profile：目标文件等配置必须随 start 带过去，不能只带 3 项。"""
+        class _FakeSession:
+            def snapshot(self):
+                return {'status': 'recording', 'steps': []}
+
+        body = {
+            'base_url': _BASE, 'model': MODEL, 'workspace': 'demo',
+            'framework': 'robot-selenium', 'target_path': 'tests/login.robot',
+            'title': '登录成功', 'python': 'D:/proj/.venv/Scripts/python.exe',
+        }
+        with mock.patch.object(RecordingSession, 'start_new', return_value=_FakeSession()) as start:
+            r = self.client.post(START, json=body)
+        self.assertEqual(r.status_code, 201, r.get_json())
+        query = parse_qs(urlparse(start.call_args[1]['embed_url']).query)
+        self.assertEqual(query['target_path'], ['tests/login.robot'])
+        self.assertEqual(query['title'], ['登录成功'])
+        self.assertEqual(query['python'], ['D:/proj/.venv/Scripts/python.exe'])
+        self.assertEqual(query['workspace'], ['demo'])
+
+    def test_start_omits_empty_prefill_values(self):
+        """空值不能拼进 URL 把录制窗口里的默认值覆盖掉。"""
+        class _FakeSession:
+            def snapshot(self):
+                return {'status': 'recording', 'steps': []}
+
+        with mock.patch.object(RecordingSession, 'start_new', return_value=_FakeSession()) as start:
+            r = self.client.post(START, json={'base_url': _BASE, 'target_path': '   ', 'title': ''})
+        self.assertEqual(r.status_code, 201, r.get_json())
+        query = parse_qs(urlparse(start.call_args[1]['embed_url']).query)
+        self.assertNotIn('target_path', query)
+        self.assertNotIn('title', query)
 
     def test_start_is_exclusive_and_stop_is_idempotent(self):
         self._start()
@@ -289,6 +323,31 @@ class RecordingRoutesTest(unittest.TestCase):
         self.assertEqual(self.client.get('/api/automation/recording/events').status_code, 404)
         self.assertEqual(self.client.post('/api/automation/recording/steps', json={}).status_code, 404)
         self.assertEqual(self.client.post('/api/automation/recording/intent', json={}).status_code, 404)
+
+    def test_highlight_requires_a_step_number(self):
+        r = self.client.post('/api/automation/recording/highlight', json={'index': 1})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('no', r.get_json()['error'])
+
+    def test_highlight_rejects_non_integer_index(self):
+        r = self.client.post('/api/automation/recording/highlight', json={'no': 1, 'index': '2'})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('index', r.get_json()['error'])
+
+    def test_choose_target_requires_desc_and_index(self):
+        # desc 不能省：index 是某一条候选的匹配顺序，脱离候选没有意义。
+        missing_desc = self.client.post('/api/automation/recording/steps/1/chosen', json={'index': 0})
+        self.assertEqual(missing_desc.status_code, 400)
+        negative = self.client.post('/api/automation/recording/steps/1/chosen',
+                                    json={'desc': 'getByRole(...)', 'index': -1})
+        self.assertEqual(negative.status_code, 400)
+        bad_index = self.client.post('/api/automation/recording/steps/1/chosen',
+                                     json={'desc': 'getByRole(...)', 'index': '2'})
+        self.assertEqual(bad_index.status_code, 400)
+
+    def test_highlight_without_session_is_not_found(self):
+        r = self.client.post('/api/automation/recording/highlight', json={'no': 1})
+        self.assertEqual(r.status_code, 404)
 
 
 if __name__ == '__main__':

@@ -93,6 +93,10 @@
       // 这类元素上的 click 和按键都要如实记录。
       readonly: !!(el.readOnly || el.getAttribute('readonly') !== null),
       css: cssPath(el),
+      // 这条操作发生在哪个页面：停止录制时只在这个页面上重算定位。
+      // 在页面里读，比 Python 侧事后读 frame.url / timeOrigin 更准（不会和导航抢时序）。
+      _doc_url: location.href,
+      _doc_stamp: (window.performance && performance.timeOrigin) || null,
       _mark: mark,
     };
   };

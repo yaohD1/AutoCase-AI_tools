@@ -12,7 +12,7 @@ from app.services.opencode_runner import OpenCodeRunner
 from app.models import db
 from app.models.recording_generation import RecordingGeneration
 from app.services.recording import detect, emit, records, replay
-from app.services.recording import intent, verify
+from app.services.recording import intent, progress, verify
 from app.services.recording.ask_pool import AskUnavailable
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
 
@@ -84,6 +84,8 @@ def start_recording():
         return _error(str(exc), 409)
     except RecordingError as exc:
         return _error('无法启动录制：%s' % exc, 500)
+    # 新录制 = 新的生成任务：上一条的「已写入 / 失败」不该出现在这一条里。
+    progress.PROGRESS.reset()
     return jsonify(session.snapshot()), 201
 
 
@@ -97,9 +99,13 @@ def _frontend_url(params):
 
 
 def _prefill(body):
-    """把用户当前选的模型/工作区/框架带给前端，独立 profile 里 localStorage 是空的。"""
+    """把用户当前选的配置带给前端，独立 profile 里 localStorage 是空的。
+
+    只带「开始录制前就可能填好」的项：目标文件、标题、Python 解释器也要带，
+    否则录制窗口里这几项永远是空的——目标文件为空时生成按钮直接不可用。
+    """
     values = {}
-    for key in ('model', 'workspace', 'framework'):
+    for key in ('model', 'workspace', 'framework', 'target_path', 'title', 'python'):
         value = body.get(key)
         if isinstance(value, str) and value.strip():
             values[key] = value.strip()
@@ -218,6 +224,44 @@ def reorder_recording_step(no):
     return _mutate(lambda session: session.move_step_to(no, body.get('position')))
 
 
+@recording_bp.route('/automation/recording/highlight', methods=['POST'])
+def highlight_recording_step():
+    """在浏览器里把这一步的匹配元素全部框出来并编号，供人眼确认。
+
+    index 省略时用当前选中的那个（或录制时的序号）。每次调用都会重画，
+    所以「换一个看看」就是带 index 再调一次。
+    """
+    body = request.get_json(silent=True) or {}
+    if 'no' not in body:
+        return _error('缺少 no', 400)
+    index = body.get('index')
+    if index is not None and not isinstance(index, int):
+        return _error('index 必须是整数', 400)
+    return _mutate(lambda session: session.highlight(
+        int(body['no']), index=index, framework=body.get('framework') or 'playwright-ts'))
+
+
+@recording_bp.route('/automation/recording/highlight/clear', methods=['POST'])
+def clear_recording_highlight():
+    return _mutate(lambda session: session.clear_highlight())
+
+
+@recording_bp.route('/automation/recording/steps/<int:no>/chosen', methods=['POST'])
+def choose_recording_target(no):
+    """用户看过框之后指定「就是这个（第 index 个匹配）」。
+
+    desc 必传：index 是某一条候选的匹配顺序，脱离 desc 的 index 没有意义。
+    """
+    body = request.get_json(silent=True) or {}
+    desc = body.get('desc')
+    index = body.get('index')
+    if not desc or not isinstance(desc, str):
+        return _error('缺少 desc', 400)
+    if not isinstance(index, int) or index < 0:
+        return _error('index 必须是非负整数', 400)
+    return _mutate(lambda session: session.set_chosen(no, desc, index))
+
+
 @recording_bp.route('/automation/recording/pause', methods=['POST'])
 def pause_recording():
     """暂停 / 继续录制：浏览器保持可用，暂停期间的操作不记为步骤。"""
@@ -312,20 +356,37 @@ def generate_recording():
     original = target_abs.read_bytes() if target_abs.is_file() else None
     steps = session.ir()
     runner = OpenCodeRunner(current_app.config)
+    # 主界面和录制面板都能点生成，服务端只放行一个：后点到的直接 409，
+    # 而不是两个请求各自写一遍同一个文件。
+    if not progress.PROGRESS.start():
+        return _error('已有生成任务正在进行，请等它结束', 409)
     try:
         result = emit.generate(
             runner, workspace, model, steps, framework, target_path, title,
             python=(body.get('python') or None), overwrite=bool(body.get('overwrite')),
+            progress=progress.mark,
         )
+        progress.mark('record')
+        record = records.create(
+            workspace, target_path, framework, title, model, original,
+            target_abs.read_bytes(), steps, result.get('reply'),
+        )
+        result['generation_id'] = record.id
+        progress.PROGRESS.finish(result)
+        return jsonify(result), 200
     except emit.EmitError as exc:
         status = 409 if exc.details and str(exc.details[0]).startswith('conflict:') else 422
+        if status == 409:
+            # 目标文件已存在不是任务失败：用户还要选覆盖或改名，进度回到 idle，
+            # 别让另一个窗口看到一条没有意义的「失败」。
+            progress.PROGRESS.reset()
+        else:
+            progress.PROGRESS.fail(str(exc), exc.details)
         return jsonify({'error': str(exc), 'details': exc.details}), status
-    record = records.create(
-        workspace, target_path, framework, title, model, original,
-        target_abs.read_bytes(), steps, result.get('reply'),
-    )
-    result['generation_id'] = record.id
-    return jsonify(result), 200
+    except Exception as exc:
+        # 500 也要落到进度里：否则进度条会永远停在「正在写入」，用户只能刷新。
+        progress.PROGRESS.fail('生成失败：%s' % exc)
+        raise
 
 
 def _record_or_404(generation_id):

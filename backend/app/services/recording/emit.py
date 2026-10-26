@@ -32,6 +32,9 @@ LOCATOR_RULES = (
     '    playwright-ts 写 locator.nth(n)；\n'
     '    robot-selenium 写 xpath=(<target.locator 去掉 xpath= 前缀后的表达式>)[n+1]，不要改写表达式本身；\n'
     '  · 没给 nth，就取第一个，并在该行上方加一行注释：匹配 N 个元素，取第 1 个，请确认。\n'
+    '  · 给了 target.matches 时，把这几个匹配分别是什么写进同一行注释里，例如：\n'
+    '    // 页面上有 3 个「删除」：设备A 在线 / 设备B 离线 / 设备C 在线，这里取第 2 个\n'
+    '    matches.each 就是被匹配到的元素内容（不唯一时才有，取值优先用 each，不要自己编）。\n'
     '- target.match_count 为 null 时这一步拿不到定位，写一行 TODO 注释说明，不要猜。\n'
     '- target.match_count 为 0 表示「这一步会把页面带走」（回车提交、点掉一个链接），'
     '元素已经不在当前页面上，定位是按快照推出来的、没核实过：照常按 target.locator 写，'
@@ -170,6 +173,11 @@ def _steps_for_prompt(steps, framework):
                 'nth': info['nth'] if info else None,
                 'candidates': _candidates_for_prompt(target, framework),
             }
+            # 用户在界面上看过框、亲手挑的那个，要让它出现在提示词里，
+            # 否则模型只看到「取第 2 个」，却不知道这 2 个分别是什么，也就写不出有意义的注释。
+            matched = _match_texts(target)
+            if matched:
+                item['target']['matches'] = matched
             # 元素在 iframe 里时，模型必须知道要先切框架，否则会写成顶层 page.getByRole。
             snap = target.get('snap') or {}
             if snap.get('frame_url') or snap.get('frame_name'):
@@ -188,12 +196,39 @@ def _fmt(candidate, framework):
     return candidate['desc']
 
 
+def _match_texts(target):
+    """不唯一时，把「这批匹配分别是什么」压成一句能给模型看的文字。
+
+    优先用行文本（所在 tr/li 的内容）：三个「删除」按钮的自身文本完全相同，
+    只有行文本能把它们区分开。取不到行文本才退回元素自身的文本。
+    """
+    matches = target.get('matches') or {}
+    items = matches.get('items') or []
+    if not items:
+        return None
+    each = []
+    for item in items[:6]:
+        text = (item.get('text') or '').strip()
+        row = (item.get('row') or '').strip()
+        each.append(row or text or item.get('tag') or '元素')
+    return {'of': matches.get('count') or len(items), 'each': each}
+
+
 def _locator_info(target, framework):
     """选定位：有唯一的就用唯一的；没有就降级到「命中最少」的那条 + 录制时的序号。
 
     返回 {'locator', 'matches', 'nth', 'mode'}；连一条能命中的候选都没有时返回 None。
     """
     counted = target.get('candidates') or []
+    # 用户看过框、亲手挑过的，优先于任何自动选择：他选的是这条候选的第 index 个，
+    # 换一条候选就不是同一个元素（不同选择器的匹配顺序不一样）。
+    picked = target.get('chosen')
+    if picked:
+        allowed = {c['kind'] for c in pool_for(framework, counted)}
+        hit = next((c for c in counted if c['desc'] == picked.get('desc')), None)
+        if hit is not None and hit['kind'] in allowed and (hit.get('count') or 0) > 1:
+            return {'locator': _fmt(hit, framework), 'matches': hit['count'],
+                    'nth': picked.get('index'), 'mode': 'chosen'}
     chosen = pick_for(framework, counted)
     if chosen is not None:
         return {'locator': _fmt(chosen, framework), 'matches': chosen['count'], 'nth': None, 'mode': 'unique'}
@@ -257,8 +292,17 @@ def _validate(framework, python, workspace, target_path):
     return toolchain.tsc_check(workspace)
 
 
-def generate(runner, workspace, model, steps, framework, target_path, title, python=None, overwrite=False):
-    """执行一次录制生成。成功返回 {'path', 'changed', 'validated', 'reply'}；失败抛 EmitError（已还原）。"""
+def generate(runner, workspace, model, steps, framework, target_path, title, python=None,
+             overwrite=False, progress=None):
+    """执行一次录制生成。成功返回 {'path', 'changed', 'validated', 'reply'}；失败抛 EmitError（已还原）。
+
+    progress 是可选的 (stage, detail) 回调：生成是同步请求，前端只能看到转圈，
+    阶段由这里推给 progress.EmitProgress，两个窗口共用同一份进度。
+    """
+    def mark(stage, detail=''):
+        if progress is not None:
+            progress(stage, detail)
+
     if not target_ok(target_path):
         raise EmitError('目标路径无效：必须是工作区内的相对路径，不能含 .. 或 * ? [ ]')
     root = Path(workspace).resolve()
@@ -294,12 +338,14 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         )
 
     # 检测结果只作提示（决策 12），与用户选择的框架不一致时也不阻止，由返回值中的 detected 说明。
+    mark('detect')
     detected = detect.detect(root, python=python)
 
     keywords = []
     if framework == RF_FRAMEWORK:
         if not detected.get('python'):
             raise EmitError('找不到 Python 环境，无法导出 SeleniumLibrary 关键字')
+        mark('detect', '正在导出 SeleniumLibrary 关键字')
         try:
             keywords = toolchain.export_keywords(detected['python'])['keywords']
         except toolchain.ToolchainError as exc:
@@ -314,17 +360,22 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
     before = None
     try:
         # 快照本身也可能失败（git 异常、目录不可读），必须放在 try 里，否则会变成没有原因的 500。
+        mark('snapshot')
         before = guard.snapshot(root)
+        mark('writing')
         reply = runner.emit_recording(
             root, model,
             _prompt(_payload(framework, steps, target_path, title, detected, keywords)),
             writable=target_path,
         )
+        mark('check')
         if not target_abs.is_file():
             raise EmitError('agent 没有写出目标文件', details=[reply[:500]] if reply else [])
 
+        mark('validate')
         validated, output = _check_with_repair(
-            runner, root, model, framework, target_path, detected, writable=target_path
+            runner, root, model, framework, target_path, detected, writable=target_path,
+            progress=progress,
         )
         if not validated:
             raise EmitError('校验未通过，已删除本次写出的文件' if not existed else '校验未通过',
@@ -372,17 +423,24 @@ def _abort(target_abs, error, target_path, existed):
     return error
 
 
-def _check_with_repair(runner, root, model, framework, target_path, detected, writable=None):
+def _check_with_repair(runner, root, model, framework, target_path, detected, writable=None,
+                       progress=None):
     """校验；失败则把输出交回 agent 修一次；仍失败返回 (False, 输出)。"""
+    def mark(stage, detail=''):
+        if progress is not None:
+            progress(stage, detail)
+
     python = detected.get('python')
     ok, output = _validate(framework, python, root, target_path)
     rounds = 0
     while not ok and rounds < MAX_REPAIR_ROUNDS:
         rounds += 1
+        mark('repair', '第 %d 轮修正校验错误' % rounds)
         fix = (
             '上一次写入的 %s 校验失败。请只修改该文件，修正以下错误，不要改动其他文件。\n'
             '校验输出：\n```\n%s\n```\n' % (target_path, output)
         )
         runner.emit_recording(root, model, fix, writable=writable)
+        mark('validate', '第 %d 轮修正后重新校验' % rounds)
         ok, output = _validate(framework, python, root, target_path)
     return ok, output

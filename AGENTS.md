@@ -81,6 +81,18 @@
   - `PATCH /api/automation/recording/steps/<no>` 只允许改「值」：`fill→value`、`select→value/label`、`goto→url`、`sleep→seconds`；断言/等待/点击不可编辑（换元素走拾取）。白名单在 `session.EDITABLE_FIELDS`。
   - `POST /api/automation/recording/steps/<no>/order` 收 `position`（**移除自身之后**的 0 基下标，与 sortable 的 `newIndex` 一致），「点击 → 标签页切换」成对移动。
   - 前端 sortable 的 `onEnd` 必须先把 DOM 还原（`siblings = children.filter(el => el !== item)` 再按 `oldIndex` 插入，直接用 `children[oldIndex]` 会错一位），并清掉 `step-chosen/step-ghost/step-drag` 残留类。
+- 定位预览（人眼确认「生成时到底会点到谁」）：步骤行定位区右侧的准星（`.peek-btn`），**任何步骤**都能点，不只是不唯一的。
+  - `POST /api/automation/recording/highlight {no, index?, framework}` → 在页面上把这步的匹配元素**全部**框出来并编号，index 指向的那个实心红；`POST .../highlight/clear` 清掉。`POST .../steps/<no>/chosen {desc, index}` 记录用户选定。
+  - 编号顺序 == locator 的匹配顺序 == `nth` 的下标，必须来自同一次 `evaluate_all`（`overlay.js`），否则「选 2 号」和生成的 `nth(1)` 会对不上。
+  - 框用页面坐标（`rect + scrollX/Y`）且**先 `scrollIntoView` 再算坐标**：反过来做会整体偏移一个滚动距离（实测滚动 300px 后 dx=dy=0 才算对）。
+  - **`desc` 必传**：index 是「某一条候选」的匹配顺序，换一条候选就不是同一个元素。`target.chosen` 优先于任何自动选择（`emit._locator_info` 的 `mode='chosen'`），步骤行显示 `.nth(n)`、状态变「已选定」。
+  - 停止录制重新校验时 `chosen.index >= count` 标 `index_invalid`（界面红标「序号失效」），**不要静默改回第一个**——那会点到别的元素，比报错更糟。
+  - 录制时另存 `target.matches`（那几个元素的行文本），浏览器一关就查不到了。注意 `getByRole` 命中多个时主定位会退到 css 绝对路径（`fragile`），这种步骤**同样**要存，否则用户看不到「其实有 3 个、你点的是第 2 个」。生成时它进提示词，模型据此在 `nth` 那行写注释。
+- 生成入口只有一个任务、两个窗口：主界面 `/recording` 和录制面板 `/recording?panel=1` 都能点「生成并写入工作区」，状态放服务端（`services/recording/progress.py`，随 `snapshot()` 的 `emit` 字段返回），任一处点击后另一处最迟 2 秒变成同一份进度并禁用按钮；后到的请求被 `PROGRESS.start()` 拦成 409（不是错误，前端按提示跟着进度走）。
+  - 阶段由 `emit.generate(progress=...)` 打点：prepare → detect → snapshot → writing → check → validate（校验失败退回 repair 再 validate）→ record → done。百分比只给基准值，前端按 `stage_at` 指数逼近 `cap` 插值（`emitPercent`），避免模型写脚本那几分钟里进度条卡死或提前满格。
+  - **停止录制后不能停轮询**：`syncPolling()` 把 stopped/idle_timeout/closed 降到 2 秒继续轮，否则两个窗口都收不到生成进度；`pollEnabled` 只由 keep-alive 的 onDeactivated 关。
+  - 失败原因写进 `emit.error`，冲突（目标文件已存在）`reset()` 成 idle——那是让用户选覆盖或改名，不是失败。
+- `recording-emitter` 的写权限白名单匹配的是**相对工作区路径**：opencode 内部是 `ask({permission:"edit", patterns:[path.relative(worktree, filepath)]})`。所以根目录文件必须原样写 `"x.spec.ts": "allow"`，只写 `**/x.spec.ts` 或绝对路径**一条都命中不了**，最后只剩 `*: deny`，表现是「agent 说权限被拒、没写出目标文件」。`*: deny` 必须排最前（规则是最后命中者生效）；`bash`/`task` 必须关，否则能绕过 edit 权限。
 
 ## 自动化脚本约定
 

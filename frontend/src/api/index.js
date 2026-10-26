@@ -208,6 +208,17 @@ batchDeleteTestcases(ids) {
   addRecordingReload(afterNo = null) {
     return api.post('/automation/recording/reload', { after_no: afterNo }, { timeout: 30000 })
   },
+  // 在浏览器里把这一步的匹配元素全部框出来并编号，供人眼确认；index 省略就按当前选中的那个。
+  highlightRecordingStep(no, index = null, framework = null) {
+    return api.post('/automation/recording/highlight', { no, index, framework }, { timeout: 30000 })
+  },
+  clearRecordingHighlight() {
+    return api.post('/automation/recording/highlight/clear', {}, { timeout: 30000 })
+  },
+  // 用户看过框之后指定「就是这个（第 index 个匹配）」；desc 必传，index 离开候选没有意义。
+  chooseRecordingTarget(no, desc, index) {
+    return api.post(`/automation/recording/steps/${no}/chosen`, { desc, index }, { timeout: 30000 })
+  },
   parseRecordingIntent(text, model) {
     return api.post('/automation/recording/intent', { text, model }, { timeout: 180000 })
   },

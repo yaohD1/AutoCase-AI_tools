@@ -28,7 +28,7 @@
         <span :class="['panel-dot', session && session.status === 'recording' ? (paused ? 'is-paused' : 'is-live') : '']"></span>
         <span class="panel-title">{{ panelTitle }}</span>
         <span v-if="steps.length" class="panel-count">{{ steps.length }} 步</span>
-        <span v-if="blockers.length" class="panel-warn">{{ blockers.length }} 处不唯一</span>
+        <span v-if="blockers.length" class="panel-warn">{{ blockers.length }} 处定位待确认</span>
         <div class="panel-actions">
           <el-button v-if="session?.panel" text size="small" :icon="Connection" @click="relayoutPanel">并排</el-button>
           <el-button text size="small" @click="configExpanded = !configExpanded">{{ configExpanded ? '收起配置' : '配置' }}</el-button>
@@ -358,6 +358,46 @@
                   <el-tag size="small" :type="statusTone(effectiveStatus(step))" effect="light" :title="statusHint(step)">
                     {{ statusLabel(effectiveStatus(step)) }}
                   </el-tag>
+                  <span v-if="step.target.chosen && step.target.chosen.index_invalid" class="chosen-warn"
+                        title="你选的序号，在停止录制时的页面上已经不存在了：生成出来会点不到，需要重新选">序号已失效</span>
+                  <!-- 人眼确认：把这条定位匹配到的元素全部框出来。比任何文字都可靠，
+                       尤其是「两个都叫确定」这种文本和行文本都一样的场景。 -->
+                  <el-button
+                    class="peek-btn"
+                    text
+                    :icon="Aim"
+                    :loading="peek.no === step.no && !!peek.loading"
+                    :disabled="!canInspect"
+                    :title="canInspect ? '在浏览器里框出这条定位匹配到的元素，确认是不是这一个' : '浏览器已关闭，无法框出元素'"
+                    @click.stop="peekTarget(step)"
+                  />
+                </div>
+                <div v-if="peek.no === step.no" class="peek-panel">
+                  <div class="peek-head">
+                    <template v-if="peek.count">
+                      <span class="peek-title">匹配到 {{ peek.count }} 个，当前用的是第 {{ peek.active + 1 }} 个</span>
+                      <code class="peek-desc">{{ peek.desc }}</code>
+                    </template>
+                    <span v-else class="peek-title">{{ peek.note }}</span>
+                    <el-button class="peek-close" text :icon="Close" title="关闭" @click.stop="closePeek" />
+                  </div>
+                  <div v-if="peek.items.length" class="peek-items">
+                    <button
+                      v-for="item in peek.items"
+                      :key="item.index"
+                      type="button"
+                      :class="['peek-item', { 'is-active': item.index === peek.active }]"
+                      @click.stop="choosePeek(item.index)"
+                    >
+                      <span class="peek-no">{{ item.index + 1 }}</span>
+                      <span class="peek-text">{{ item.row || item.text || ('<' + item.tag + '>') }}</span>
+                      <span v-if="!item.visible" class="peek-hidden">不可见</span>
+                    </button>
+                  </div>
+                  <div v-if="peek.count > peek.items.length" class="peek-more">
+                    共 {{ peek.count }} 个，这里只列出前 {{ peek.items.length }} 个
+                  </div>
+                  <div v-if="peek.note && peek.count" class="peek-more">{{ peek.note }}</div>
                 </div>
               </template>
             </div>
@@ -611,7 +651,12 @@
           </div>
           <div :class="['check', { ok: !blockers.length, warn: blockers.length > 0 }]">
             <span class="check-dot"></span>
-            {{ blockers.length ? `第 ${blockers.join('、')} 步定位不唯一，将按「最窄候选 + 录制时的序号」生成` : '所有步骤都有唯一定位' }}
+            {{ blockers.length
+              ? `第 ${blockers.join('、')} 步定位待确认，将按「最窄候选 + 录制时的序号」生成`
+              : (pageGoneCount ? '当前页面上的步骤都有唯一定位' : '所有步骤都有唯一定位') }}
+          </div>
+          <div v-if="pageGoneCount" class="check warn">
+            <span class="check-dot"></span>{{ pageGoneCount }} 个步骤的目标页面已翻走，按录制时定位生成，请回放确认
           </div>
           <div v-if="fragileCount" class="check warn">
             <span class="check-dot"></span>{{ fragileCount }} 个步骤使用结构定位，已标黄，生成后请留意
@@ -623,54 +668,67 @@
         <!-- 没停录制时把 4 行检查压成一行，别占掉半屏 -->
         <div v-else class="gen-compact">
           停止录制后可生成 · 已录 <b>{{ steps.length }}</b> 步
-          <span v-if="blockers.length" class="gen-compact-bad">· {{ blockers.length }} 处定位不唯一</span>
+          <span v-if="blockers.length" class="gen-compact-bad">· {{ blockers.length }} 处定位待确认</span>
         </div>
 
+        <!-- 生成中：进度条取代按钮。状态来自服务端，主界面和录制面板看到的是同一份，
+             不会出现「面板点完、这里还能再点一次」。 -->
+        <div v-if="generating" class="gen-progress">
+          <div class="gen-progress-head">
+            <span class="gen-progress-label">{{ emitLabel }}</span>
+            <span class="gen-progress-pct">{{ emitPercent }}%</span>
+          </div>
+          <el-progress :percentage="emitPercent" :show-text="false" :stroke-width="6" color="#0071e3" />
+          <div class="gen-progress-foot">
+            <span class="gen-progress-detail">{{ emitDetail }}</span>
+            <span class="gen-progress-time">已用 {{ elapsedText }}</span>
+          </div>
+        </div>
         <el-button
+          v-else
           class="generate-btn"
           type="primary"
-          :loading="generating"
           :disabled="!canGenerate"
           @click="generate(false)"
         >
           生成并写入工作区
         </el-button>
-        <div v-if="!canGenerate && generateBlockReason" class="gen-block-reason">
+        <div v-if="!generating && !canGenerate && generateBlockReason" class="gen-block-reason">
           <span class="gen-block-dot"></span>{{ generateBlockReason }}
         </div>
-        <div v-else class="field-hint">写入的只有目标文件。校验失败会自动还原，不会留下半成品。</div>
+        <div v-else-if="!generating" class="field-hint">写入的只有目标文件。校验失败会自动还原，不会留下半成品。</div>
 
-        <div v-if="genError" class="gen-error">
-          <div class="gen-error-title">{{ genError.message }}</div>
-          <ul v-if="genError.details.length" class="gen-error-list">
-            <li v-for="(item, idx) in genError.details" :key="idx">{{ detailText(item) }}</li>
+        <div v-if="shownError" class="gen-error">
+          <div class="gen-error-title">{{ shownError.message }}</div>
+          <ul v-if="shownError.details && shownError.details.length" class="gen-error-list">
+            <li v-for="(item, idx) in shownError.details" :key="idx">{{ detailText(item) }}</li>
           </ul>
         </div>
 
-        <div v-if="genResult" class="gen-result">
-          <div class="gen-result-title">已写入 {{ genResult.path }}</div>
+        <div v-if="shownResult" class="gen-result">
+          <div class="gen-result-title">已写入 {{ shownResult.path }}</div>
           <div class="field-hint">
-            {{ genResult.validated ? '校验通过' : '未校验' }} · 框架 {{ frameworkName(genResult.framework) }}
+            {{ shownResult.validated ? '校验通过' : '未校验' }} · 框架 {{ frameworkName(shownResult.framework) }}
           </div>
-          <div v-if="genResult.degraded && genResult.degraded.length" class="gen-degraded">
-            <div class="gen-degraded-title">{{ genResult.degraded.length }} 步使用了降级定位，请回放确认</div>
+          <div v-if="shownResult.degraded && shownResult.degraded.length" class="gen-degraded">
+            <div class="gen-degraded-title">{{ shownResult.degraded.length }} 步使用了降级定位，请回放确认</div>
             <ul>
-              <li v-for="item in genResult.degraded" :key="item.no">
+              <li v-for="item in shownResult.degraded" :key="item.no">
                 第 {{ item.no }} 步「{{ item.alias }}」：匹配 {{ item.matches }} 个，取第 {{ (item.nth ?? 0) + 1 }} 个
               </li>
             </ul>
           </div>
-          <div v-if="genResult.outside && genResult.outside.length" class="gen-degraded">
+          <div v-if="shownResult.outside && shownResult.outside.length" class="gen-degraded">
             <div class="gen-degraded-title">
-              目标文件以外还有 {{ genResult.outside.length }} 个文件被改动，已保留在工作区（未自动还原）
+              目标文件以外还有 {{ shownResult.outside.length }} 个文件被改动，已保留在工作区（未自动还原）
             </div>
             <ul>
-              <li v-for="item in genResult.outside" :key="item">{{ item }}</li>
+              <li v-for="item in shownResult.outside" :key="item">{{ item }}</li>
             </ul>
             <div class="field-hint">确认不是你要的改动，可用 git checkout -- &lt;路径&gt; 恢复。</div>
           </div>
           <div class="gen-result-actions">
-            <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: genResult.generation_id } })">
+            <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: shownResult.generation_id } })">
               查看生成记录
             </el-button>
             <el-button size="small" :loading="replaying" @click="runReplay">回放校验</el-button>
@@ -888,6 +946,11 @@ function applyPanelQuery() {
   if (typeof query.framework === 'string' && FRAMEWORKS.some(item => item.value === query.framework)) {
     config.framework = query.framework
   }
+  // 目标文件/标题/解释器也必须在开始录制时带过来：录制窗口是独立 profile，
+  // 用户在主窗口填的这三项不会出现在这里；目标文件为空时生成按钮会一直不可用。
+  if (typeof query.target_path === 'string' && query.target_path) config.targetPath = query.target_path
+  if (typeof query.title === 'string' && query.title) config.title = query.title
+  if (typeof query.python === 'string' && query.python) config.python = query.python
   const startUrl = typeof query.base_url === 'string' ? query.base_url : ''
   const target = typeof query.target === 'string' ? query.target : ''
   const filled = startUrl || target
@@ -905,7 +968,9 @@ const draft = ref(null)
 // 刚插入的那一步短暂高亮，用来「指认」插入结果
 const flashingNo = ref(0)
 let flashTimer = 0
-const generating = ref(false)
+// 生成状态以服务端为准：主界面和录制面板是两个独立窗口，本地 loading 互相看不见，
+// 会出现「一边点完，另一边还能点」。localPending 只补位「点击 → 下一次轮询」这一秒。
+const localPending = ref(false)
 const genError = ref(null)
 const genResult = ref(null)
 // 回放校验：结果只在本次生成后有意义，重新生成时清空
@@ -914,6 +979,10 @@ const replayResult = ref(null)
 const replayOpen = ref(false)
 
 let pollTimer = null
+let pollMs = 0
+// 页面被 keep-alive 缓存时不该继续打接口；回到页面再恢复。
+let pollEnabled = true
+let tickTimer = null
 
 // ---- 配置持久化（仅浏览器本地便捷设置，不含敏感信息）----
 function loadConfig() {
@@ -1040,8 +1109,68 @@ const stateLabel = computed(() => {
   return STATE_LABELS[session.value?.status || 'idle'] || '未知'
 })
 
-const blockers = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'ambiguous').map(s => s.no))
+const blockers = computed(() => steps.value
+  .filter(s => s.target && ['ambiguous', 'invalid'].includes(effectiveStatus(s)))
+  .map(s => s.no))
 const fragileCount = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'fragile').length)
+// 录制时在登录页、停止时已经跳到聊天页的步骤：没法在当前页面复核，但不该报成不唯一。
+const pageGoneCount = computed(() => steps.value.filter(s => s.target && s.target.page_gone).length)
+
+// ---- 生成进度（服务端状态，两个窗口共用）----
+const emit = computed(() => session.value?.emit || {})
+const emitRunning = computed(() => emit.value.status === 'running')
+const generating = computed(() => localPending.value || emitRunning.value)
+
+// 阶段百分比只给基准值，模型写脚本的耗时装不出来：按 stage_at 指数逼近 cap，
+// 前 20 秒爬得快、越接近上限越慢，既不卡死也不会提前满格。
+const nowTick = ref(Date.now() / 1000)
+const emitPercent = computed(() => {
+  const e = emit.value
+  if (localPending.value && !emitRunning.value) return 5
+  if (!e || e.status !== 'running') return Math.round(e?.percent || 0)
+  const base = e.percent || 0
+  const cap = e.cap || base
+  const t = Math.max(0, nowTick.value - (e.stage_at || nowTick.value))
+  return Math.min(cap, Math.round(base + (cap - base) * (1 - Math.exp(-t / 25))))
+})
+const emitLabel = computed(() => {
+  if (localPending.value && !emitRunning.value) return '正在准备'
+  return emit.value.label || '正在准备'
+})
+const emitDetail = computed(() => {
+  if (localPending.value && !emitRunning.value) return '正在提交生成请求'
+  return emit.value.detail || '写入的只有目标文件，校验失败会自动还原'
+})
+const elapsedText = computed(() => {
+  const start = emit.value.started_at
+  if (!start) return '0s'
+  const end = emit.value.finished_at || nowTick.value
+  const seconds = Math.max(0, Math.round(end - start))
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`
+})
+
+// 另一个窗口跑完 / 跑挂时，这里也要能看到同一条结果，而不是只剩一个「还能点」的按钮。
+const shownError = computed(() => {
+  if (genError.value) return genError.value
+  return emit.value.status === 'failed' ? emit.value.error : null
+})
+const shownResult = computed(() => {
+  const local = genResult.value
+  if (!local) return emit.value.status === 'done' ? emit.value.result : null
+  // 服务端更近一次生成的结果优先，避免这个窗口还挂着上一次的路径。
+  if (emit.value.status === 'done' && emit.value.result
+      && emit.value.result.generation_id !== local.generation_id) return emit.value.result
+  return local
+})
+
+// 另一个窗口一开跑，这里就把上一次的错误和结果收掉，不然会和进度条同时出现。
+watch(() => emit.value.status, (status) => {
+  if (status === 'running') {
+    genError.value = null
+    genResult.value = null
+  }
+})
+
 const canGenerate = computed(() =>
   isStopped.value && steps.value.length > 0 &&
   !!config.workspace.trim() && !!config.targetPath.trim() && !!config.model && !generating.value
@@ -1059,7 +1188,14 @@ const generateBlockReason = computed(() => {
 // 与后端 best_effort 对齐：目标框架下「命中最少」的那条候选 + 录制时算出的序号。
 // 只用于生成前的确认文案，真正的定位由后端算。
 function degradePlan(step) {
-  const pool = (step.target?.candidates || []).filter(c => c.count > 0)
+  const target = step.target || {}
+  // 用户选过的就是实际会生成的那条，确认框不能按自动选择去描述。
+  const picked = target.chosen
+  if (picked && picked.desc) {
+    const hit = (target.candidates || []).find(c => c.desc === picked.desc)
+    if (hit && hit.count > 1) return { locator: picked.desc, count: hit.count, index: picked.index }
+  }
+  const pool = (target.candidates || []).filter(c => c.count > 0)
   if (!pool.length) return null
   const order = config.framework === 'robot-selenium' ? RF_ORDER : PW_ORDER
   const best = pool.slice().sort((a, b) => a.count - b.count || order.indexOf(a.kind) - order.indexOf(b.kind))[0]
@@ -1098,6 +1234,88 @@ function applySession(data) {
   nextTick(initSortable)
 }
 
+// ---- 定位预览：在浏览器里把匹配元素框出来，人眼确认「生成时会点到谁」 ----
+// peek.no 是当前展开的步骤号；只有它等于某一步时才在该步下面显示候选条。
+const peek = ref({})
+
+async function peekTarget(step) {
+  if (peek.value.no === step.no) {
+    await closePeek()
+    return
+  }
+  // 页面已经翻走的步骤在当前页面上一个匹配都数不到，后端只能回 no_candidate；
+  // 直接说清楚原因，别让用户以为是定位本身没生成出来。
+  if (step.target?.page_gone) {
+    peek.value = {
+      no: step.no,
+      loading: false,
+      count: 0,
+      items: [],
+      active: 0,
+      note: '这一步录制时在别的页面，停止时页面已经翻走，当前页面框不出来；生成会使用录制时的定位'
+    }
+    return
+  }
+  await runPeek(step.no, null)
+}
+
+async function runPeek(no, index) {
+  peek.value = { no, loading: true, count: 0, items: [], active: 0, note: '' }
+  try {
+    const { data } = await api.highlightRecordingStep(no, index, config.framework)
+    if (!data.ok) {
+      peek.value = { no, loading: false, count: 0, items: [], active: 0, note: peekErrorText(data) }
+      return
+    }
+    peek.value = {
+      no,
+      loading: false,
+      desc: data.desc,
+      count: data.count,
+      active: data.active,
+      items: data.items || [],
+      note: ''
+    }
+  } catch (error) {
+    peek.value = { no, loading: false, count: 0, items: [], active: 0, note: errorText(error) }
+  }
+}
+
+function peekErrorText(data) {
+  if (data.reason === 'not_found') {
+    return '当前页面上已经数不到这个元素了：这一步可能发生在别的页面，或页面已经跳转'
+  }
+  if (data.reason === 'frame_lost') return '页面已关闭或正在跳转，暂时框不出来'
+  if (data.reason === 'no_frame') return '浏览器已关闭，无法框出元素'
+  if (data.reason === 'no_candidate') return '这一步没有可用的定位'
+  return data.detail || '框不出来'
+}
+
+async function choosePeek(index) {
+  const { no, desc } = peek.value
+  if (!no || !desc) return
+  try {
+    // 必须先落库再重画：重画用的是「当前选中」，顺序反了会框回原来那个。
+    const { data } = await api.chooseRecordingTarget(no, desc, index)
+    applySession(data)
+    await runPeek(no, index)
+    peek.value.note = `已记下：生成时取第 ${index + 1} 个`
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  }
+}
+
+async function closePeek() {
+  const had = !!peek.value.no
+  peek.value = {}
+  if (!had) return
+  try {
+    await api.clearRecordingHighlight()
+  } catch {
+    // 浏览器可能已经关了，清不掉也无所谓：浮层随页面一起消失。
+  }
+}
+
 async function loadCurrent() {
   try {
     const { data } = await api.getRecordingCurrent()
@@ -1105,23 +1323,38 @@ async function loadCurrent() {
   } catch (error) {
     if (error.response && error.response.status === 404) session.value = null
   }
+  // 会话状态决定轮询频率：停录后仍要看生成进度（两个窗口共用这份状态），
+  // 所以不能像以前那样一停就彻底不轮了，只是把频率降下来。
+  syncPolling()
 }
 
-function startPolling() {
-  if (pollTimer) return
-  pollTimer = setInterval(loadCurrent, 1000)
+function startPolling(ms = 1000) {
+  if (pollTimer && pollMs === ms) return
+  if (pollTimer) clearInterval(pollTimer)
+  pollMs = ms
+  pollTimer = setInterval(loadCurrent, ms)
 }
 
 function stopPolling() {
   if (pollTimer) clearInterval(pollTimer)
   pollTimer = null
+  pollMs = 0
 }
 
-watch(() => session.value?.status, (status) => {
+function syncPolling() {
+  if (!pollEnabled) return
+  const status = session.value?.status
+  if (!status) {
+    stopPolling()
+    return
+  }
   // starting 也要轮询：并排面板窗口是在录制启动过程中打开的，抓不到主页面那次状态跳变。
-  if (status === 'recording' || status === 'starting') startPolling()
-  else stopPolling()
-})
+  const live = status === 'recording' || status === 'starting'
+  // 生成中回到 1 秒：阶段要跟得上进度条的推进，2 秒一跳会显得卡顿。
+  startPolling(live || emitRunning.value ? 1000 : 2000)
+}
+
+watch(() => session.value?.status, () => syncPolling())
 
 async function startRecording() {
   const url = (config.baseUrl || '').trim()
@@ -1132,11 +1365,17 @@ async function startRecording() {
   starting.value = true
   genResult.value = null
   genError.value = null
+  localPending.value = false
   try {
     const { data } = await api.startRecording(url, {
       model: config.model,
       workspace: config.workspace.trim(),
-      framework: config.framework
+      framework: config.framework,
+      // 录制窗口是新的浏览器 profile，这三项不随请求带过去就会丢；
+      // target_path 为空会直接让停止后的「生成」按钮不可用。
+      target_path: config.targetPath.trim(),
+      title: config.title.trim(),
+      python: (config.python || '').trim()
     })
     draft.value = null
     applySession(data)
@@ -1713,9 +1952,23 @@ function pickFor(framework, candidates = []) {
 
 function effectiveStatus(step) {
   if (!step.target) return null
+  // 录制时在登录页，停止时页面已经翻到聊天页：旧元素随旧 document 销毁了，
+  // 不能拿新页面重算，也就不能说它「不唯一」。生成仍用录制时的定位。
+  // 但「录制时本来就不唯一 / 没核实 / 已选定」不能被这个标记盖掉，否则会隐藏真正的降级信息。
+  if (step.target.page_gone) {
+    if (step.target.unverified) return 'unverified'
+    if (step.target.chosen && step.target.chosen.desc) {
+      return step.target.chosen.index_invalid ? 'invalid' : 'chosen'
+    }
+    return pickFor(config.framework, step.target.candidates || []) ? 'page_gone' : 'ambiguous'
+  }
   // 录制那一刻页面就被这一步带走了（回车提交、点掉链接）：元素不在新 document 上，
   // 定位是按快照推出来的、没核实过。单独标出来让用户回放确认，而不是伪装成唯一或不唯一。
   if (step.target.unverified) return 'unverified'
+  // 用户看过页面上的框、亲手选定的：这就是他确认过的定位，不该再按自动选择标成结构定位。
+  if (step.target.chosen && step.target.chosen.desc) {
+    return step.target.chosen.index_invalid ? 'invalid' : 'chosen'
+  }
   const chosen = pickFor(config.framework, step.target.candidates || [])
   if (!chosen) return 'ambiguous'
   if (FRAGILE_KINDS.includes(chosen.kind)) return 'fragile'
@@ -1723,9 +1976,19 @@ function effectiveStatus(step) {
   return 'unique'
 }
 
+function withNth(desc, index) {
+  if (index == null) return desc
+  // RF 的定位本身就是 xpath 字符串，再拼 .nth() 是错的，用中文明说取第几个。
+  if (config.framework === 'robot-selenium') return `${desc}  →  第 ${index + 1} 个`
+  return `${desc}.nth(${index})`
+}
+
 function locatorText(target) {
+  // 用户亲手选过的，显示他确认的那条：生成时也优先走它（见 emit._locator_info）。
+  const picked = target.chosen
+  if (picked && picked.desc) return withNth(picked.desc, picked.index)
   const chosen = pickFor(config.framework, target.candidates || [])
-  if (chosen) return chosen.desc
+  if (chosen) return withNth(chosen.desc, chosen.index)
   // 没核实过的步骤按快照里语义最强的那条显示，和生成时用的是同一条。
   const first = (target.candidates || [])[0]
   if (target.unverified && first) return first.desc
@@ -1733,7 +1996,10 @@ function locatorText(target) {
 }
 
 function statusLabel(status) {
-  return ({ unique: '唯一', fragile: '结构定位', ambiguous: '不唯一', unverified: '未核实', stale: '页面已变化' })[status] || status
+  return ({
+    unique: '唯一', fragile: '结构定位', ambiguous: '不唯一', unverified: '未核实',
+    page_gone: '页面已翻页', stale: '页面已变化', chosen: '已选定', invalid: '序号失效'
+  })[status] || status
 }
 
 // 徽标只写四个字，把「凭什么算唯一」放进 title：role_bare 和普通唯一的前提不一样，
@@ -1744,17 +2010,41 @@ function statusHint(step) {
   if (status === 'unique' && chosen?.kind === 'role_bare') {
     return '按 role 定位：页面上只有这一个同类元素。新增同类控件后会退化为「匹配 N 个取第 k 个」'
   }
+  if (status === 'page_gone') {
+    return '录制时这条定位是有效的；停止录制时页面已经跳到别的地址，没法在当前页面复核。生成会用录制时的定位，建议回放确认。'
+  }
   if (status === 'unique') return '语义定位，页面上唯一命中'
   if (status === 'fragile') return '结构定位：依赖页面层级，改版后可能失效'
-  if (status === 'ambiguous') return '匹配到多个元素，生成时按录制时点的序号取'
-  if (status === 'unverified') return '这一步会让页面跳转，元素已经不在新页面上，定位按快照推出来、没有核实过：请回放确认'
+  if (status === 'ambiguous') {
+    return step.target?.page_gone
+      ? '录制时匹配到多个元素；停止时页面已经翻走，没法复核。生成会按录制时的序号取，请回放确认'
+      : '匹配到多个元素，生成时按录制时点的序号取'
+  }
+  if (status === 'unverified') {
+    return step.target?.page_gone
+      ? '录制时就没数到这个元素（页面当时已跳走）；停止时页面也已经翻走，定位按快照推出来，请回放确认'
+      : '这一步会让页面跳转，元素已经不在新页面上，定位按快照推出来、没有核实过：请回放确认'
+  }
   if (status === 'stale') return '重新校验时还找得到，但已经不是你录制时点的那个元素'
+  if (status === 'chosen') {
+    const picked = step.target?.chosen || {}
+    const hit = (step.target?.candidates || []).find(c => c.desc === picked.desc)
+    const total = hit?.count
+    const caveat = step.target?.page_gone ? '；停止时页面已经翻走，未能复核' : ''
+    return `你确认过：页面上匹配到 ${total ?? '?'} 个，取第 ${(picked.index ?? 0) + 1} 个${caveat}`
+  }
+  if (status === 'invalid') {
+    return '你选的序号，在停止录制时的页面上已经不存在了：生成出来会点不到，需要重新选'
+  }
   return ''
 }
 
 function statusTone(status) {
   // ambiguous 现在会降级生成（不再阻断），所以用警告色而不是红色
-  return ({ unique: 'success', fragile: 'warning', ambiguous: 'warning', unverified: 'warning', stale: 'info' })[status] || 'info'
+  return ({
+    unique: 'success', fragile: 'warning', ambiguous: 'warning', unverified: 'warning',
+    page_gone: 'warning', stale: 'info', chosen: 'success', invalid: 'danger'
+  })[status] || 'info'
 }
 
 // ---- 工作区检测 ----
@@ -1783,14 +2073,21 @@ async function generate(overwrite) {
       const step = steps.value.find(s => s.no === no)
       const plan = degradePlan(step)
       const alias = esc(step?.target?.alias || `第 ${no} 步`)
+      if (step?.target?.chosen?.index_invalid) {
+        // 你选过、但停止时元素少了：别只说「取第 3 个」，要点明它已经不存在。
+        const total = plan ? plan.count : 0
+        return `第 ${no} 步「${alias}」：你选的是第 ${step.target.chosen.index + 1} 个，`
+          + `但页面上现在只有 ${total} 个，需要重新选`
+      }
       if (!plan) return `第 ${no} 步「${alias}」：页面上已匹配不到，将写 TODO 注释`
       const nth = plan.index != null ? `取第 ${plan.index + 1} 个` : '取第 1 个'
       return `第 ${no} 步「${alias}」：匹配 ${plan.count} 个，${nth}`
     })
     const html = `${lines.join('<br>')}<br><br>`
-      + '这几步会按「最窄候选 + 录制时的序号」生成，页面结构变了可能指错元素，生成后建议回放确认。是否继续？'
+      + '这几步会按「最窄候选 + 录制时的序号」生成，页面结构变了可能指错元素。'
+      + '生成前可以先点步骤右侧的准星，在浏览器里把元素框出来确认。是否继续？'
     try {
-      await ElMessageBox.confirm(html, '有步骤定位不唯一', {
+      await ElMessageBox.confirm(html, '有步骤定位待确认', {
         dangerouslyUseHTMLString: true,
         confirmButtonText: '仍然生成',
         cancelButtonText: '取消',
@@ -1800,7 +2097,9 @@ async function generate(overwrite) {
       return
     }
   }
-  generating.value = true
+  localPending.value = true
+  // 点击到服务端任务起来之间有最多一次轮询的间隔，先把节奏提上来，进度条立刻有反应。
+  startPolling(1000)
   genError.value = null
   genResult.value = null
   replayResult.value = null
@@ -1823,7 +2122,8 @@ async function generate(overwrite) {
     }
   } catch (error) {
     const details = (error.response && error.response.data && error.response.data.details) || []
-    const isConflict = error.response && error.response.status === 409 && details.some(d => String(d).startsWith('conflict:'))
+    const status = error.response && error.response.status
+    const isConflict = status === 409 && details.some(d => String(d).startsWith('conflict:'))
     if (isConflict) {
       try {
         await ElMessageBox.confirm(
@@ -1832,21 +2132,29 @@ async function generate(overwrite) {
           { confirmButtonText: '覆盖', cancelButtonText: '取消', type: 'warning' }
         )
       } catch {
-        generating.value = false
+        localPending.value = false
         return
       }
       await generate(true)
       return
     }
+    // 409 的另一半是「另一个窗口已经在生成」：那不是错误，跟着它的进度走就行。
+    if (status === 409) {
+      ElMessage.info('已有生成任务在进行，这里会同步显示进度')
+      loadCurrent()
+      return
+    }
     genError.value = { message: errorText(error), details }
   } finally {
-    generating.value = false
+    localPending.value = false
+    // 请求回来时服务端状态已经落定，立刻刷一次，别让按钮在这 1 秒里又变回可点。
+    loadCurrent()
   }
 }
 
 // 回放校验用的框架必须和生成结果一致：生成时选 RF，回放就得用 rf_* 候选，
 // 否则「校验通过」只能证明 Playwright 那套定位没坏，说明不了生成的脚本。
-const replayFramework = computed(() => genResult.value?.framework || config.framework)
+const replayFramework = computed(() => shownResult.value?.framework || config.framework)
 
 const replayTitle = computed(() => {
   const result = replayResult.value
@@ -1882,7 +2190,7 @@ async function runReplay() {
 
 function detailText(item) {
   const text = String(item)
-  if (text.startsWith('ambiguous:')) return `第 ${text.split(':')[1]} 步定位不唯一`
+  if (text.startsWith('ambiguous:')) return `第 ${text.split(':')[1]} 步定位待确认`
   if (text.startsWith('missing:')) return `第 ${text.split(':')[1]} 步：页面上已找不到目标元素`
   if (text.startsWith('conflict:')) return `目标文件已存在：${text.slice('conflict:'.length)}`
   return text
@@ -1916,6 +2224,10 @@ onMounted(async () => {
   loadCurrent()
   clampPanelWidth()
   nextTick(initSortable)
+  // 进度条只在生成中需要动：250ms 一跳够顺，平时空转不做事。
+  tickTimer = setInterval(() => {
+    if (emitRunning.value) nowTick.value = Date.now() / 1000
+  }, 250)
   window.addEventListener('resize', clampPanelWidth)
   try {
     const { data } = await api.getAutomationModels()
@@ -1928,16 +2240,31 @@ onMounted(async () => {
 })
 
 // 页面被 keep-alive 缓存：回到页面时刷新会话状态，离开时停止轮询。
-onActivated(() => loadCurrent())
-onDeactivated(() => stopPolling())
+onActivated(() => {
+  pollEnabled = true
+  loadCurrent()
+})
+onDeactivated(() => {
+  pollEnabled = false
+  stopPolling()
+})
 onUnmounted(() => {
   stopPolling()
+  clearInterval(tickTimer)
   window.removeEventListener('resize', clampPanelWidth)
   clearTimeout(flashTimer)
   if (sortable) {
     sortable.destroy()
     sortable = null
   }
+  // 页面里的框是浮层，不清掉会一直留在被测页面上。
+  if (peek.value.no) api.clearRecordingHighlight().catch(() => {})
+})
+
+// 展开的那条步骤被删掉、或者列表整体换掉时，把浮层一并收掉：
+// 面板会跟着 v-if 消失，但页面上的框不会自己不见。
+watch(steps, (list) => {
+  if (peek.value.no && !list.some(s => s.no === peek.value.no)) closePeek()
 })
 </script>
 
@@ -2230,6 +2557,37 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .step-alias { color:#303133; font-size:12.5px; font-weight:600; }
 .locator-code { color:#6e6e73; font-size:11.5px; background:#f7f9fc; border:1px solid #eef0f4; border-radius:6px; padding:2px 6px; word-break:break-all; }
 .step-actions { display:flex; flex-direction:row; align-items:center; gap:2px; flex-shrink:0; }
+/* 定位预览：行内小准星，点一下在浏览器里把匹配元素全框出来并编号 */
+.peek-btn { height:22px; width:22px; padding:0; margin-left:-2px; color:#8e8e93; }
+.peek-btn:hover { color:#0071e3; background:#eaf3ff; }
+.chosen-warn { color:#b45309; font-size:11.5px; font-weight:600; }
+.peek-panel {
+  margin-top:8px; padding:9px 10px; border-radius:9px;
+  background:#f7f9fc; border:1px solid #e6ebf2;
+}
+.peek-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.peek-title { font-size:12.5px; color:#303133; }
+.peek-desc {
+  font-size:11px; color:#6e6e73; background:#fff; border:1px solid #eef0f4;
+  border-radius:5px; padding:1px 5px; word-break:break-all;
+}
+.peek-close { margin-left:auto; height:20px; padding:0 4px; }
+.peek-items { margin-top:7px; display:flex; flex-direction:column; gap:4px; }
+.peek-item {
+  display:flex; align-items:center; gap:8px; width:100%; text-align:left;
+  padding:4px 8px; border-radius:7px; border:1px solid #e6ebf2; background:#fff;
+  cursor:pointer; font-size:12px; color:#3c4048; font-family:inherit;
+}
+.peek-item:hover { border-color:#b9d6f7; background:#f4f9ff; }
+.peek-item.is-active { border-color:#ff3b30; background:#fff1f0; color:#b42318; }
+.peek-no {
+  flex:none; width:16px; height:16px; border-radius:4px; background:#e8eaed; color:#5f6368;
+  font-size:10.5px; line-height:16px; text-align:center; font-weight:600;
+}
+.peek-item.is-active .peek-no { background:#ff3b30; color:#fff; }
+.peek-text { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.peek-hidden { flex:none; font-size:10.5px; color:#9aa0a6; }
+.peek-more { margin-top:6px; font-size:11.5px; color:#8e8e93; }
 /* 次要操作组（上移 / 下移 / 删除）：收起时用 max-width 收进去，文字跟着回流而不是瞬移。
    三个 30px 按钮之间还有 Element Plus 的 12px 相邻间距，实测 118px，上限给 140px 留余量。 */
 .step-actions-extra {
@@ -2370,6 +2728,16 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 整宽主行动：唯一比标准按钮高的一处（独占一行，不与任何按钮并排），
    926px 宽下 36px 才有分量；32px 会显得像一条薄片。 */
 .recording-page :deep(.el-button.generate-btn) { width:100%; height:36px; font-size:13.5px; border-radius:9px; }
+/* 生成进度：占掉按钮那块位置，高度接近，切换时整张卡不跳 */
+.gen-progress { padding:10px 12px 11px; border:1px solid #e6e9ef; border-radius:9px; background:#fafbfc; }
+.gen-progress-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
+.gen-progress-label { flex:1; min-width:0; font-size:13px; font-weight:600; color:#1f2530;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gen-progress-pct { flex:none; font-size:12.5px; font-weight:600; color:#0071e3; font-variant-numeric:tabular-nums; }
+.gen-progress :deep(.el-progress-bar__outer) { background:#e9edf2; }
+.gen-progress-foot { display:flex; align-items:center; gap:8px; margin-top:8px; font-size:11.5px; color:#8a8f99; }
+.gen-progress-detail { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gen-progress-time { flex:none; font-variant-numeric:tabular-nums; }
 .gen-block-reason { display:flex; align-items:flex-start; gap:7px; margin-top:2px; color:#ad6800; font-size:12.5px; line-height:1.5; }
 .gen-block-dot { flex-shrink:0; width:7px; height:7px; border-radius:50%; background:#ffb020; margin-top:6px; }
 .gen-error { margin-top:14px; padding:12px; border-radius:10px; background:#fff1f0; color:#e5484d; font-size:13px; }

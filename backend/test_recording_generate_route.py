@@ -12,7 +12,7 @@ Path(os.environ['AUTOMATION_WORKSPACE_ROOT'], 'proj').mkdir(parents=True, exist_
 
 from app import create_app  # noqa: E402
 from app.services.opencode_runner import OpenCodeRunner  # noqa: E402
-from app.services.recording import emit  # noqa: E402
+from app.services.recording import emit, progress  # noqa: E402
 from app.services.recording.session import RecordingSession  # noqa: E402
 
 MODEL = 'volcengine-plan/deepseek-v4-flash'
@@ -29,6 +29,7 @@ class GenerateRouteTest(unittest.TestCase):
     def setUp(self):
         self.app = GenerateRouteTest.app
         RecordingSession._current = None
+        progress.PROGRESS.reset()
 
     def _stopped_session(self, status='stopped'):
         session = RecordingSession.__new__(RecordingSession)
@@ -79,6 +80,32 @@ class GenerateRouteTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.get_json())
         self.assertTrue(r.get_json()['validated'])
         self.assertIsInstance(gen.call_args[0][0], OpenCodeRunner)
+
+    def test_second_window_is_rejected_while_one_generation_runs(self):
+        self._stopped_session()
+        # 另一个窗口（录制面板）已经在跑：这一边不该再写一遍同一个文件。
+        self.assertTrue(progress.PROGRESS.start())
+        r = self._post()
+        self.assertEqual(r.status_code, 409)
+        self.assertIn('已有生成任务', r.get_json()['error'])
+
+    def test_failed_generation_leaves_the_reason_on_progress(self):
+        self._stopped_session()
+        with mock.patch.object(emit, 'generate',
+                               side_effect=emit.EmitError('校验未通过', details=['bad keyword'])):
+            self._post()
+        snap = progress.PROGRESS.snapshot()
+        self.assertEqual(snap['status'], 'failed')
+        self.assertEqual(snap['error']['message'], '校验未通过')
+        self.assertEqual(snap['error']['details'], ['bad keyword'])
+
+    def test_conflict_clears_progress_instead_of_reporting_failure(self):
+        self._stopped_session()
+        with mock.patch.object(emit, 'generate',
+                               side_effect=emit.EmitError('目标文件已存在', details=['conflict:a.robot'])):
+            self._post()
+        # 覆盖还是改名由用户决定，进度不该留一条「生成失败」。
+        self.assertEqual(progress.PROGRESS.snapshot()['status'], 'idle')
 
     def test_conflict_is_409_and_failure_is_422_with_details(self):
         self._stopped_session()

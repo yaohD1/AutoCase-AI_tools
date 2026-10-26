@@ -146,7 +146,8 @@ class RecordRouteTest(unittest.TestCase):
         self.ctx.pop()
 
     def _fake_generate(self, content):
-        def generate(runner, workspace, model, steps, framework, target_path, title, python=None, overwrite=False):
+        def generate(runner, workspace, model, steps, framework, target_path, title, python=None,
+                     overwrite=False, progress=None):
             path = Path(workspace) / target_path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)

@@ -175,6 +175,19 @@ def best_effort(framework, counted):
 
 
 
+def narrowest(counted):
+    """命中最少的那条候选（不看框架）。
+
+    用途和 best_effort 不同：这里只关心「哪条候选最能说明这批匹配元素」，
+    给用户看「页面上有 3 个，分别是哪 3 个」。所以不在乎目标框架能不能用它。
+    """
+    pool = [c for c in counted if c.get('count', -1) > 0]
+    if not pool:
+        return None
+    order = {kind: i for i, kind in enumerate(PRIORITY)}
+    return sorted(pool, key=lambda c: (c['count'], order.get(c['kind'], len(PRIORITY))))[0]
+
+
 def status_of(primary):
     """unique：主定位来自语义定位；fragile：主定位只能靠结构定位；ambiguous：没有唯一候选。"""
     if primary is None:

@@ -16,10 +16,11 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
 from app.services.recording import intent as intent_mod
-from app.services.recording import ir, verify
+from app.services.recording import ir, progress, verify
 from app.services.recording.ask_pool import STOP_DELAY_SECONDS as ASK_STOP_DELAY_SECONDS
 from app.services.recording.ask_pool import AskPool, disabled_snapshot
-from app.services.recording.locators import build_specs, rank, stale_check, status_of
+from app.services.recording.locators import (best_effort, build_specs, narrowest,
+                                             pick_for, rank, stale_check, status_of)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RECORDER_JS = os.path.join(HERE, 'recorder.js')
@@ -32,6 +33,32 @@ CLEAR_MARK_JS = (
     "() => document.querySelectorAll('[%s]').forEach((el) => el.removeAttribute('%s'))"
     % (TARGET_MARK_ATTR, TARGET_MARK_ATTR)
 )
+
+
+def _read_js(name):
+    with open(os.path.join(HERE, name), encoding='utf-8') as fp:
+        return fp.read()
+
+
+# 把匹配元素全部框出来并编号（人眼确认用）。见 overlay.js 里的两条约束。
+OVERLAY_JS = _read_js('overlay.js')
+CLEAR_OVERLAY_JS = (
+    "() => { const el = document.getElementById('__autocase_boxes');"
+    " if (el) el.remove(); return true; }"
+)
+# 录制时顺手把匹配元素的内容存下来：浏览器一关就再也查不到了，
+# 而步骤栏、生成注释都要能说清「那两个元素分别是什么」。
+MATCH_SUMMARY_JS = """(els) => els.slice(0, 10).map((el) => {
+  const row = el.closest('tr, li, [role=row], [role=listitem], dd, article');
+  const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+  return {
+    tag: el.tagName.toLowerCase(),
+    text: clean(el.innerText || el.value || '').slice(0, 40),
+    row: row ? clean(row.innerText).slice(0, 40) : null,
+    visible: el.getClientRects().length > 0,
+  };
+})"""
+MAX_MATCH_ITEMS = 10
 IDLE_SECONDS = 15 * 60
 # 停止后浏览器继续开着（用户还要拾取元素、验证断言），但不能永远占着：
 # 一小时没有任何命令就自己收掉。
@@ -164,6 +191,8 @@ class RecordingSession(object):
         # Playwright 回调只入队，真正的同步调用在录制线程的循环里执行（在回调内调用会死锁）。
         self._inbox = queue.Queue()
         self._errors = []
+        # 最近一次画框落在哪个 frame：清除时不必遍历所有页面。
+        self._overlay_frame = None
         self._events = []
         self._steps = []
         self._picks = []
@@ -243,6 +272,24 @@ class RecordingSession(object):
         """在当前页面上判断一条断言此刻是否成立。"""
         return self._call('verify', intent=intent)
 
+    def highlight(self, no, index=None, framework='playwright-ts'):
+        """把这一步会用的定位所匹配到的元素全部框出来，index 指向的那个实心高亮。
+
+        只在浏览器还开着时可用；关掉之后没有页面可画，返回 ok=False。
+        """
+        return self._call('highlight', no=no, index=index, framework=framework)
+
+    def clear_highlight(self):
+        return self._call('clear_highlight')
+
+    def set_chosen(self, no, desc, index):
+        """用户看过框之后明确指定「就是这个（第 index 个匹配）」。
+
+        必须连 desc 一起存：index 是**某一条候选**的匹配顺序，换一条候选就不是同一个
+        元素了（不同选择器的匹配顺序不一定相同）。生成时据此走用户选的那条。
+        """
+        return self._call('set_chosen', no=no, desc=desc, index=index, timeout=COMMAND_TIMEOUT)
+
     def cancel(self):
         """内部中止：关浏览器但不重校验定位。界面上没有入口（只有「停止录制」），
         主要给测试 teardown 这类「不关心最终定位状态」的场景用。"""
@@ -301,6 +348,9 @@ class RecordingSession(object):
                 'browser_open': self._browser_open(),
                 # 断言解析器（录制期常驻的 opencode）状态：就绪 / 启动中 / 不可用。
                 'ask': pool.snapshot() if pool is not None else disabled_snapshot(),
+                # 生成进度：主界面和录制面板是两个窗口，只靠各自的本地 loading
+                # 会出现「一边点完，另一边还能点」，所以状态放服务端一起返回。
+                'emit': progress.PROGRESS.snapshot(),
             }
 
     def _browser_open(self):
@@ -772,6 +822,13 @@ class RecordingSession(object):
                     result = self._verify_now(kwargs['intent'])
                 elif name == 'reload':
                     result = self._add_reload(kwargs.get('after_no'))
+                elif name == 'highlight':
+                    result = self._highlight_now(kwargs['no'], kwargs.get('index'),
+                                                 kwargs.get('framework') or 'playwright-ts')
+                elif name == 'clear_highlight':
+                    result = self._clear_highlight_now()
+                elif name == 'set_chosen':
+                    result = self._set_chosen_now(kwargs['no'], kwargs['desc'], kwargs['index'])
                 else:
                     raise RecordingError('未知命令：%s' % name)
                 reply.put((True, result))
@@ -1281,6 +1338,50 @@ class RecordingSession(object):
         except ValueError:
             return 0
 
+    def _doc_identity(self, frame):
+        """录制这一刻元素所在的页面/document。
+
+        stop 时要用它判断「这个 target 还在不在当前页面上」：登录页的步骤在登录成功
+        之后就不该拿聊天页重算，否则 count 全变 0，会被误报成「不唯一 / 找不到」。
+        URL 是「页面是否翻走」的主判据；timeOrigin 只在旧数据没有 URL 时兜底。
+        """
+        try:
+            url = frame.url
+        except Exception:
+            url = None
+        stamp = self._doc_stamp.get(id(frame))
+        if stamp is None:
+            try:
+                info = frame.evaluate(NAV_INFO_JS)
+                stamp = info.get('origin') if isinstance(info, dict) else None
+            except Exception:
+                stamp = None
+            if stamp is not None:
+                self._doc_stamp[id(frame)] = stamp
+        return {'url': url, 'stamp': stamp}
+
+    def _same_page(self, doc, frame):
+        """target 录制时的页面是否还是这个 frame 当前的那一个。
+
+        只看 URL：停止时地址变了（/login → /global），就不该拿当前 DOM 去数旧元素。
+        不能只靠 timeOrigin——SPA 的 pushState 换了页面内容，timeOrigin 却还是同一个。
+        URL 相同（刷新 / 重新进入同一地址）才重算；旧数据没有 URL 时退回 timeOrigin。
+
+        代价是 query / hash 变化也会被当成「翻页」，跳过复核。这是有意的保守选择：
+        保留录制时的定位不会误报，拿新页面重算却会把好好的步骤洗成「不唯一」。
+        """
+        if not doc:
+            return True
+        try:
+            url = frame.url
+        except Exception:
+            return False
+        recorded = doc.get('url')
+        if recorded:
+            return url == recorded
+        stamp = self._doc_stamp.get(id(frame))
+        return doc.get('stamp') is not None and stamp is not None and doc['stamp'] == stamp
+
     def _count(self, frame, specs, mark=None):
         """逐条在页面上数匹配数；mark 存在时顺带算出「用户点的是第几个匹配」。
 
@@ -1310,6 +1411,128 @@ class RecordingSession(object):
             except Exception:
                 pass
         return out
+
+    def _collect_matches(self, frame, counted):
+        """不唯一时，把「这批匹配到底是哪几个」存一份到 target 上。
+
+        只取「命中数 > 1 的候选里最窄的那条」：用 getByRole 的 100 个匹配去列没有意义，
+        但也不能拿 count=1 的 css 路径（它必然最窄，却只说明一个元素，没有可比性）。
+        这一步发生在用户操作之后、录制线程里，实测 4–20ms。
+        """
+        pool = [c for c in counted if (c.get('count') or 0) > 1]
+        if not pool:
+            return None
+        best = narrowest(pool)
+        if best is None or (best.get('count') or 0) < 2:
+            return None
+        spec = best['spec']
+        try:
+            locator = getattr(frame, spec['method'])(*spec['args'], **spec['kwargs'])
+            items = locator.evaluate_all(MATCH_SUMMARY_JS)
+        except Exception:
+            # 页面正在导航、或元素已消失：没有就没有，不能因此丢步骤。
+            return None
+        if not isinstance(items, list) or len(items) < 2:
+            return None
+        return {
+            'desc': best['desc'],
+            'count': best.get('count'),
+            # evaluate_all 里已截到 10 条；count 会更大，界面据此提示「只列前 10」。
+            'items': items[:MAX_MATCH_ITEMS],
+        }
+
+    # ---- 定位预览：把匹配元素框出来给人看 ----
+
+    def _find_step(self, no):
+        with self._lock:
+            for step in self._steps:
+                if step['no'] == no:
+                    return step
+        raise RecordingError('没有第 %s 步' % no)
+
+    def _app_frame(self):
+        """录制时没存 frame 的步骤（手工插入的）兜底用被测页面的主 frame。"""
+        try:
+            for page in self._context.pages:
+                for frame in page.frames:
+                    if self._is_app_frame(frame):
+                        return frame
+        except Exception:
+            pass
+        return None
+
+    def _highlight_now(self, no, index, framework):
+        """在页面上框出这一步的目标元素。必须在录制线程里跑（Playwright 对象不跨线程）。"""
+        step = self._find_step(no)
+        target = step.get('target') or {}
+        frame = step.get('_frame') or self._app_frame()
+        if frame is None:
+            return {'ok': False, 'reason': 'no_frame', 'count': 0, 'items': [], 'active': 0}
+        candidates = target.get('candidates') or []
+        # 框哪一条，按「信息量最大」排：
+        # 1) 用户亲手挑过的，就是他正在确认的东西；
+        # 2) 录制时匹配到多个元素的那条——框出来才有「原来有 3 个」这个信息。
+        #    结构定位（css 唯一）的步骤尤其需要它，否则框出来只有一个框，看不出风险；
+        # 3) 否则才是生成时默认会用的那条。
+        chosen = None
+        picked = target.get('chosen') or {}
+        if picked.get('desc'):
+            chosen = next((c for c in candidates if c['desc'] == picked['desc']), None)
+        if chosen is None:
+            matches = target.get('matches') or {}
+            if matches.get('desc'):
+                chosen = next((c for c in candidates if c['desc'] == matches['desc']), None)
+        if chosen is None:
+            chosen = pick_for(framework, candidates) or best_effort(framework, candidates)
+        if chosen is None:
+            return {'ok': False, 'reason': 'no_candidate', 'count': 0, 'items': [], 'active': 0}
+        try:
+            locator = getattr(frame, chosen['spec']['method'])(
+                *chosen['spec']['args'], **chosen['spec']['kwargs'])
+            count = locator.count()
+        except Exception as exc:  # noqa: BLE001 - frame 已销毁/页面已关
+            return {'ok': False, 'reason': 'frame_lost', 'detail': str(exc)[:200],
+                    'count': 0, 'items': [], 'active': 0}
+        if count <= 0:
+            # 录制中跳转过的步骤：旧页面的元素在新页面上一个都数不到。
+            return {'ok': False, 'reason': 'not_found', 'desc': chosen['desc'],
+                    'count': 0, 'items': [], 'active': 0}
+        active = index if isinstance(index, int) else None
+        if active is None:
+            active = (target.get('chosen') or {}).get('index')
+        if active is None:
+            active = chosen.get('index')
+        if not isinstance(active, int) or not 0 <= active < count:
+            active = 0
+        try:
+            items = locator.evaluate_all(OVERLAY_JS, active)
+        except Exception as exc:  # noqa: BLE001
+            return {'ok': False, 'reason': 'overlay_failed', 'detail': str(exc)[:200],
+                    'desc': chosen['desc'], 'count': count, 'items': [], 'active': active}
+        self._overlay_frame = frame
+        return {'ok': True, 'desc': chosen['desc'], 'count': count,
+                'active': active, 'items': items or []}
+
+    def _clear_highlight_now(self):
+        frame = getattr(self, '_overlay_frame', None)
+        if frame is not None:
+            try:
+                frame.evaluate(CLEAR_OVERLAY_JS)
+            except Exception:
+                pass
+        return {'ok': True}
+
+    def _set_chosen_now(self, no, desc, index):
+        step = self._find_step(no)
+        target = step.get('target') or {}
+        index = int(index)
+        with self._lock:
+            for candidate in target.get('candidates') or []:
+                if candidate['desc'] == desc:
+                    candidate['index'] = index
+                    candidate.pop('index_invalid', None)
+            target['chosen'] = {'desc': desc, 'index': index}
+        return self.snapshot()
 
     def _on_event(self, source, raw):
         # binding 回调：只入队。
@@ -1347,6 +1570,11 @@ class RecordingSession(object):
             snap = dict(snap, frame_url=frame.url, frame_name=frame_name)
         # _mark 只用于这一轮求 index，不留在 target 里（它只是个临时 DOM 属性名）。
         mark = snap.pop('_mark', None)
+        # 记下元素属于哪个 document：停止录制时只对「还在当前页面上」的 target 重算。
+        # 优先用 recorder.js 在页面里读到的值，避免和导航抢时序；旧注入脚本没有这两个字段时兜底。
+        doc = {'url': snap.pop('_doc_url', None), 'stamp': snap.pop('_doc_stamp', None)}
+        if not doc['url'] and doc['stamp'] is None:
+            doc = self._doc_identity(frame)
         counted = self._count(frame, build_specs(snap), mark=mark)
         primary, ordered = rank(counted)
         unverified = False
@@ -1357,6 +1585,14 @@ class RecordingSession(object):
         target = ir.make_target(snap, ordered, primary, status)
         if unverified:
             target['unverified'] = True
+        elif any((c.get('count') or 0) > 1 for c in ordered):
+            # 页面上存在同名元素时就把「那几个分别是什么」记下来。
+            # 不止 ambiguous 要记：更常见的是 getByRole 命中 3 个、于是退到 css 绝对路径
+            # 标成「结构定位」——那种步骤用户更该看见「其实有 3 个，你点的是第 2 个」。
+            # 浏览器一关这份快照就取不到了，必须在录制当时存。
+            matches = self._collect_matches(frame, ordered)
+            if matches:
+                target['matches'] = matches
         index = self._page_index(page)
 
         with self._lock:
@@ -1367,7 +1603,7 @@ class RecordingSession(object):
                                  'desc': primary['desc'] if primary else None})
 
             if kind == 'pick':
-                self._picks.append({'seq': seq, 'target': target, '_frame': frame})
+                self._picks.append({'seq': seq, 'target': target, '_frame': frame, '_doc': doc})
                 self._schedule_badge(frame, status, 'pick', target.get('alias'))
                 self._schedule_hud()
                 return
@@ -1385,6 +1621,7 @@ class RecordingSession(object):
                 prev['value'] = data.get('value')
                 prev['target'] = target
                 prev['_frame'] = frame
+                prev['_doc'] = doc
                 self._schedule_hud()
                 return
 
@@ -1396,6 +1633,7 @@ class RecordingSession(object):
                 step['label'] = None
             step['_key'] = key
             step['_frame'] = frame
+            step['_doc'] = doc
             self._steps.append(step)
             if kind in ('click', 'press'):
                 # 记下时刻而不是「上一步是点击」：只有紧跟着的这次导航才算它引起的，
@@ -1465,18 +1703,34 @@ class RecordingSession(object):
             for step in self._steps:
                 target, frame = step.get('target'), step.get('_frame')
                 if target is not None and frame is not None:
-                    owners.setdefault(id(target), (target, frame))
+                    owners.setdefault(id(target), (target, frame, step.get('_doc')))
             for pick in self._picks:
-                owners.setdefault(id(pick['target']), (pick['target'], pick['_frame']))
-        for target, frame in owners.values():
+                owners.setdefault(id(pick['target']), (pick['target'], pick['_frame'], pick.get('_doc')))
+        for target, frame, doc in owners.values():
+            # 录制时在别的页面上（登录页 → 登录成功后）：旧元素已经随旧页面销毁，
+            # 不能拿当前页面重算。否则所有 count 变 0，界面会把「页面翻走了」误报成
+            # 「不唯一 / 找不到」，生成也会被拦。保留录制时的 candidates / primary /
+            # status，只标 page_gone，让界面提示「未复核，生成请回放确认」。
+            if not self._same_page(doc, frame):
+                with self._lock:
+                    target['page_gone'] = True
+                continue
             previous = target['primary']['desc'] if target.get('primary') else None
             # index 是录制那一刻算的，复核时元素上的临时标记早就没了，
             # 按 desc 把旧 index 带过来，别让复核把降级定位的信息洗掉。
             kept_index = {c['desc']: c.get('index') for c in (target.get('candidates') or [])}
             counted = self._count(frame, build_specs(target['snap']))
             for item in counted:
-                if item.get('index') is None and kept_index.get(item['desc']) is not None:
-                    item['index'] = kept_index[item['desc']]
+                kept = kept_index.get(item['desc'])
+                if kept is None:
+                    continue
+                item['index'] = kept
+                n = item.get('count')
+                # 元素变少了（列表被删了几行）：用户选的序号已经不存在。
+                # 保留它而不是静默改回第一个——静默会点到别的元素，比报错更糟；
+                # 标出来让界面提示「你选的第 3 个现在只有 2 个」。
+                if isinstance(n, int) and n > 0 and kept >= n:
+                    item['index_invalid'] = True
             primary, ordered = rank(counted)
             if target.get('unverified'):
                 # 录制当场就没数到（页面跳走了），复核同样数不到是正常的，保留降级主定位；
@@ -1485,7 +1739,17 @@ class RecordingSession(object):
                 if primary is not None:
                     primary = dict(primary, count=0)
             with self._lock:
+                target.pop('page_gone', None)
                 target['candidates'] = ordered
                 target['primary'] = primary
                 # 没核实过的定位不能报成 unique：界面上要能看出「这条要回放确认」。
                 target['status'] = 'stale' if target.get('unverified') else stale_check(previous, primary)
+                # 用户手动指定的那个元素同样要复核：选的是第 3 个，现在只剩 2 个。
+                chosen = target.get('chosen')
+                if chosen:
+                    match = next((c for c in ordered if c['desc'] == chosen.get('desc')), None)
+                    count = match.get('count') if match else None
+                    if isinstance(count, int) and count > 0 and chosen.get('index', 0) >= count:
+                        chosen['index_invalid'] = True
+                    else:
+                        chosen.pop('index_invalid', None)

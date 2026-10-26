@@ -1309,8 +1309,11 @@ class OpenCodeRunner:
         """给 recording-emitter 生成一份临时配置：只允许写 writable 这一个文件。
 
         写权限交给 opencode 自己在工具调用前拦，比事后回滚可靠得多。四个细节（都是实测出来的）：
-        - 权限模式是拿**绝对路径**去匹配的：写 `"allowed.txt"` 这种相对模式永远不命中，
-          必须用 `**/相对路径` 或绝对路径。这里三种形式都写，防止某个工具传的路径形态不同。
+        - 写文件权限匹配的是**相对工作区的路径**：opencode 调用的是
+          `ask({permission:"edit", patterns:[path.relative(worktree, filepath)]})`，
+          所以白名单的主规则必须是相对路径本身。`**/x` 只适合带目录前缀的文件，
+          根目录下的 `x.spec.ts` 命中不了它——这正是「模式在允许列表里却仍被全局 deny
+          拦住」的原因。绝对路径留给 external_directory 那种场景，这里保留只是兜底。
         - 临时配置必须和原配置放在**同一目录**：配置里的 `{file:.opencode/prompts/...}`
           是按配置文件所在目录解析的，挪到别处会让 agent 的提示词全部加载失败。
         - `edit` 权限覆盖 edit / write / apply_patch 三种写文件途径，`write` 再写一遍是冗余保险；
@@ -1330,10 +1333,13 @@ class OpenCodeRunner:
             raise RuntimeError('OpenCode 配置里缺少 recording-emitter agent，无法限定写权限')
         rel = str(writable).replace('\\', '/')
         absolute = Path(workspace).resolve() / rel
-        rule = {'*': 'deny', f'**/{rel}': 'allow', absolute.as_posix(): 'allow'}
+        # 第一版把 `**/rel` 当主规则，结果根目录文件一条都命中不了（见上面的注释）。
+        rule = {'*': 'deny'}
+        for pattern in (rel, './' + rel, '**/' + rel, absolute.as_posix()):
+            rule.setdefault(pattern, 'allow')
         native = str(absolute)
         if native != absolute.as_posix():
-            rule[native] = 'allow'
+            rule.setdefault(native, 'allow')
         agent['permission'] = {
             'edit': dict(rule),
             'write': dict(rule),
