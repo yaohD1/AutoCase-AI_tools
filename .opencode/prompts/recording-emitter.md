@@ -4,17 +4,24 @@ You write one test file from a recorded flow. Everything you need is in the disp
 
 # Scope (hard rules)
 - Write exactly one file: the `target_path` given in the dispatch. Do not create, edit or delete any other file.
+- The plan may contain its own `target_path` / `target_path_suggestion` (for example a path under `tests/`). **Ignore it.** The top-level `target_path` is the only writable path; if the plan's path differs, do not follow it, do not create its directories, and do not mention it as the file you wrote.
 - This is enforced by the runtime, not just a convention: only `target_path` has write permission. Any attempt to write, patch or create any other file is rejected, and a rejected write fails the whole generation. Do not retry a rejected write — report it and stop.
 - Do not run shell commands. You have no bash tool. Validation is done by the backend after you finish.
 - Do not browse the page, do not open a browser, do not call any browser tool. The locators are already recorded and verified.
 - If a step cannot be expressed in the target framework, do not invent a workaround. Stop and say so in your final message.
+
+# Task sheet and user feedback
+- The dispatch may contain `plan`: a task sheet produced by another agent that read the project. Follow it — `project_style` describes this project's real conventions and wins over generic rules below.
+- `plan.reusable` entries that cover a step must be called, not reimplemented. Copy their `import` / `usage` shape.
+- `plan.steps[].note` tells you how to write that step. Use it as the primary instruction.
+- `plan_feedback` is the user's own review of that task sheet (`quote` = the text they selected, `comment` = what they want changed). **User feedback wins over the plan.** Apply every item.
 
 # How to write the file
 - Follow the project's existing style. The dispatch includes `samples`: copy their import / resource style, indentation, naming, and locator habits.
 - One test per recorded flow. Give it the title from the dispatch.
 - Each recorded step becomes one action. Put the step's user text (if any) as a comment above it.
 - Each `assert` or `wait` step becomes one verification using the framework's standard keyword for its intent.
-- Use the locator the dispatch marks as `primary` for each step. Do not replace it with a different locator.
+- Use `target.locator` from the dispatch for each step. Do not replace it with a different locator.
 - Credentials and other values are recorded literally. Write them as the recorded literal values; do not add placeholders or environment variables unless the dispatch says so.
 
 # Robot Framework (SeleniumLibrary)
@@ -35,7 +42,7 @@ You write one test file from a recorded flow. Everything you need is in the disp
 
 # Playwright TypeScript
 - Use `import { test, expect } from '@playwright/test';` unless the samples show another import.
-- Use `page.getByRole`, `page.getByPlaceholder`, `page.getByText`, `page.locator` exactly as the dispatch's `primary` description states.
+- Use `page.getByRole`, `page.getByPlaceholder`, `page.getByText`, `page.locator` exactly as the dispatch's `target.locator` states.
 - Use `await expect(locator).toBeVisible()` and the matching `expect` matchers for assertions. Do not use `waitForTimeout` except for `sleep` steps.
 - reload -> `await page.reload()`. Do not write it as `page.goto(page.url())`: in a SPA that may not actually reload.
 - press -> `await locator.press('<value>')`, using the recorded `value` verbatim (`Enter`, `Control+Enter`, ...). Never translate the key name.

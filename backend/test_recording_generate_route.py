@@ -17,6 +17,9 @@ from app.services.recording.session import RecordingSession  # noqa: E402
 
 MODEL = 'volcengine-plan/deepseek-v4-flash'
 GEN = '/api/automation/recording/generate'
+PLAN_API = '/api/automation/recording/plan'
+# 任务书是写入的唯一入口；路由测试只关心「有没有带、对不对得上」，内容由 emit 的测试覆盖。
+PLAN = {'steps': [], 'target_path': 'a.robot'}
 
 
 class GenerateRouteTest(unittest.TestCase):
@@ -31,18 +34,24 @@ class GenerateRouteTest(unittest.TestCase):
         RecordingSession._current = None
         progress.PROGRESS.reset()
 
-    def _stopped_session(self, status='stopped'):
+    def _stopped_session(self, status='stopped', steps=None):
         session = RecordingSession.__new__(RecordingSession)
         session.status = status
-        session.ir = lambda: []
+        session.ir = lambda: list(steps or [])
         RecordingSession._current = session
         return session
 
     def _post(self, **extra):
         body = {'model': MODEL, 'workspace_path': 'proj', 'framework': 'robot-selenium',
-                'target_path': 'a.robot'}
+                'target_path': 'a.robot', 'plan': PLAN}
         body.update(extra)
         return self.client.post(GEN, json=body)
+
+    def _plan(self, **extra):
+        body = {'model': MODEL, 'workspace_path': 'proj', 'framework': 'robot-selenium',
+                'target_path': 'a.robot'}
+        body.update(extra)
+        return self.client.post(PLAN_API, json=body)
 
     def test_no_session_is_not_found(self):
         self.assertEqual(self.client.post(GEN, json={'model': MODEL}).status_code, 404)
@@ -117,6 +126,52 @@ class GenerateRouteTest(unittest.TestCase):
             r = self._post()
         self.assertEqual(r.status_code, 422)
         self.assertEqual(r.get_json()['details'], ['bad keyword'])
+
+
+    def test_plan_is_required_before_writing(self):
+        """写入的唯一入口是任务书：不带任务书直接拒绝，避免又回到「一键从零写」。"""
+        self._stopped_session()
+        r = self._post(plan=None)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('缺少任务书', r.get_json()['error'])
+
+    def test_stale_plan_is_rejected(self):
+        """录制改过（步骤号对不上）之后，旧任务书不能再用来写，否则会漏步骤。"""
+        self._stopped_session(steps=[{'no': 1}, {'no': 2}])
+        r = self._post(plan={'steps': [{'no': 1}], 'target_path': 'a.robot'})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.get_json()['details'], ['plan_stale'])
+
+    def test_plan_route_returns_task_sheet_without_writing(self):
+        self._stopped_session(steps=[{'no': 1}])
+        result = {'plan': {'steps': [{'no': 1, 'action': 'write'}]}, 'target_path': 'a.robot',
+                  'suggestion': None, 'reason': None, 'steps': 1, 'chars': 40}
+        with mock.patch.object(emit, 'plan', return_value=result) as planner:
+            r = self._plan(feedback=[{'quote': 'q', 'comment': 'c'}],
+                           previous_plan={'steps': [{'no': 1}]})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(r.get_json()['steps'], 1)
+        kwargs = planner.call_args[1]
+        self.assertEqual(kwargs['feedback'], [{'quote': 'q', 'comment': 'c'}])
+        self.assertEqual(kwargs['previous_plan'], {'steps': [{'no': 1}]})
+        self.assertEqual(progress.PROGRESS.snapshot()['status'], 'done')
+        self.assertIsNone(progress.PROGRESS.snapshot()['result'], '规划结束不该伪装成一次写入结果')
+
+    def test_plan_route_reports_failure(self):
+        self._stopped_session(steps=[{'no': 1}])
+        with mock.patch.object(emit, 'plan',
+                               side_effect=emit.EmitError('任务书解析失败', details=['不是 JSON'])):
+            r = self._plan()
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.get_json()['details'], ['不是 JSON'])
+        self.assertEqual(progress.PROGRESS.snapshot()['status'], 'failed')
+
+    def test_plan_and_write_are_mutually_exclusive(self):
+        self._stopped_session()
+        self.assertTrue(progress.PROGRESS.start('write'))
+        r = self._plan()
+        self.assertEqual(r.status_code, 409)
+        self.assertIn('已有生成任务', r.get_json()['error'])
 
 
 if __name__ == '__main__':

@@ -1,20 +1,31 @@
-"""录制生成：收集上下文 → 调用 recording-emitter → 范围检查 → 校验。
+"""录制生成：出任务书（只读）→ 按任务书写脚本 → 范围检查 → 校验。
+
+两步是分开的：`plan()` 只读项目、产出任务书，不写文件；`generate()` 拿着用户确认过的
+任务书写入。任务书里的 target_path 只当建议，真正的写入路径与权限永远以请求为准。
 
 越界靠**预防**而不是事后回滚：emitter 运行时只对目标文件开放写权限（见
 `OpenCodeRunner.emit_config`），其余文件写入会被 opencode 直接拒绝；这里的范围检查是
 事后确认，只报告、不回滚——回滚会把用户在这期间自己的编辑一起抹掉。
-失败时只清理本次产出的目标文件（原本不存在才删），已有文件保留，原内容用 git 恢复。
+失败时不删文件，只把「已经写了什么、写在哪」告诉用户。
 """
 import json
+import logging
+import re
 from pathlib import Path
 
 from app.services.recording import detect, guard, toolchain
 from app.services.recording.locators import best_effort, pick_for, pool_for
 
+logger = logging.getLogger(__name__)
+
 RF_FRAMEWORK = 'robot-selenium'
 PW_FRAMEWORK = 'playwright-ts'
 MAX_REPAIR_ROUNDS = 1
 MAX_CANDIDATES_IN_PROMPT = 5
+# 任务书会原样进写手提示词、也会经前端回传，体积必须有上限，
+# 否则模型偶尔吐一份巨型 JSON 就能把一次生成撑爆。
+MAX_PLAN_BYTES = 64 * 1024
+MAX_PLAN_FEEDBACK = 20
 LOCATOR_RULES = (
     '要求：\n'
     '- 只写 target_path 指定的那一个文件。运行环境只给它开了写权限，'
@@ -261,48 +272,204 @@ def _candidates_for_prompt(target, framework):
     return out
 
 
-def _prompt(payload):
+PLAN_RULES = (
+    '规划要求：\n'
+    '- 任务书里的每个 file / symbol / import 必须来自你真正读过的文件，不许编造。'
+    '项目里没有现成封装时 reusable 留空数组，不要硬凑。\n'
+    '- steps 要覆盖每一个录制步骤，顺序一致。只有「这个封装覆盖了该步的全部意图」才标 reuse，'
+    '其余一律 write；标 reuse 时把要传的参数写进 args。每个步骤都要写 note，'
+    '说清这一步具体怎么定位、怎么断言，写手会照它施工。\n'
+    '- target_path 是用户配置的写入位置，必须原样返回，不要改动它。'
+    '如果你判断这个位置不合适（例如测试框架只会收集某个目录，根目录的脚本根本不会被执行），'
+    '把建议路径写进 target_path_suggestion、把依据写进 target_path_reason，'
+    '但 target_path 仍要保留原值。\n'
+    '- 如果给了 feedback，必须逐条落实：quote 是用户选中的任务书原文，comment 是他的要求。'
+    '和任务书原文冲突时以 feedback 为准，并在 changes 里说明每条意见怎么改的。\n'
+    '- 你只读不写。确实需要改目标文件以外的文件才能跑通时，写进 needs，不要试图绕过，'
+    '也不要复制那些文件的内容进来。\n'
+    '- 只输出一个 JSON 对象，不要代码块、不要解释文字。\n'
+)
+
+
+def _plan_step(step):
+    """规划阶段只需要「这一步在干什么」，不需要候选定位串。
+
+    给 planner 完整 candidates 会让提示词暴涨，而且它要做的是「项目里有没有现成封装」，
+    和「这个元素有几条 css 候选」无关。元素身份用 alias / tag / text 表达就够了。
+    """
+    item = {'no': step['no'], 'type': step['type']}
+    for key in ('text', 'value', 'label', 'url', 'seconds'):
+        if step.get(key) is not None:
+            item[key] = step[key]
+    if step.get('intent'):
+        item['intent'] = step['intent']
+    target = step.get('target') or {}
+    if target:
+        snap = target.get('snap') or {}
+        item['target'] = {
+            'alias': target.get('alias'),
+            'tag': snap.get('tag'),
+            'text': ((snap.get('text') or '')[:40] or None),
+        }
+        item['target'] = {k: v for k, v in item['target'].items() if v}
+    return item
+
+
+def _clean_feedback(feedback):
+    """用户选中的片段 + 他的意见。空意见丢掉；长度截断，避免一份任务书被评论撑爆。"""
+    out = []
+    for item in (feedback or [])[:MAX_PLAN_FEEDBACK]:
+        if not isinstance(item, dict):
+            continue
+        comment = str(item.get('comment') or '').strip()
+        if not comment:
+            continue
+        out.append({
+            'quote': str(item.get('quote') or '').strip()[:400],
+            'comment': comment[:800],
+        })
+    return out
+
+
+def _plan_payload(framework, steps, target_path, title, feedback=None, previous_plan=None):
+    payload = {
+        'framework': framework,
+        'target_path': target_path,
+        'title': title,
+        'steps': [_plan_step(step) for step in steps],
+        'output_language': 'Simplified Chinese',
+    }
+    notes = _clean_feedback(feedback)
+    if notes:
+        payload['feedback'] = notes
+    if previous_plan:
+        # steps_sig 是服务端用来判过期的，不该混进给模型看的上一版里。
+        payload['previous_plan'] = {k: v for k, v in previous_plan.items() if k != 'steps_sig'}
+    return payload
+
+
+def _plan_prompt(payload):
+    head = (
+        '下面是一条录制好的测试流程。请先扫一遍这个项目，再产出任务书。\n'
+        '你没有写权限，也不应该尝试写任何文件。\n'
+    )
+    if payload.get('feedback'):
+        head += '用户对上一版任务书提了意见，这次必须按意见修订，不要装作没看见。\n'
     return (
-        '请按下面的录制结果写入一个测试文件。\n'
-        '只写 target_path 指定的文件，不写其他文件。\n'
-        + LOCATOR_RULES
-        + FRAMEWORK_RULES.get(payload.get('framework'), '')
+        head
+        + PLAN_RULES
         + '```json\n' + json.dumps(payload, ensure_ascii=False, indent=2) + '\n```\n'
     )
 
 
-def _payload(framework, steps, target_path, title, detected, keywords):
-    return {
-        'framework': framework,
-        'target_path': target_path,
-        'title': title,
-        'steps': _steps_for_prompt(steps, framework),
-        'evidence': detected.get('evidence', []),
-        'samples': detected.get('samples', []),
-        'keywords': keywords,
-        'output_language': 'Simplified Chinese for progress notes; keep code and identifiers unchanged.',
-    }
+def _extract_plan(text):
+    """从模型回复里抠出任务书。抠不出来返回 (None, 原因)，不抛异常。
 
-
-def _validate(framework, python, workspace, target_path):
-    """返回 (是否通过, 输出)。缺工具时 toolchain 会抛 ToolchainError。"""
-    path = Path(workspace) / target_path
-    if framework == RF_FRAMEWORK:
-        return toolchain.dryrun(python, path, cwd=str(workspace))
-    return toolchain.tsc_check(workspace)
-
-
-def generate(runner, workspace, model, steps, framework, target_path, title, python=None,
-             overwrite=False, progress=None):
-    """执行一次录制生成。成功返回 {'path', 'changed', 'validated', 'reply'}；失败抛 EmitError（已还原）。
-
-    progress 是可选的 (stage, detail) 回调：生成是同步请求，前端只能看到转圈，
-    阶段由这里推给 progress.EmitProgress，两个窗口共用同一份进度。
+    这一步只负责「把 JSON 拿出来」；是否可用由调用方判定，因为规划已经是独立一步，
+    失败要明确报给用户，而不是悄悄降级。
     """
-    def mark(stage, detail=''):
-        if progress is not None:
-            progress(stage, detail)
+    if not text:
+        return None, '规划没有返回内容'
+    raw = None
+    fenced = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.S)
+    if fenced:
+        raw = fenced.group(1)
+    else:
+        start, end = text.find('{'), text.rfind('}')
+        if start >= 0 and end > start:
+            raw = text[start:end + 1]
+    if not raw:
+        return None, '规划回复里没有 JSON'
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        return None, '任务书不是合法 JSON：%s' % exc
+    if not isinstance(data, dict):
+        return None, '任务书不是对象'
+    if not isinstance(data.get('steps'), list):
+        data['steps'] = []
+    return data, None
 
+
+def _normalize_plan(plan, target_path):
+    """把任务书整理成「路径只当建议」的形状。
+
+    模型确实会顺手改 target_path（这次就改了：它读了 playwright.config.ts，
+    发现 testDir 是 ./tests，于是把根目录的 spec 挪进了 tests/ai-chat/）。
+    这个判断可能对，但**不能由它直接决定写哪里**：写路径要经过用户确认，
+    而且验收和权限也只认请求里的 target_path。所以这里把原值强制写回，
+    它改过的路径降级成 target_path_suggestion，交给界面展示。
+    """
+    data = dict(plan)
+    raw_path = str(data.get('target_path') or '').strip().replace('\\', '/')
+    explicit = str(data.get('target_path_suggestion') or '').strip().replace('\\', '/')
+    reason = str(data.get('target_path_reason') or '').strip()
+    suggestion = explicit or raw_path
+
+    data['target_path'] = target_path
+    if suggestion and suggestion != target_path and target_ok(suggestion):
+        data['target_path_suggestion'] = suggestion
+        data['target_path_reason'] = reason or '规划认为这个位置更符合项目约定'
+    else:
+        data.pop('target_path_suggestion', None)
+        data.pop('target_path_reason', None)
+
+    steps = []
+    for item in data.get('steps') or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            no = int(item.get('no'))
+        except (TypeError, ValueError):
+            continue
+        step = {'no': no, 'action': 'reuse' if item.get('action') == 'reuse' else 'write'}
+        for key in ('target', 'args', 'note'):
+            if item.get(key) is not None:
+                step[key] = item[key]
+        steps.append(step)
+    data['steps'] = steps
+    data['reusable'] = [x for x in (data.get('reusable') or []) if isinstance(x, dict)][:50]
+    return data
+
+
+def _step_numbers(steps):
+    out = []
+    for step in steps or []:
+        if isinstance(step, dict):
+            step = step.get('no')
+        try:
+            out.append(int(step))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(out))
+
+
+def steps_signature(steps):
+    """录制步骤的指纹：序号 + 动作 + 元素别名。
+
+    只比步骤号不够：删掉第 2 步再补一个新第 2 步，号对得上、内容已经完全变了。
+    """
+    parts = []
+    for step in steps or []:
+        target = step.get('target') or {}
+        parts.append('%s:%s:%s' % (step.get('no'), step.get('type'), target.get('alias') or ''))
+    return '|'.join(parts)
+
+
+def plan_matches_steps(plan, steps):
+    """任务书必须覆盖且只覆盖当前录制的步骤。
+
+    录制被改过（删了一步、又加了一步）之后，旧任务书就不再可信：
+    note 里写的还是旧步骤的做法，照它写会漏步骤或者写错顺序。
+    """
+    if _step_numbers((plan or {}).get('steps')) != _step_numbers(steps):
+        return False
+    sig = (plan or {}).get('steps_sig')
+    return not sig or sig == steps_signature(steps)
+
+
+def _prepare(workspace, steps, framework, target_path):
+    """规划和写入共用的入口校验：路径、框架、步骤、以及「元素还在不在」。"""
     if not target_ok(target_path):
         raise EmitError('目标路径无效：必须是工作区内的相对路径，不能含 .. 或 * ? [ ]')
     root = Path(workspace).resolve()
@@ -336,6 +503,129 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
             % '、'.join(str(n) for n in blocked),
             details=['missing:%s' % n for n in blocked],
         )
+    return root, degraded
+
+
+def plan(runner, workspace, model, steps, framework, target_path, title, python=None,
+         feedback=None, previous_plan=None, progress=None):
+    """只跑规划：读项目、出任务书，不写任何文件。
+
+    返回值里的 plan 已经归一化：target_path 一定是请求里的路径，
+    模型想改的那条只出现在 target_path_suggestion 里。
+    """
+    def mark(stage, detail=''):
+        if progress is not None:
+            progress(stage, detail)
+
+    root, _ = _prepare(workspace, steps, framework, target_path)
+    mark('planning')
+    try:
+        text = runner.emit_planning(
+            root, model,
+            _plan_prompt(_plan_payload(framework, steps, target_path, title,
+                                       feedback=feedback, previous_plan=previous_plan)),
+        )
+    except Exception as exc:
+        raise EmitError('规划失败：%s' % (str(exc) or exc.__class__.__name__))
+
+    data, error = _extract_plan(text)
+    if data is None:
+        raise EmitError('任务书解析失败：%s' % error, details=[(text or '')[:500]])
+    data = _normalize_plan(data, target_path)
+    # 指纹由服务端算，不采信模型给的：写入时要拿它判断「录制有没有变过」。
+    data['steps_sig'] = steps_signature(steps)
+    if not data['steps']:
+        raise EmitError('任务书没有覆盖任何录制步骤，请重试或换一个模型')
+    if not plan_matches_steps(data, steps):
+        raise EmitError('任务书与录制步骤对不上（录制可能变过），请重新规划')
+    size = len(json.dumps(data, ensure_ascii=False))
+    if size > MAX_PLAN_BYTES:
+        raise EmitError('任务书过大（%d 字符），请重新规划' % size)
+
+    logger.info('录制规划：%s 步 / %s 个复用项 / %s 项额外改动 / %s 字符',
+                len(data['steps']), len(data['reusable']), len(data.get('needs') or []), size)
+    logger.debug('录制规划：任务书全文 %s', json.dumps(data, ensure_ascii=False))
+    return {
+        'plan': data,
+        'target_path': target_path,
+        'suggestion': data.get('target_path_suggestion'),
+        'reason': data.get('target_path_reason'),
+        'steps': len(data['steps']),
+        'chars': size,
+    }
+
+
+def _prompt(payload):
+    head = (
+        '请按下面的录制结果写入一个测试文件。\n'
+        '只写 target_path 指定的文件，不写其他文件。\n'
+        '- 唯一允许写入的路径就是最外层 target_path。任务书里若出现别的路径'
+        '（包括 plan.target_path、plan.target_path_suggestion），一律不要采用，'
+        '也不要据此新建目录或文件。\n'
+    )
+    if payload.get('plan'):
+        head += (
+            '本次已经有人替你读过项目，任务书在 plan 字段里。按它写：\n'
+            '- project_style 是这套项目真实的写法，优先于下面任何通用规则；两者冲突时以 project_style 为准。\n'
+            '- reusable 里列出的封装只要能覆盖某一步，就必须调用它，不要自己重写同样的动作。\n'
+            '- steps 里标 reuse 的步骤按 target 和 args 调用；标 write 的步骤用录制的定位手写。\n'
+            '- needs 里列出的文件你没有写权限，不要尝试改，也不要把它们的内容复制进来。\n'
+        )
+    else:
+        head += (
+            '没有任务书：动笔之前先自己看一眼项目和已有用例，跟上它们的写法再写。\n'
+        )
+    if payload.get('plan_feedback'):
+        head += (
+            '用户对任务书提了修改意见（plan_feedback：quote 是原文，comment 是他的要求）。\n'
+            '这些意见优先于任务书本身：两者冲突时按用户意见写。\n'
+        )
+    return (
+        head
+        + LOCATOR_RULES
+        + FRAMEWORK_RULES.get(payload.get('framework'), '')
+        + '```json\n' + json.dumps(payload, ensure_ascii=False, indent=2) + '\n```\n'
+    )
+
+
+def _payload(framework, steps, target_path, title, detected, keywords, plan=None,
+             plan_feedback=None):
+    return {
+        'framework': framework,
+        'target_path': target_path,
+        'title': title,
+        'steps': _steps_for_prompt(steps, framework),
+        'evidence': detected.get('evidence', []),
+        'samples': detected.get('samples', []),
+        'keywords': keywords,
+        'plan': plan,
+        # 用户对任务书的意见：选中片段 + 他自己的话。写手必须照这个改，
+        # 否则「选中后评价」只是界面上的装饰。
+        'plan_feedback': _clean_feedback(plan_feedback),
+        'output_language': 'Simplified Chinese for progress notes; keep code and identifiers unchanged.',
+    }
+
+
+def _validate(framework, python, workspace, target_path):
+    """返回 (是否通过, 输出)。缺工具时 toolchain 会抛 ToolchainError。"""
+    path = Path(workspace) / target_path
+    if framework == RF_FRAMEWORK:
+        return toolchain.dryrun(python, path, cwd=str(workspace))
+    return toolchain.tsc_check(workspace, target_path=target_path)
+
+
+def generate(runner, workspace, model, steps, framework, target_path, title, python=None,
+             overwrite=False, plan=None, plan_feedback=None, progress=None):
+    """按任务书写入脚本。成功返回 {'path', 'changed', 'validated', 'reply', 'plan'}。
+
+    这里**不再跑规划**：规划是独立的一步（见 plan），任务书由用户确认后随请求带进来。
+    传 plan=None 仍然可以写，但那只用于测试/兜底；产品入口要求必须有任务书。
+    """
+    def mark(stage, detail=''):
+        if progress is not None:
+            progress(stage, detail)
+
+    root, degraded = _prepare(workspace, steps, framework, target_path)
 
     # 检测结果只作提示（决策 12），与用户选择的框架不一致时也不阻止，由返回值中的 detected 说明。
     mark('detect')
@@ -357,6 +647,15 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         raise EmitError('目标文件已存在：%s。请选择覆盖或改名。' % target_path,
                         details=['conflict:' + target_path])
 
+    if plan:
+        reusable = plan.get('reusable') or []
+        needs = plan.get('needs') or []
+        logger.info('录制生成：按任务书写入 %s 个复用项 / %s 项额外改动 / 风格=%s',
+                    len(reusable), len(needs),
+                    (plan.get('project_style') or {}).get('runner') or '未说明')
+    else:
+        logger.warning('录制生成：没有任务书，写手自己看项目')
+
     before = None
     try:
         # 快照本身也可能失败（git 异常、目录不可读），必须放在 try 里，否则会变成没有原因的 500。
@@ -365,12 +664,14 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         mark('writing')
         reply = runner.emit_recording(
             root, model,
-            _prompt(_payload(framework, steps, target_path, title, detected, keywords)),
+            _prompt(_payload(framework, steps, target_path, title, detected, keywords,
+                             plan, plan_feedback)),
             writable=target_path,
         )
         mark('check')
         if not target_abs.is_file():
-            raise EmitError('agent 没有写出目标文件', details=[reply[:500]] if reply else [])
+            raise EmitError('agent 没有写出目标文件：%s' % target_path,
+                            details=_missing_target_details(before, target_path, reply))
 
         mark('validate')
         validated, output = _check_with_repair(
@@ -378,7 +679,7 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
             progress=progress,
         )
         if not validated:
-            raise EmitError('校验未通过，已删除本次写出的文件' if not existed else '校验未通过',
+            raise EmitError('校验未通过' if existed else '校验未通过，文件已保留',
                             details=[output] + _target_hint(target_path, existed))
     except EmitError as exc:
         raise _abort(target_abs, exc, target_path, existed)
@@ -398,9 +699,31 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         'framework': framework,
         'detected': detected.get('framework'),
         'reply': reply,
+        # 任务书：前端/记录页用它展示「这次打算复用哪些现成封装」。
+        'plan': plan,
         # 哪些步骤是降级生成的（定位不唯一，按第 n 个匹配写入），前端据此提醒用户回放确认。
         'degraded': degraded,
     }
+
+
+def _missing_target_details(before, target_path, reply):
+    """目标文件没写出来时，先看看它是不是写到了别的目录。
+
+    上一版就是栽在这里：规划把 tests/ai-chat/xxx.spec.ts 当成目标，写手照做了，
+    验收却按根目录的 xxx.spec.ts 找，最后报「没写出文件」——文件其实在，只是没人告诉用户在哪。
+    """
+    details = []
+    if before is not None:
+        try:
+            stray = [p for p in guard.changed(before) if p != target_path]
+        except Exception:  # 快照读取失败不该盖住真正的原因
+            stray = []
+        if stray:
+            details.append('本次实际写出了这些文件：' + '、'.join(stray[:5]))
+            details.append('目标路径是 %s；如果不是你想要的位置，请改目标文件后重新生成' % target_path)
+    if reply and not details:
+        details.append(reply[:500])
+    return details
 
 
 def _target_hint(target_path, existed):
@@ -411,15 +734,23 @@ def _target_hint(target_path, existed):
 
 
 def _abort(target_abs, error, target_path, existed):
-    """失败收尾：本次产出的目标文件（原本不存在）删掉；原本存在则保留并说明怎么恢复。"""
+    """失败收尾：**不删**本次写出的文件。
+
+    以前是「原本不存在就删掉」，结果一次无关的校验错误（比如项目基线里的类型错误）
+    会把已经写对的内容一起抹掉，用户还得从 opencode 的库里捞回来。校验失败只说明
+    「还不能直接用」，不说明「内容一无是处」——保留下来让人看一眼更划算。
+    """
     if existed:
         error.details = list(error.details) + _target_hint(target_path, existed)
         return error
     try:
-        if target_abs.is_file():
-            target_abs.unlink()
+        kept = target_abs.is_file()
     except OSError:
-        pass
+        kept = False
+    if kept:
+        error.details = list(error.details) + [
+            '本次写出的文件已保留：%s（校验未通过，可手动修改或删除）' % target_path
+        ]
     return error
 
 

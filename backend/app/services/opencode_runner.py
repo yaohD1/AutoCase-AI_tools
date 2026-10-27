@@ -1311,9 +1311,11 @@ class OpenCodeRunner:
         写权限交给 opencode 自己在工具调用前拦，比事后回滚可靠得多。四个细节（都是实测出来的）：
         - 写文件权限匹配的是**相对工作区的路径**：opencode 调用的是
           `ask({permission:"edit", patterns:[path.relative(worktree, filepath)]})`，
-          所以白名单的主规则必须是相对路径本身。`**/x` 只适合带目录前缀的文件，
-          根目录下的 `x.spec.ts` 命中不了它——这正是「模式在允许列表里却仍被全局 deny
-          拦住」的原因。绝对路径留给 external_directory 那种场景，这里保留只是兜底。
+          所以白名单的主规则必须是相对路径本身。绝对路径留给 external_directory 那种场景，
+          这里保留只是兜底。
+        - **不要加 `**/文件名`**：那条 glob 会匹配任意目录下的同名文件，等于把
+          「只允许写一个文件」变成「只允许写一个文件名」。上一版就是靠它，让模型把
+          `test-corekg.spec.ts` 写进了 `tests/ai-chat/`，然后验收按原路径找不到。
         - 临时配置必须和原配置放在**同一目录**：配置里的 `{file:.opencode/prompts/...}`
           是按配置文件所在目录解析的，挪到别处会让 agent 的提示词全部加载失败。
         - `edit` 权限覆盖 edit / write / apply_patch 三种写文件途径，`write` 再写一遍是冗余保险；
@@ -1333,9 +1335,8 @@ class OpenCodeRunner:
             raise RuntimeError('OpenCode 配置里缺少 recording-emitter agent，无法限定写权限')
         rel = str(writable).replace('\\', '/')
         absolute = Path(workspace).resolve() / rel
-        # 第一版把 `**/rel` 当主规则，结果根目录文件一条都命中不了（见上面的注释）。
         rule = {'*': 'deny'}
-        for pattern in (rel, './' + rel, '**/' + rel, absolute.as_posix()):
+        for pattern in (rel, './' + rel, absolute.as_posix()):
             rule.setdefault(pattern, 'allow')
         native = str(absolute)
         if native != absolute.as_posix():
@@ -1364,12 +1365,27 @@ class OpenCodeRunner:
 
         return path, drop
 
-    def emit_recording(self, workspace, model, prompt, timeout=600, writable=None):
-        """录制生成专用：在目标工作区内运行 recording-emitter，等它结束后返回最后的文本回复。
+    def emit_planning(self, workspace, model, prompt, timeout=240):
+        """规划阶段：只读 agent 扫一遍项目，产出一份任务书（JSON 文本）。
+
+        writable 传 None 表示不改写权限配置，直接用项目里 recording-planner 的定义——
+        那个 agent 的 permission 已经是 edit/write 全 deny，读得到项目、写不了任何文件。
+        规划失败不该让整次生成失败，调用方负责降级（见 emit._plan）。
+        """
+        return self.emit_recording(
+            workspace, model, prompt, timeout=timeout, writable=None,
+            agent='recording-planner', title='AutoCase recording plan',
+        )
+
+    def emit_recording(self, workspace, model, prompt, timeout=600, writable=None,
+                       agent='recording-emitter', title='AutoCase recording emit'):
+        """录制生成专用：在目标工作区内运行指定 agent，等它结束后返回最后的文本回复。
 
         与 run() 不同，这里只有一个 agent、一个会话，不写 manifest，也不做 heal 记录。
         serve 的工作目录就是目标工作区，agent 能读到项目里已有的文件与库。
         writable 给出时，agent 只被允许写这一个文件，其余写入由 opencode 直接拒绝。
+        agent 默认是写脚本的 recording-emitter；规划阶段传 recording-planner，
+        那个 agent 自己的 permission 就是全 deny，所以 writable 传 None 也不会放权。
         """
         model_ref = self._split_model(model)
         if model_ref is None:
@@ -1384,7 +1400,7 @@ class OpenCodeRunner:
             self._wait_serve_healthy(base_url, process, 60)
             created = requests.post(
                 f'{base_url}/session',
-                json={'title': 'AutoCase recording emit', 'agent': 'recording-emitter', 'model': model_ref},
+                json={'title': title, 'agent': agent, 'model': model_ref},
                 timeout=30,
             )
             if created.status_code not in (200, 201):
@@ -1394,7 +1410,7 @@ class OpenCodeRunner:
                 raise RuntimeError('OpenCode 没有返回会话 id')
             body = {
                 'parts': [{'type': 'text', 'text': prompt}],
-                'agent': 'recording-emitter',
+                'agent': agent,
                 'model': {'providerID': model_ref['providerID'], 'modelID': model_ref['id']},
             }
             sent = requests.post(f'{base_url}/session/{session_id}/prompt_async', json=body, timeout=60)

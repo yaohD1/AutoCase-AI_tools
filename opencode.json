@@ -155,7 +155,45 @@
         "grep": true,
         "read": true,
         "edit": true,
-        "write": true
+        "write": true,
+        "bash": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "apply_patch": false,
+        "submit_plan": false,
+        "skill": false
+      }
+    },
+    "recording-planner": {
+      "description": "Use this agent to survey an existing project and produce a task sheet (JSON) for one recorded test flow. Read-only: it never writes files. Only called by the AutoCase recording feature, before recording-emitter.",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/prompts/recording-planner.md}",
+      "permission": {
+        "edit": {
+          "*": "deny"
+        },
+        "write": {
+          "*": "deny"
+        },
+        "bash": {
+          "*": "deny"
+        }
+      },
+      "tools": {
+        "ls": true,
+        "glob": true,
+        "grep": true,
+        "read": true,
+        "edit": false,
+        "write": false,
+        "bash": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "apply_patch": false,
+        "submit_plan": false,
+        "skill": false
       }
     }
   }

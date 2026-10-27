@@ -1,3 +1,4 @@
+import json
 import shutil
 import sys
 import tempfile
@@ -21,14 +22,27 @@ def _rf_step(no=1, text='输入用户名'):
 
 
 class FakeRunner(object):
-    """按顺序执行每次 emit 调用的动作：动作接收工作区路径，模拟 agent 写文件。"""
+    """按顺序执行每次 emit 调用的动作：动作接收工作区路径，模拟 agent 写文件。
 
-    def __init__(self, *actions):
+    规划（emit_planning）单独记一份 prompt：它和写手的提示词是两份东西，
+    混在一起断言分不清是「谁看到了什么」。
+    """
+
+    def __init__(self, *actions, plan=None, plan_error=None):
         self.actions = list(actions)
         self.prompts = []
         self.writables = []
+        self.plan_text = plan
+        self.plan_error = plan_error
+        self.plan_prompts = []
 
-    def emit_recording(self, workspace, model, prompt, timeout=600, writable=None):
+    def emit_planning(self, workspace, model, prompt, timeout=240):
+        self.plan_prompts.append(prompt)
+        if self.plan_error:
+            raise RuntimeError(self.plan_error)
+        return self.plan_text if self.plan_text is not None else '{}'
+
+    def emit_recording(self, workspace, model, prompt, timeout=600, writable=None, **kwargs):
         self.prompts.append(prompt)
         self.writables.append(writable)
         if not self.actions:
@@ -53,6 +67,17 @@ KEYWORDS = [{'name': 'Input Text', 'args': ['locator', 'text', 'clear']}]
 PATCH_KW = mock.patch.object(toolchain, 'export_keywords', return_value={'keywords': KEYWORDS})
 
 
+PLAN = {
+    'project_style': {'runner': 'custom TestModule', 'assertion': 'throw new Error'},
+    'reusable': [{'file': 'src/pages/LoginPage.ts', 'symbol': 'LoginPage.login',
+                  'import': "import { LoginPage } from '../../src/pages/LoginPage';",
+                  'usage': 'await new LoginPage(page).login(u, p);'}],
+    'steps': [{'no': 1, 'action': 'reuse', 'target': 'LoginPage.login',
+               'note': '直接调 LoginPage.login'}],
+    'target_path': TARGET,
+}
+
+
 class EmitTest(unittest.TestCase):
     def setUp(self):
         self.ws = Path(tempfile.mkdtemp(prefix='emit-ws-'))
@@ -61,10 +86,12 @@ class EmitTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.ws, ignore_errors=True)
 
-    def _gen(self, runner, dryrun_results, target=TARGET, overwrite=False, steps=None):
+    def _gen(self, runner, dryrun_results, target=TARGET, overwrite=False, steps=None, plan=None,
+             plan_feedback=None):
         with PATCH_KW, mock.patch.object(toolchain, 'dryrun', side_effect=dryrun_results):
             return emit.generate(runner, self.ws, 'p/m', steps or [_rf_step()], 'robot-selenium',
-                                 target, 'Login', python=sys.executable, overwrite=overwrite)
+                                 target, 'Login', python=sys.executable, overwrite=overwrite,
+                                 plan=plan, plan_feedback=plan_feedback)
 
     def test_success_writes_only_the_target_file(self):
         runner = FakeRunner(write(TARGET, ROBOT()))
@@ -84,6 +111,101 @@ class EmitTest(unittest.TestCase):
         bs = chr(92)
         self.assertIn('"locator": "css=[id=' + bs + '"user' + bs + '"]"', runner.prompts[0])
         self.assertIn('"target_path": "tests/login.robot"', runner.prompts[0])
+
+    def test_generate_uses_the_confirmed_plan_and_does_not_plan_again(self):
+        """规划已经独立成一步：写入只认传进来的任务书，不许自己再烧一次模型调用。"""
+        runner = FakeRunner(write(TARGET, ROBOT()))
+        result = self._gen(runner, [(True, 'ok')], plan=PLAN)
+
+        self.assertEqual(runner.plan_prompts, [], '写入阶段不该再跑规划')
+        self.assertIn('LoginPage.login', runner.prompts[0], '复用项要进写手的提示词')
+        self.assertIn('custom TestModule', runner.prompts[0], '项目风格要进写手的提示词')
+        self.assertEqual(result['plan']['steps'][0]['action'], 'reuse')
+        # 写权限只在写入阶段申请一次。
+        self.assertEqual(runner.writables, [TARGET])
+
+    def test_user_feedback_on_the_plan_reaches_the_writer(self):
+        """用户在任务书上选中片段写的意见，必须原样进写手提示词，否则界面上的批注只是装饰。"""
+        runner = FakeRunner(write(TARGET, ROBOT()))
+        self._gen(runner, [(True, 'ok')], plan=PLAN, plan_feedback=[
+            {'quote': 'page.getByText("登 录")', 'comment': '用 getByRole("button")，文本里有空格'},
+            {'quote': '', 'comment': '账号密码走环境变量'},
+            {'quote': '空的', 'comment': '   '},
+        ])
+        prompt = runner.prompts[0]
+        self.assertIn('用 getByRole', prompt)
+        self.assertIn('账号密码走环境变量', prompt)
+        self.assertNotIn('空的', prompt, '空意见不该占提示词')
+
+    def test_plan_forces_target_path_and_keeps_the_model_suggestion(self):
+        """模型改过的路径只能当建议：写入路径、权限与验收都只认请求里的 target_path。"""
+        changed = json.dumps({
+            'steps': [{'no': 1, 'action': 'write', 'note': 'x'}],
+            'target_path': 'tests/ai-chat/login.robot',
+            'target_path_reason': 'playwright.config.ts 的 testDir 是 ./tests',
+        }, ensure_ascii=False)
+        runner = FakeRunner(plan=changed)
+        result = emit.plan(runner, self.ws, 'p/m', [_rf_step()], 'robot-selenium',
+                           TARGET, 'Login', python=sys.executable)
+
+        self.assertEqual(result['plan']['target_path'], TARGET)
+        self.assertEqual(result['suggestion'], 'tests/ai-chat/login.robot')
+        self.assertIn('testDir', result['reason'])
+        self.assertEqual(result['steps'], 1)
+        self.assertEqual(runner.prompts, [], '规划不该写文件')
+
+    def test_plan_failure_is_reported_not_swallowed(self):
+        """规划已经是独立一步：失败要明确报错，不能悄悄降级成「没有任务书」。"""
+        runner = FakeRunner(plan_error='模型超时')
+        with self.assertRaises(emit.EmitError) as ctx:
+            emit.plan(runner, self.ws, 'p/m', [_rf_step()], 'robot-selenium', TARGET, 'Login')
+        self.assertIn('模型超时', str(ctx.exception))
+
+    def test_plan_must_cover_every_recorded_step(self):
+        runner = FakeRunner(plan=json.dumps({'steps': [{'no': 2, 'action': 'write'}]}))
+        with self.assertRaises(emit.EmitError) as ctx:
+            emit.plan(runner, self.ws, 'p/m', [_rf_step()], 'robot-selenium', TARGET, 'Login')
+        self.assertIn('对不上', str(ctx.exception))
+        self.assertTrue(emit.plan_matches_steps({'steps': [{'no': '1'}]}, [_rf_step()]))
+        # 步骤号一样、内容换了（删了再补一个新第 1 步）也要判成过期。
+        self.assertFalse(emit.plan_matches_steps(
+            {'steps': [{'no': 1}], 'steps_sig': '1:click:别的元素'}, [_rf_step()]))
+
+    def test_plan_prompt_forbids_rewriting_target_path(self):
+        text = emit._plan_prompt(emit._plan_payload('playwright-ts', [_rf_step()], TARGET, 'Login',
+                                                   feedback=[{'quote': 'q', 'comment': 'c'}]))
+        self.assertIn('必须原样返回', text)
+        self.assertIn('feedback', text)
+        self.assertIn('"comment": "c"', text)
+
+    def test_writer_prompt_forbids_using_the_plan_path(self):
+        prompt = emit._prompt({'framework': 'robot-selenium', 'target_path': TARGET,
+                               'steps': [], 'plan': PLAN})
+        self.assertIn('唯一允许写入的路径', prompt)
+        self.assertIn('plan.target_path', prompt)
+
+    def test_plan_json_survives_code_fence_and_chatter(self):
+        """模型常把 JSON 包进 ```json 或前面加一句废话，都要能抠出来。"""
+        plan, error = emit._extract_plan('好的，任务书如下：\n```json\n{"steps": [{"no": 1}]}\n```\n')
+        self.assertIsNone(error)
+        self.assertEqual(plan['steps'], [{'no': 1}])
+
+        plan, error = emit._extract_plan('{"project_style": {"runner": "x"}}')
+        self.assertIsNone(error)
+        self.assertEqual(plan['steps'], [], '缺 steps 要补成空数组，否则后面按步对账会炸')
+
+        plan, error = emit._extract_plan('我不知道')
+        self.assertIsNone(plan)
+        self.assertIn('没有 JSON', error)
+
+    def test_plan_prompt_does_not_carry_locator_candidates(self):
+        """规划只判断「项目里有没有现成封装」，喂候选定位串纯属浪费 token。"""
+        payload = emit._plan_payload('robot-selenium', [_rf_step()], TARGET, 'Login')
+        text = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn('candidates', text)
+        self.assertNotIn('css=[id=', text)
+        self.assertIn('"no": 1', text)
+        self.assertIn('"tag": "input"', text)
 
     def test_out_of_scope_write_is_reported_but_not_reverted(self):
         existing = self.ws / 'other.robot'
@@ -116,11 +238,28 @@ class EmitTest(unittest.TestCase):
         self.assertEqual(existing.read_text(encoding='utf-8'), 'still bad')
         self.assertTrue(any('git checkout' in str(d) for d in ctx.exception.details))
 
+    def test_validation_failure_keeps_a_newly_written_file(self):
+        """原来「失败就删」，结果一次无关的校验错误会把已经写对的内容一起抹掉。改成保留。"""
+        runner = FakeRunner(write(TARGET, ROBOT()), write(TARGET, ROBOT()))
+        with self.assertRaises(emit.EmitError) as ctx:
+            self._gen(runner, [(False, 'err1'), (False, 'err2')])
+        self.assertTrue((self.ws / TARGET).is_file(), '校验没过不等于内容没用，不该替用户删')
+        self.assertTrue(any('已保留' in str(d) for d in ctx.exception.details))
+
     def test_no_target_file_is_an_error(self):
         runner = FakeRunner(lambda root: None)
         with self.assertRaises(emit.EmitError) as ctx:
             self._gen(runner, [])
         self.assertIn('没有写出目标文件', str(ctx.exception))
+
+    def test_missing_target_reports_where_the_agent_actually_wrote(self):
+        """模型把文件写到别的目录时，错误里要直接说出写到了哪，而不是只报「没写出」。"""
+        runner = FakeRunner(write('tests/ai-chat/login.robot', ROBOT()))
+        with self.assertRaises(emit.EmitError) as ctx:
+            self._gen(runner, [])
+        details = ' '.join(str(d) for d in ctx.exception.details)
+        self.assertIn('tests/ai-chat/login.robot', details)
+        self.assertIn('目标路径是', details)
 
     def test_existing_target_is_a_conflict_and_agent_is_not_called(self):
         (self.ws / TARGET).parent.mkdir(parents=True, exist_ok=True)

@@ -17,6 +17,56 @@
 
     <div v-if="embedMode && !panelCollapsed && !stepsCollapsed" class="embed-resizer" title="拖动调整面板宽度" @pointerdown="startResize"></div>
 
+    <!-- 定位待确认（录制当场弹）：不唯一的定位过后再选，页面早不是当时的样子了。
+         固定在右上角，不压住左边被测页面里那些带编号的框；放在 page-col 外面，
+         整块面板被收起时也不会跟着隐藏。 -->
+    <div v-if="locConfirm" class="loc-confirm" role="dialog" aria-live="polite" aria-label="定位待确认">
+      <div class="loc-head">
+        <span class="loc-tag">定位待确认</span>
+        <span class="loc-step" :title="locConfirm.label">第 {{ locConfirm.no }} 步 · {{ locConfirm.label }}</span>
+        <el-button class="loc-close" text size="small" :icon="Close" title="稍后再选：步骤保留「不唯一」标记" @click="deferLocConfirm" />
+      </div>
+      <p class="loc-lead">
+        <template v-if="locConfirm.loading">正在把匹配到的元素在页面上框出来…</template>
+        <template v-else-if="locConfirm.count > 1">
+          这一步在页面上匹配到 {{ locConfirm.count }} 个元素，已经按同样的顺序编号框出。
+          <b>现在选，页面还是录制时的样子</b>；过后再选就得靠你自己核对了。
+        </template>
+        <template v-else>当前页面上框不出这一步的元素了，只能按录制时的快照选。</template>
+      </p>
+      <div v-if="locConfirm.items.length" class="loc-list">
+        <button
+          v-for="item in locConfirm.items"
+          :key="item.index"
+          type="button"
+          :class="['loc-item', { 'is-picked': locConfirm.picked === item.index }]"
+          @click="pickLocConfirm(item.index)"
+        >
+          <span class="loc-no">{{ item.index + 1 }}</span>
+          <span class="loc-text">{{ item.row || item.text || ('<' + item.tag + '>') }}</span>
+          <span v-if="locConfirm.active === item.index" class="loc-origin">录制时点的</span>
+          <span v-if="!item.visible" class="loc-hidden">不可见</span>
+        </button>
+      </div>
+      <p v-if="locConfirm.note" class="loc-note">{{ locConfirm.note }}</p>
+      <div class="loc-foot">
+        <span v-if="locQueue.length" class="loc-queue">还有 {{ locQueue.length }} 步待确认</span>
+        <div class="loc-actions">
+          <el-button text size="small" @click="deferLocConfirm">稍后再选</el-button>
+          <el-button
+            v-if="locConfirm.items.length"
+            type="primary"
+            size="small"
+            :disabled="locConfirm.picked == null"
+            :loading="locPicking"
+            @click="acceptLocConfirm"
+          >
+            就这个，继续
+          </el-button>
+        </div>
+      </div>
+    </div>
+
     <div
       v-show="!embedMode || !panelCollapsed"
       class="page-col"
@@ -164,7 +214,7 @@
                 text
                 class="steps-collapse-btn"
                 :icon="stepsCollapsed ? Expand : Fold"
-                :title="stepsCollapsed ? '展开：恢复上移 / 下移 / 删除，面板回到原来的宽度' : '收起：面板变窄，只留拖拽排序与铅笔编辑，避免误删'"
+                :title="stepsCollapsed ? '展开：恢复上移 / 下移（删除一直在），面板回到原来的宽度' : '收起：精简步骤行，只留拖拽排序、铅笔编辑与删除'"
                 @click="toggleStepsCollapsed"
               >
                 {{ stepsCollapsed ? '展开' : '收起' }}
@@ -428,20 +478,21 @@
                 title="编辑这一步的值"
                 @click="startEdit(step)"
               />
-              <!-- 收起后只留铅笔：这三个按钮不 v-if 硬切，交给 .is-off 做宽度过渡，
+              <!-- 收起后只留铅笔与删除：上移 / 下移 不 v-if 硬切，交给 .is-off 做宽度过渡，
                    否则整行文字会瞬移一下，看着很生硬 -->
               <div :class="['step-actions-extra', { 'is-off': stepsCollapsed }]">
                 <el-button text :icon="ArrowUp" :disabled="!canEdit" title="上移" @click="moveStep(step.no, 'up')" />
                 <el-button text :icon="ArrowDown" :disabled="!canEdit" title="下移" @click="moveStep(step.no, 'down')" />
-                <el-button
-                  text
-                  type="danger"
-                  :icon="Delete"
-                  :disabled="!canEdit"
-                  title="删除"
-                  @click="removeStep(step.no)"
-                />
               </div>
+              <!-- 删除常驻（含收起态）：收起才是日常形态，删错一步不该还要先点展开 -->
+              <el-button
+                text
+                class="step-delete-btn"
+                :icon="Delete"
+                :disabled="!canEdit"
+                title="删除这一步"
+                @click="removeStep(step.no)"
+              />
             </div>
           </li>
         </ol>
@@ -684,19 +735,31 @@
             <span class="gen-progress-time">已用 {{ elapsedText }}</span>
           </div>
         </div>
+        <!-- 写入的唯一入口在任务书里（「按此执行」）。这里只负责出任务书，
+             避免又出现一条绕过规划、直接从零写的路。 -->
         <el-button
-          v-else
+          v-else-if="!planState"
           class="generate-btn"
           type="primary"
-          :disabled="!canGenerate"
-          @click="generate(false)"
+          :disabled="!canPlan"
+          @click="runPlan(false)"
         >
-          生成并写入工作区
+          生成任务书
         </el-button>
-        <div v-if="!generating && !canGenerate && generateBlockReason" class="gen-block-reason">
+        <div v-else class="gen-plan-ready">
+          <span class="check-dot ok"></span>
+          任务书已就绪 · {{ planSteps.length }} 步 · 复用 {{ planReusable.length }} 项
+          <span class="gen-plan-ready-hint">确认后到任务书里点「按此执行」</span>
+        </div>
+        <div v-if="!generating && !planState && !canPlan && generateBlockReason" class="gen-block-reason">
           <span class="gen-block-dot"></span>{{ generateBlockReason }}
         </div>
-        <div v-else-if="!generating" class="field-hint">写入的只有目标文件。校验失败会自动还原，不会留下半成品。</div>
+        <div v-else-if="!generating && !planState" class="field-hint">
+          任务书只读项目、不写文件；你确认之后才会写入目标文件。
+        </div>
+        <div v-else-if="!generating" class="field-hint">
+          写入只在任务书里触发；改了录制步骤需要重新生成任务书。
+        </div>
 
         <div v-if="shownError" class="gen-error">
           <div class="gen-error-title">{{ shownError.message }}</div>
@@ -772,8 +835,175 @@
           </div>
         </div>
       </el-card>
+
+      <!-- 任务书：规划和写入之间的唯一闸门。
+           用户可以选中任意片段写意见，意见会随「按此执行」交给写手；
+           想改整体方向就点「重新规划」，把意见一起带给规划 agent。 -->
+      <el-card v-if="isStopped && (planData || shownPlanError)" ref="planCard" class="panel-card plan-card">
+        <template #header>
+          <div class="section-header">
+            <span class="card-title">任务书</span>
+            <span v-if="planData" class="plan-head-meta">
+              {{ planSteps.length }} 步 · 复用 {{ planReusable.length }} 项
+            </span>
+          </div>
+        </template>
+
+        <div v-if="shownPlanError" class="gen-error">
+          <div class="gen-error-title">{{ shownPlanError.message }}</div>
+          <ul v-if="shownPlanError.details && shownPlanError.details.length" class="gen-error-list">
+            <li v-for="(item, idx) in shownPlanError.details" :key="idx">{{ detailText(item) }}</li>
+          </ul>
+          <div class="plan-actions">
+            <el-button size="small" type="primary" :loading="planRunning" @click="runPlan(true)">重试规划</el-button>
+          </div>
+        </div>
+
+        <template v-if="planData">
+          <div v-if="planStale" class="plan-stale">
+            录制步骤已经变了，这份任务书对不上。请重新规划后再执行。
+          </div>
+
+          <div ref="planBody" class="plan-body" @mouseup="onPlanSelect" @mousedown="clearSelTip">
+            <div class="plan-block">
+              <div class="plan-block-title">项目风格</div>
+              <div class="plan-kv"><span>runner</span><b>{{ planStyle.runner || '—' }}</b></div>
+              <div class="plan-kv"><span>断言</span><b>{{ planStyle.assertion || '—' }}</b></div>
+              <div v-if="planStyle.import_sample" class="plan-kv">
+                <span>import</span><code>{{ planStyle.import_sample }}</code>
+              </div>
+              <div v-if="planStyle.notes" class="plan-style-note">{{ planStyle.notes }}</div>
+            </div>
+
+            <div class="plan-block">
+              <div class="plan-block-title">目标文件</div>
+              <div class="plan-target">
+                <code>{{ config.targetPath.trim() }}</code>
+                <span v-if="!planSuggestion" class="plan-path-ok">与当前配置一致</span>
+              </div>
+              <div v-if="planSuggestion" class="plan-suggest">
+                <div class="plan-suggest-title">
+                  规划建议改到 <code>{{ planSuggestion }}</code>
+                </div>
+                <div v-if="planResult.reason" class="plan-suggest-reason">{{ planResult.reason }}</div>
+                <el-button size="small" type="warning" plain @click="adoptSuggestion">采用这个路径</el-button>
+                <div class="field-hint">不采用也没关系：写入只会落在上面的目标文件。</div>
+              </div>
+            </div>
+
+            <div class="plan-block">
+              <div class="plan-block-title">可复用的封装</div>
+              <div v-if="!planReusable.length" class="field-hint">
+                项目里没有找到能覆盖这些步骤的现成封装，这次全部手写。
+              </div>
+              <ul v-else class="plan-reuse">
+                <li v-for="(item, idx) in planReusable" :key="idx">
+                  <code>{{ item.symbol || item.file || item }}</code>
+                  <span v-if="item.file && item.symbol" class="plan-reuse-file">{{ item.file }}</span>
+                  <span v-if="item.usage" class="plan-reuse-use">{{ item.usage }}</span>
+                </li>
+              </ul>
+            </div>
+
+            <div class="plan-block">
+              <div class="plan-block-title">逐步做法（{{ planSteps.length }} 步）</div>
+              <table class="plan-steps">
+                <tr v-for="step in planSteps" :key="step.no">
+                  <td class="plan-step-no">{{ step.no }}</td>
+                  <td :class="['plan-step-action', { reuse: step.action === 'reuse' }]">
+                    {{ step.action === 'reuse' ? '复用' : '手写' }}
+                  </td>
+                  <td class="plan-step-note">{{ step.note || step.target || '—' }}</td>
+                </tr>
+              </table>
+            </div>
+
+            <div v-if="planRisks.length" class="plan-block">
+              <div class="plan-block-title">风险</div>
+              <ul class="plan-risks">
+                <li v-for="(item, idx) in planRisks" :key="idx">{{ item }}</li>
+              </ul>
+            </div>
+
+            <div v-if="planNeeds.length" class="plan-block">
+              <div class="plan-block-title">还想改这些文件（这次没有权限，只记录）</div>
+              <ul class="plan-risks">
+                <li v-for="(item, idx) in planNeeds" :key="idx">
+                  {{ item.path }}<span v-if="item.reason"> — {{ item.reason }}</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="plan-notes">
+            <div class="plan-block-title">
+              你的意见
+              <span class="plan-notes-hint">在任务书里选中一段文字，就能只针对它提要求</span>
+            </div>
+            <div v-if="!planNotes.length" class="field-hint">
+              没有意见就直接执行；有意见会在写入时一并交给 AI。
+            </div>
+            <div v-for="note in planNotes" :key="note.id" class="plan-note">
+              <div v-if="note.quote" class="plan-quote">「{{ note.quote }}」</div>
+              <div class="plan-note-body">{{ note.comment }}</div>
+              <button type="button" class="plan-note-del" @click="removeNote(note.id)">删除</button>
+            </div>
+            <el-button size="small" text @click="openNote('')">补充整体意见</el-button>
+          </div>
+
+          <div class="plan-actions">
+            <el-button size="small" :loading="planRunning" :disabled="generating" @click="runPlan(true)">
+              重新规划
+            </el-button>
+            <el-button
+              size="small"
+              type="primary"
+              :loading="writing"
+              :disabled="!canExecute"
+              @click="executePlan(false)"
+            >
+              按此执行
+            </el-button>
+          </div>
+          <div v-if="!canExecute && executeBlockReason" class="gen-block-reason">
+            <span class="gen-block-dot"></span>{{ executeBlockReason }}
+          </div>
+          <div v-else-if="!writing" class="field-hint">
+            执行只写目标文件；校验失败会保留文件并把错误告诉你。
+          </div>
+        </template>
+      </el-card>
     </div>
     </div>
+
+      <Teleport to="body">
+        <button
+          v-if="selTip.visible"
+          type="button"
+          class="plan-sel-tip"
+          :style="{ left: selTip.x + 'px', top: selTip.y + 'px' }"
+          @mousedown.prevent
+          @click="openNote(selTip.text)"
+        >
+          就这段写意见
+        </button>
+      </Teleport>
+
+      <el-dialog v-model="noteDialog.visible" title="对任务书的意见" width="520px" append-to-body>
+        <div v-if="noteDialog.quote" class="plan-quote">「{{ noteDialog.quote }}」</div>
+        <el-input
+          v-model="noteDialog.comment"
+          type="textarea"
+          :rows="4"
+          maxlength="800"
+          show-word-limit
+          placeholder="例如：这一步必须用 getByRole，不要用 getByText"
+        />
+        <template #footer>
+          <el-button @click="noteDialog.visible = false">取消</el-button>
+          <el-button type="primary" @click="saveNote">添加意见</el-button>
+        </template>
+      </el-dialog>
 
       <PathPickerDialog
         v-model="picker.visible"
@@ -863,14 +1093,21 @@ const panelCollapsed = ref(false)
 const panelWidth = ref(loadPanelWidth())
 const resizing = ref(false)
 
-// 「收起」：精简步骤行（只留铅笔 + 拖拽排序）并把面板一键收窄，替代手动拖动分栏。
-// 不持久化，每次打开面板默认展开。
+// 「收起」：精简步骤行（只留拖拽排序、铅笔编辑与删除）并把面板一键收窄，替代手动拖动分栏。
+// 默认就是收起——实测窄面板 + 精简行最好用；需要上移 / 下移再点「展开」。
+// 独立页面（/recording）没有这个开关，保持展开。
 const LEAN_PANEL_WIDTH = 420
-const stepsCollapsed = ref(false)
+const stepsCollapsed = ref(compactMode.value)
 let widthBeforeLean = 0
 
 function maxPanelWidth() {
   return Math.max(340, Math.min(900, window.innerWidth - 900))
+}
+
+// 默认收起时面板也按收起的宽度打开：只收行不收宽度，和按钮上说的「面板变窄」不一致。
+if (stepsCollapsed.value && embedMode.value) {
+  widthBeforeLean = panelWidth.value
+  panelWidth.value = Math.min(panelWidth.value, LEAN_PANEL_WIDTH, maxPanelWidth())
 }
 
 function toggleStepsCollapsed() {
@@ -973,6 +1210,17 @@ let flashTimer = 0
 const localPending = ref(false)
 const genError = ref(null)
 const genResult = ref(null)
+// 任务书：规划是独立的一次请求，结果留在页面上。写脚本必须从这里点「按此执行」，
+// 界面上不再提供「不规划直接写」的入口。
+const planState = ref(null)      // { result, sig, at }
+const planPending = ref(false)   // 规划请求在飞（服务端进度起来之前补位）
+const planError = ref(null)
+const planNotes = ref([])        // 用户选中任务书片段写的意见
+const planCard = ref(null)
+const planBody = ref(null)
+const noteDialog = reactive({ visible: false, quote: '', comment: '' })
+const selTip = reactive({ visible: false, x: 0, y: 0, text: '' })
+let noteSeq = 0
 // 回放校验：结果只在本次生成后有意义，重新生成时清空
 const replaying = ref(false)
 const replayResult = ref(null)
@@ -1119,14 +1367,16 @@ const pageGoneCount = computed(() => steps.value.filter(s => s.target && s.targe
 // ---- 生成进度（服务端状态，两个窗口共用）----
 const emit = computed(() => session.value?.emit || {})
 const emitRunning = computed(() => emit.value.status === 'running')
-const generating = computed(() => localPending.value || emitRunning.value)
+const planRunning = computed(() => planPending.value || (emitRunning.value && emit.value.mode === 'plan'))
+const writing = computed(() => localPending.value || (emitRunning.value && emit.value.mode !== 'plan'))
+const generating = computed(() => planRunning.value || writing.value)
 
 // 阶段百分比只给基准值，模型写脚本的耗时装不出来：按 stage_at 指数逼近 cap，
 // 前 20 秒爬得快、越接近上限越慢，既不卡死也不会提前满格。
 const nowTick = ref(Date.now() / 1000)
 const emitPercent = computed(() => {
   const e = emit.value
-  if (localPending.value && !emitRunning.value) return 5
+  if (!emitRunning.value && generating.value) return 4
   if (!e || e.status !== 'running') return Math.round(e?.percent || 0)
   const base = e.percent || 0
   const cap = e.cap || base
@@ -1134,12 +1384,15 @@ const emitPercent = computed(() => {
   return Math.min(cap, Math.round(base + (cap - base) * (1 - Math.exp(-t / 25))))
 })
 const emitLabel = computed(() => {
-  if (localPending.value && !emitRunning.value) return '正在准备'
+  if (!emitRunning.value && generating.value) return planRunning.value ? '正在准备规划' : '正在准备写入'
   return emit.value.label || '正在准备'
 })
 const emitDetail = computed(() => {
-  if (localPending.value && !emitRunning.value) return '正在提交生成请求'
-  return emit.value.detail || '写入的只有目标文件，校验失败会自动还原'
+  if (!emitRunning.value && generating.value) {
+    return planRunning.value ? '正在提交规划请求' : '正在提交写入请求'
+  }
+  if (emit.value.mode === 'plan') return emit.value.detail || '只读项目，通常需要 1~2 分钟'
+  return emit.value.detail || '写入的只有目标文件；校验失败会保留文件'
 })
 const elapsedText = computed(() => {
   const start = emit.value.started_at
@@ -1152,16 +1405,45 @@ const elapsedText = computed(() => {
 // 另一个窗口跑完 / 跑挂时，这里也要能看到同一条结果，而不是只剩一个「还能点」的按钮。
 const shownError = computed(() => {
   if (genError.value) return genError.value
-  return emit.value.status === 'failed' ? emit.value.error : null
+  // 规划失败要显示在任务书卡片里，别和写入失败混在一起。
+  return emit.value.status === 'failed' && emit.value.mode !== 'plan' ? emit.value.error : null
+})
+const shownPlanError = computed(() => {
+  if (planError.value) return planError.value
+  return emit.value.status === 'failed' && emit.value.mode === 'plan' ? emit.value.error : null
 })
 const shownResult = computed(() => {
   const local = genResult.value
-  if (!local) return emit.value.status === 'done' ? emit.value.result : null
+  if (!local) {
+    const remote = emit.value.status === 'done' ? emit.value.result : null
+    // 规划结束也是 done，但它没有 path：不能拿它冒充一次写入结果。
+    return remote && remote.path ? remote : null
+  }
   // 服务端更近一次生成的结果优先，避免这个窗口还挂着上一次的路径。
   if (emit.value.status === 'done' && emit.value.result
       && emit.value.result.generation_id !== local.generation_id) return emit.value.result
   return local
 })
+
+// ---- 任务书（plan）----
+const planResult = computed(() => planState.value?.result || null)
+const planData = computed(() => planResult.value?.plan || null)
+const planStyle = computed(() => planData.value?.project_style || {})
+const planSteps = computed(() => planData.value?.steps || [])
+const planReusable = computed(() => planData.value?.reusable || [])
+const planRisks = computed(() => planData.value?.risks || [])
+const planNeeds = computed(() => planData.value?.needs || [])
+const planSuggestion = computed(() => {
+  const suggestion = planResult.value?.suggestion || ''
+  // 已经采纳过（配置路径 == 建议路径）就不再提示，否则黄框会一直挂着。
+  return suggestion && suggestion !== config.targetPath.trim() ? suggestion : ''
+})
+// 录制步骤变了（增删、改写），旧任务书就不再可信：后端也会用 plan_stale 拦一次，
+// 这里提前把「按此执行」置灰，别让用户白等一次请求。
+const stepsSignature = computed(() => steps.value
+  .map(s => `${s.no}:${s.type}:${s.target?.alias || ''}`).join('|'))
+const planStale = computed(() => !!planState.value
+  && (planState.value.stale || planState.value.sig !== stepsSignature.value))
 
 // 另一个窗口一开跑，这里就把上一次的错误和结果收掉，不然会和进度条同时出现。
 watch(() => emit.value.status, (status) => {
@@ -1171,17 +1453,26 @@ watch(() => emit.value.status, (status) => {
   }
 })
 
-const canGenerate = computed(() =>
+const canPlan = computed(() =>
   isStopped.value && steps.value.length > 0 &&
   !!config.workspace.trim() && !!config.targetPath.trim() && !!config.model && !generating.value
 )
-// 按钮置灰时，告诉用户第一个不满足的条件是什么（定位不唯一不再是阻断项，见 generate 的确认框）
+const canExecute = computed(() =>
+  !!planData.value && !planStale.value && !generating.value
+)
+// 按钮置灰时，告诉用户第一个不满足的条件是什么（定位不唯一不再是阻断项，见 executePlan 的确认框）
 const generateBlockReason = computed(() => {
   if (!isStopped.value) return '' // 未停止时「gen-compact」一行已经说明了原因，不重复
   if (!steps.value.length) return '还没有录制任何步骤'
   if (!config.workspace.trim()) return '还没有填写工作区（Git 目录）'
   if (!config.targetPath.trim()) return '还没有填写目标文件（工作区内相对路径）'
   if (!config.model) return '还没有选择模型'
+  return ''
+})
+const executeBlockReason = computed(() => {
+  if (!planData.value) return '还没有任务书'
+  if (planStale.value) return '录制步骤已变化，请重新规划'
+  if (generating.value) return ''
   return ''
 })
 
@@ -1220,6 +1511,8 @@ const askHint = computed(() => {
 })
 
 function applySession(data) {
+  // 新步骤落地的那一轮就检查定位：录得快时，等回到列表再点准星，页面早不是当时的样子了。
+  const fresh = freshSteps(data.steps)
   session.value = data
   // 拾取模式下，新出现的拾取元素会被草稿自动选中，然后关闭拾取。
   if (draft.value && draft.value.picking && data.picks && data.picks.length > draft.value.pickBaseline) {
@@ -1230,6 +1523,8 @@ function applySession(data) {
     // 停止后浏览器还开着，拾取靠轮询拿结果；拿到就收，别一直在后台拉。
     if (data.status !== 'recording' && data.status !== 'starting') stopPolling()
   }
+  trackLocConfirm(fresh, data)
+  seenStepNos = new Set((data.steps || []).map(s => s.no))
   // 列表结构变了，拖拽实例要跟着（重）建。
   nextTick(initSortable)
 }
@@ -1316,6 +1611,155 @@ async function closePeek() {
   }
 }
 
+// ---- 定位待确认：不唯一就当场选，别留到「回列表再点准星」 ----
+// 实测痛点：录得快时来不及选，等事后回到步骤列表再点准星，被测页面已经走远，
+// 框出来的根本不是当时那几个元素，选了也是瞎选。所以新步骤一落地就弹这张卡，
+// 趁着页面还是录制时的状态把「第几个」定下来；事后想改再走行尾的准星。
+// 规则：当前框架下没有唯一候选（真·不唯一），或者页面上有多个同名元素、
+// 只是靠结构路径碰巧唯一的（结构定位），两者都要当场选——后者正是「事后回列表
+// 已经框错了」的主要来源。页面已翻走 / 元素已消失的步骤不弹，那时选了也是瞎选。
+const locConfirm = ref(null)     // { no, label, desc, count, items, picked, note, loading }
+const locQueue = ref([])         // 等待确认的步骤号，录得快时会排队
+const locPicking = ref(false)
+// 上一轮已知的步骤号：null 表示还没拿到首帧快照（刚打开面板时不能把历史步骤都当成新的）
+let seenStepNos = null
+
+function freshSteps(list) {
+  if (seenStepNos === null) return []
+  return (list || []).filter(s => !seenStepNos.has(s.no))
+}
+
+function needsLocConfirm(step) {
+  const target = step.target
+  // 页面已翻走 / 录制时元素就没了：当前页面框不出东西，弹了也只能瞎选，留给步骤列表里的「待确认」。
+  if (!target || target.page_gone || target.unverified) return false
+  // 点完元素已经被这一次点击带走（下拉收起、列表删行）：计数取自按下的那一刻，
+  // 但现在页面上只剩别的同名元素，再框就是张冠李戴，不如不弹。
+  if (target.vanished_after) return false
+  // 已经亲手确认过的步骤不再打扰。
+  if (target.chosen && target.chosen.desc) return false
+  // 真·不唯一：当前框架下没有任何唯一候选，生成只能按录制时的序号取。
+  if (effectiveStatus(step) === 'ambiguous') return true
+  // 页面上有多个同名元素、只是靠结构路径（css）碰巧唯一的，也弹：
+  // 生成出来是一长串 div > div:nth-of-type()，而人其实想选的是「列表里的这一行」。
+  // 这正是事后回列表看不清、页面又已经变了的场景。
+  return (target.matches?.count || 0) > 1
+}
+
+// 快照里的候选（target.matches.items）没带序号，只有框出来的那份才带：
+// 统一按数组下标补一个，序号才和页面上的编号对得上。
+function withIndex(items) {
+  return (items || []).map((item, i) => ({ ...item, index: typeof item.index === 'number' ? item.index : i }))
+}
+
+function trackLocConfirm(fresh, data) {
+  // 停录/暂停期间不再弹：那已经不是「当场」了，硬弹只会打断收尾。
+  if (data.status !== 'recording' || data.paused) return
+  const hits = fresh.filter(needsLocConfirm).map(s => s.no)
+  if (!hits.length) return
+  locQueue.value = [...locQueue.value, ...hits.filter(no => no !== locConfirm.value?.no)]
+  if (!locConfirm.value) openNextLocConfirm()
+}
+
+async function openNextLocConfirm() {
+  if (locConfirm.value || !locQueue.value.length) return
+  const [no, ...rest] = locQueue.value
+  locQueue.value = rest
+  const step = steps.value.find(s => s.no === no)
+  if (!step) {
+    openNextLocConfirm()
+    return
+  }
+  const snap = step.target?.matches
+  locConfirm.value = {
+    no,
+    label: stepDescription(step),
+    loading: true,
+    // 先用录制时存的快照垫底：浏览器那边框不出来时，列表至少还是当时那几个。
+    desc: snap?.desc || '',
+    count: snap?.count || 0,
+    items: withIndex(snap?.items),
+    active: null,
+    picked: null,
+    note: ''
+  }
+  // 行内准星和这张卡共用页面上的同一层框，先收掉，免得框和列表说的是两回事。
+  if (peek.value.no) await closePeek()
+  try {
+    const { data } = await api.highlightRecordingStep(no, null, config.framework)
+    if (!locConfirm.value || locConfirm.value.no !== no) return
+    if (data.ok) {
+      locConfirm.value = {
+        ...locConfirm.value,
+        loading: false,
+        desc: data.desc,
+        count: data.count,
+        items: withIndex(data.items),
+        active: data.active
+      }
+    } else {
+      locConfirm.value = {
+        ...locConfirm.value,
+        loading: false,
+        note: `${peekErrorText(data)}；只能按录制时的快照选`
+      }
+    }
+  } catch (error) {
+    if (!locConfirm.value || locConfirm.value.no !== no) return
+    locConfirm.value = { ...locConfirm.value, loading: false, note: errorText(error) }
+  }
+}
+
+async function pickLocConfirm(index) {
+  const current = locConfirm.value
+  if (!current || current.loading || locPicking.value || !current.desc) return
+  locPicking.value = true
+  try {
+    // 先落库再重画，和行内准星同一个顺序，否则会框回原来那个。
+    const { data } = await api.chooseRecordingTarget(current.no, current.desc, index)
+    applySession(data)
+    if (!locConfirm.value || locConfirm.value.no !== current.no) return
+    locConfirm.value = {
+      ...locConfirm.value,
+      picked: index,
+      note: `已记下：生成时取第 ${index + 1} 个`
+    }
+    // 页面上把红框挪到选中的那个，「就是它」这件事用眼睛再确认一次。
+    await api.highlightRecordingStep(current.no, index, config.framework)
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    locPicking.value = false
+  }
+}
+
+function acceptLocConfirm() {
+  if (!locConfirm.value || locConfirm.value.picked == null) return
+  closeLocConfirm()
+}
+
+function deferLocConfirm() {
+  closeLocConfirm()
+}
+
+function closeLocConfirm() {
+  locConfirm.value = null
+  if (locQueue.value.length) {
+    // 上一条的「就这个」可能刚点完，留一拍再切下一条，避免卡片内容闪一下。
+    window.setTimeout(openNextLocConfirm, 220)
+    return
+  }
+  // 没有排队时把页面上的框清掉；行内准星还开着的话，框归它管。
+  if (!peek.value.no) api.clearRecordingHighlight().catch(() => {})
+}
+
+// 步骤被删掉时卡片要跟着消失，否则会对着不存在的步骤选序号。
+watch(steps, (list) => {
+  const current = locConfirm.value
+  if (!current) return
+  if (!list.some(step => step.no === current.no)) closeLocConfirm()
+})
+
 async function loadCurrent() {
   try {
     const { data } = await api.getRecordingCurrent()
@@ -1366,6 +1810,11 @@ async function startRecording() {
   genResult.value = null
   genError.value = null
   localPending.value = false
+  // 新录制 = 新步骤：上一份任务书不能再用了，留着只会让人误点执行。
+  planState.value = null
+  planNotes.value = []
+  planError.value = null
+  planPending.value = false
   try {
     const { data } = await api.startRecording(url, {
       model: config.model,
@@ -2004,7 +2453,7 @@ function statusLabel(status) {
 
 // 徽标只写四个字，把「凭什么算唯一」放进 title：role_bare 和普通唯一的前提不一样，
 // 不说明的话用户会以为它和「有名字的语义定位」一样稳。
-function statusHint(step) {
+function statusHintBase(step) {
   const status = effectiveStatus(step)
   const chosen = pickFor(config.framework, step.target?.candidates || [])
   if (status === 'unique' && chosen?.kind === 'role_bare') {
@@ -2022,8 +2471,8 @@ function statusHint(step) {
   }
   if (status === 'unverified') {
     return step.target?.page_gone
-      ? '录制时就没数到这个元素（页面当时已跳走）；停止时页面也已经翻走，定位按快照推出来，请回放确认'
-      : '这一步会让页面跳转，元素已经不在新页面上，定位按快照推出来、没有核实过：请回放确认'
+      ? '录制时就没数到这个元素（页面当时已经翻走），停止时也回不到那页；定位按录制快照取，生成不受影响，回放时确认'
+      : '这一步操作后元素就从页面上消失了（下拉/浮层收起、局部重渲染或跳转都算），没来得及数一次；定位按录制快照取，生成不受影响，回放时确认'
   }
   if (status === 'stale') return '重新校验时还找得到，但已经不是你录制时点的那个元素'
   if (status === 'chosen') {
@@ -2037,6 +2486,15 @@ function statusHint(step) {
     return '你选的序号，在停止录制时的页面上已经不存在了：生成出来会点不到，需要重新选'
   }
   return ''
+}
+
+// 计数取自按下鼠标那一刻的步骤：点完元素已经没了，徽标仍按当时的结果显示，
+// 但要在提示里说清楚，否则用户会奇怪「为什么页面上框不出它」。
+function statusHint(step) {
+  const base = statusHintBase(step)
+  return step.target?.vanished_after
+    ? base + '（这个元素点完就从页面上消失了，计数取自按下鼠标那一刻）'
+    : base
 }
 
 function statusTone(status) {
@@ -2064,8 +2522,119 @@ async function detectWorkspace() {
   }
 }
 
-// ---- 生成 ----
-async function generate(overwrite) {
+// ---- 任务书：选中片段写意见 ----
+// 不用自定义富文本：任务书本身是普通 DOM，浏览器选区就够用。
+// 选中后浮出一个小按钮，点它把这一段原文带进意见框，用户只写「要改成什么」。
+function clearSelTip() {
+  selTip.visible = false
+}
+
+function onPlanSelect() {
+  const selection = window.getSelection()
+  const root = planBody.value
+  if (!root || !selection || selection.isCollapsed) {
+    clearSelTip()
+    return
+  }
+  const text = selection.toString().trim()
+  if (text.length < 2) {
+    clearSelTip()
+    return
+  }
+  // 选区必须完全落在任务书正文里，别把「意见列表」或页面别处的文字带进来。
+  if (!root.contains(selection.anchorNode) || !root.contains(selection.focusNode)) {
+    clearSelTip()
+    return
+  }
+  const rect = selection.getRangeAt(0).getBoundingClientRect()
+  selTip.text = text.slice(0, 400)
+  selTip.x = Math.min(Math.max(12, rect.left + rect.width / 2 - 62), window.innerWidth - 150)
+  selTip.y = Math.max(12, rect.top - 38)
+  selTip.visible = true
+}
+
+function openNote(quote) {
+  noteDialog.quote = quote || ''
+  noteDialog.comment = ''
+  noteDialog.visible = true
+  selTip.visible = false
+}
+
+function saveNote() {
+  const comment = noteDialog.comment.trim()
+  if (!comment) {
+    ElMessage.warning('写一句你的要求，再添加')
+    return
+  }
+  planNotes.value.push({ id: ++noteSeq, quote: noteDialog.quote, comment })
+  noteDialog.visible = false
+}
+
+function removeNote(id) {
+  planNotes.value = planNotes.value.filter(note => note.id !== id)
+}
+
+function adoptSuggestion() {
+  if (!planSuggestion.value) return
+  config.targetPath = planSuggestion.value
+  ElMessage.success(`目标文件已改为 ${planSuggestion.value}`)
+}
+
+function notePayload() {
+  return planNotes.value.map(({ quote, comment }) => ({ quote, comment }))
+}
+
+// ---- 规划：只出任务书，不写文件 ----
+async function runPlan(replan) {
+  if (generating.value) return
+  planPending.value = true
+  planError.value = null
+  genError.value = null
+  if (!replan) {
+    planState.value = null
+    planNotes.value = []
+  }
+  startPolling(1000)
+  try {
+    const { data } = await api.planRecording({
+      model: config.model,
+      workspace_path: config.workspace.trim(),
+      framework: config.framework,
+      target_path: config.targetPath.trim(),
+      title: config.title.trim() || 'recorded flow',
+      python: (config.python || '').trim() || undefined,
+      // 重新规划时把上一版和用户意见一起带上，规划 agent 才知道要改哪里。
+      previous_plan: replan ? planData.value : undefined,
+      feedback: replan ? notePayload() : []
+    })
+    planState.value = { result: data, sig: stepsSignature.value, at: Date.now() }
+    if (replan) {
+      const count = planNotes.value.length
+      planNotes.value = []
+      ElMessage.success(count ? `已按你的 ${count} 条意见重新生成任务书` : '任务书已重新生成')
+    } else {
+      ElMessage.success('任务书已生成，确认后再执行')
+    }
+    await nextTick()
+    planCard.value?.$el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  } catch (error) {
+    const status = error.response && error.response.status
+    const details = (error.response && error.response.data && error.response.data.details) || []
+    if (status === 409) {
+      ElMessage.info('已有任务在进行，这里会同步显示进度')
+      loadCurrent()
+      return
+    }
+    planError.value = { message: errorText(error), details }
+  } finally {
+    planPending.value = false
+    loadCurrent()
+  }
+}
+
+// ---- 写入：只从任务书的「按此执行」进来 ----
+async function executePlan(overwrite) {
+  if (!planData.value || planStale.value || generating.value) return
   if (!overwrite && blockers.value.length) {
     // 不唯一不再阻断生成，但要让用户知道哪几步会降级、降到什么程度。
     const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
@@ -2089,7 +2658,7 @@ async function generate(overwrite) {
     try {
       await ElMessageBox.confirm(html, '有步骤定位待确认', {
         dangerouslyUseHTMLString: true,
-        confirmButtonText: '仍然生成',
+        confirmButtonText: '仍然执行',
         cancelButtonText: '取消',
         type: 'warning'
       })
@@ -2112,9 +2681,13 @@ async function generate(overwrite) {
       target_path: config.targetPath.trim(),
       title: config.title.trim() || 'recorded flow',
       python: (config.python || '').trim() || undefined,
-      overwrite
+      overwrite,
+      plan: planData.value,
+      // 用户在任务书上写的意见：不重新规划也要生效，直接带给写手。
+      plan_feedback: notePayload()
     })
     genResult.value = data
+    planNotes.value = []
     if (data.outside && data.outside.length) {
       ElMessage.warning(`已写入 ${data.path}，但有 ${data.outside.length} 个目标以外的文件被改动`)
     } else {
@@ -2123,6 +2696,12 @@ async function generate(overwrite) {
   } catch (error) {
     const details = (error.response && error.response.data && error.response.data.details) || []
     const status = error.response && error.response.status
+    if (details.includes('plan_stale')) {
+      // 后端判定任务书与录制对不上：强制重新规划，别拿旧任务书硬写。
+      if (planState.value) planState.value = { ...planState.value, stale: true }
+      ElMessage.warning('录制步骤变过了，请重新规划任务书')
+      return
+    }
     const isConflict = status === 409 && details.some(d => String(d).startsWith('conflict:'))
     if (isConflict) {
       try {
@@ -2135,7 +2714,8 @@ async function generate(overwrite) {
         localPending.value = false
         return
       }
-      await generate(true)
+      localPending.value = false
+      await executePlan(true)
       return
     }
     // 409 的另一半是「另一个窗口已经在生成」：那不是错误，跟着它的进度走就行。
@@ -2588,15 +3168,58 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .peek-text { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .peek-hidden { flex:none; font-size:10.5px; color:#9aa0a6; }
 .peek-more { margin-top:6px; font-size:11.5px; color:#8e8e93; }
-/* 次要操作组（上移 / 下移 / 删除）：收起时用 max-width 收进去，文字跟着回流而不是瞬移。
-   三个 30px 按钮之间还有 Element Plus 的 12px 相邻间距，实测 118px，上限给 140px 留余量。 */
+
+/* ===== 定位待确认卡片 =====
+   固定在右上角：嵌入模式下正好压在编排栏上，被测页面里那些带编号的框一个都不挡。
+   高度封顶 + 列表自己滚，匹配到几十个也不会把整屏吃掉。 */
+.loc-confirm {
+  position:fixed; top:12px; right:12px; z-index:60; box-sizing:border-box;
+  width:min(400px, calc(100vw - 24px)); max-height:min(70vh, 520px);
+  display:flex; flex-direction:column; gap:7px; padding:12px 13px; overflow:hidden;
+  background:#fff; border:1px solid #f0c987; border-radius:14px;
+  box-shadow:0 16px 40px rgba(16,24,40,.18), 0 2px 6px rgba(16,24,40,.06);
+  animation:loc-confirm-in .18s ease both;
+}
+@keyframes loc-confirm-in { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:none; } }
+.loc-head { display:flex; align-items:center; gap:8px; min-width:0; }
+.loc-tag { flex:none; font-size:11px; font-weight:700; color:#b42318; background:#fff1f0; border-radius:6px; padding:2px 7px; }
+.loc-step { min-width:0; font-size:12.5px; font-weight:600; color:#1d1d1f; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.loc-close { margin-left:auto; flex:none; }
+.loc-lead { margin:0; font-size:12px; line-height:1.55; color:#6e6e73; }
+.loc-lead b { color:#b42318; font-weight:600; }
+.loc-list { display:flex; flex-direction:column; gap:4px; flex:1 1 auto; min-height:0; overflow-y:auto; max-height:34vh; padding-right:2px; }
+.loc-item {
+  display:flex; align-items:center; gap:8px; width:100%; text-align:left; flex:none;
+  padding:6px 8px; border-radius:8px; border:1px solid #e6ebf2; background:#fff;
+  cursor:pointer; font-size:12.5px; color:#3c4048; font-family:inherit;
+}
+.loc-item:hover { border-color:#b9d6f7; background:#f4f9ff; }
+.loc-item.is-picked { border-color:#ff3b30; background:#fff1f0; color:#b42318; }
+.loc-no {
+  flex:none; width:18px; height:18px; border-radius:5px; background:#e8eaed; color:#5f6368;
+  font-size:10.5px; line-height:18px; text-align:center; font-weight:600;
+}
+.loc-item.is-picked .loc-no { background:#ff3b30; color:#fff; }
+.loc-text { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.loc-origin { flex:none; font-size:10.5px; color:#8a8f99; background:#f2f4f7; border-radius:4px; padding:1px 5px; }
+.loc-hidden { flex:none; font-size:10.5px; color:#9aa0a6; }
+.loc-note { margin:0; font-size:11.5px; line-height:1.5; color:#1e7a46; }
+.loc-foot { display:flex; align-items:center; gap:6px; }
+.loc-queue { margin-right:auto; font-size:11.5px; color:#b45309; }
+.loc-actions { margin-left:auto; display:flex; align-items:center; gap:6px; }
+
+/* 次要操作组（上移 / 下移）：收起时用 max-width 收进去，文字跟着回流而不是瞬移。
+   两个 30px 按钮之间还有 Element Plus 的 12px 相邻间距，实测 72px，上限给 84px 留余量。 */
 .step-actions-extra {
   display:flex; align-items:center; gap:2px; flex:none; overflow:hidden;
-  max-width:140px; opacity:1;
+  max-width:84px; opacity:1;
   transition:max-width .24s cubic-bezier(.4,0,.2,1), opacity .16s ease, margin-left .24s cubic-bezier(.4,0,.2,1);
 }
 .step-actions-extra :deep(.el-button) { flex:none; }
 .step-actions-extra.is-off { max-width:0; opacity:0; margin-left:-2px; pointer-events:none; }
+/* 删除在收起态也常驻：常态灰色，悬停才转红——每行一个红图标太吵，但得随手能删 */
+.recording-page .step-actions .step-delete-btn:not(.is-disabled) { color:#a5abb6; }
+.recording-page .step-actions .step-delete-btn:not(.is-disabled):hover { color:#e5484d; background:#fff1f0; }
 /* 「在这步之后插入」：位置常驻（避免 hover 时整行文字回流），只有图标淡入 */
 .step-insert-btn { opacity:0; transition:opacity .15s ease; }
 .step:hover .step-insert-btn, .step-insert-btn:focus-within { opacity:1; }
@@ -2607,7 +3230,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
   0%, 55% { background:#fff7e0; border-color:#f0d99b; }
   100% { background:#fff; border-color:#ebedf0; }
 }
-/* 收起后只剩铅笔：行内边距收紧，省出的宽度都给步骤文字 */
+/* 收起后只剩铅笔与删除：行内边距收紧，省出的宽度都给步骤文字 */
 .is-lean .step { gap:8px; padding:8px; }
 /* 步骤行图标：30×30 正方形，四个按钮从 176px 收到 126px */
 .recording-page .step-actions :deep(.el-button.is-text) { width:30px; height:30px; padding:0; border-radius:7px; }
@@ -2782,6 +3405,84 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .gen-replay-poll { flex:none; color:#1d4f9a; }
 /* 失败原因是整句，独占一行，否则会把定位挤成省略号 */
 .gen-replay-why { flex-basis:100%; padding-left:27px; color:#c0271d; font-size:11.5px; line-height:1.5; }
+
+/* ---- 任务书 ---- */
+.gen-plan-ready {
+  display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+  padding:9px 11px; border-radius:9px; background:#f2faf5;
+  color:#1f2530; font-size:12.5px; font-weight:600;
+}
+.gen-plan-ready-hint { color:#8a94a6; font-size:11.5px; font-weight:400; margin-left:2px; }
+.plan-head-meta { margin-left:auto; color:#8a94a6; font-size:11.5px; font-weight:400; }
+.plan-body { max-height:320px; overflow-y:auto; padding-right:2px; }
+.recording-body .plan-card { flex:none; }
+.is-panel .plan-body { max-height:200px; }
+.plan-block { padding:10px 0; border-top:1px dashed #eef0f3; }
+.plan-block:first-child { border-top:0; padding-top:0; }
+.plan-block-title {
+  display:flex; align-items:baseline; gap:6px;
+  margin-bottom:6px; color:#1f2530; font-size:12px; font-weight:600;
+}
+.plan-kv { display:flex; gap:8px; font-size:11.5px; line-height:1.8; }
+.plan-kv > span { flex:none; width:44px; color:#8a94a6; }
+.plan-kv > b { color:#3d4657; font-weight:500; word-break:break-word; }
+.plan-style-note { margin-top:5px; color:#7a8494; font-size:11.5px; line-height:1.65; }
+.plan-body code, .plan-target code, .plan-reuse code, .plan-suggest code {
+  background:#f4f6f8; color:#3d4657; padding:1px 5px; border-radius:4px;
+  font-size:11px; word-break:break-all;
+}
+.plan-target { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.plan-path-ok { color:#12a150; font-size:11.5px; }
+.plan-suggest {
+  margin-top:8px; padding:9px 10px; border:1px solid #f1ddb0; border-radius:8px;
+  background:#fff9ea; font-size:11.5px; color:#7a5a12;
+}
+.plan-suggest-title { font-weight:600; margin-bottom:3px; }
+.plan-suggest-reason { color:#94712c; line-height:1.65; }
+.plan-suggest .el-button { margin-top:7px; }
+.plan-reuse { margin:0; padding:0; list-style:none; }
+.plan-reuse li { padding:5px 0; border-top:1px dashed #eef0f3; font-size:11.5px; }
+.plan-reuse li:first-child { border-top:0; padding-top:0; }
+.plan-reuse-file { margin-left:6px; color:#8a94a6; font-size:11px; }
+.plan-reuse-use {
+  display:block; margin-top:3px; color:#5c6675; font-size:11px;
+  line-height:1.6; white-space:pre-wrap; word-break:break-all;
+}
+.plan-steps { width:100%; border-collapse:collapse; font-size:11.5px; }
+.plan-steps td { padding:5px 4px; border-top:1px dashed #eef0f3; vertical-align:top; }
+.plan-steps tr:first-child td { border-top:0; padding-top:0; }
+.plan-step-no { width:18px; color:#9aa4b2; font-variant-numeric:tabular-nums; }
+.plan-step-action { width:34px; color:#5c6675; white-space:nowrap; }
+.plan-step-action.reuse { color:#1d4f9a; font-weight:600; }
+.plan-step-note { color:#3d4657; line-height:1.65; word-break:break-word; }
+.plan-risks { margin:0; padding-left:16px; color:#7a5a12; font-size:11.5px; line-height:1.7; }
+.plan-notes { margin-top:10px; padding-top:10px; border-top:1px solid #eef0f3; }
+.plan-notes-hint { color:#9aa4b2; font-size:11px; font-weight:400; }
+.plan-note {
+  position:relative; margin:6px 0; padding:7px 28px 7px 9px;
+  background:#f7f9fc; border-radius:7px;
+}
+.plan-quote {
+  margin-bottom:4px; padding-left:6px; border-left:2px solid #cfd8e3;
+  color:#7a8494; font-size:11.5px; line-height:1.55; word-break:break-all;
+}
+.plan-note-body { color:#2f3a49; font-size:12px; line-height:1.6; white-space:pre-wrap; }
+.plan-note-del {
+  position:absolute; top:6px; right:6px; padding:0; border:0; background:none;
+  color:#a4adba; font-size:11px; cursor:pointer;
+}
+.plan-note-del:hover { color:#c0271d; }
+.plan-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
+.plan-stale {
+  margin-bottom:10px; padding:8px 10px; border:1px solid #f3c9c3; border-radius:8px;
+  background:#fff4f2; color:#c0271d; font-size:12px; line-height:1.6;
+}
+.plan-sel-tip {
+  position:fixed; z-index:3000; height:30px; padding:0 12px; border:0; border-radius:15px;
+  background:#1f2530; color:#fff; font-size:12px; line-height:30px; cursor:pointer;
+  box-shadow:0 6px 18px rgba(20, 26, 36, .22);
+}
+.plan-sel-tip:hover { background:#0071e3; }
 
 
 

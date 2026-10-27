@@ -64,10 +64,14 @@
     const label = labelText(el);
     // Python 侧拿不到 DOM 节点，只能靠一个临时属性认出「用户点的到底是哪一个」，
     // 它在计数完就被摘掉（session._count 末尾的 CLEAR_MARK_JS），不会留在页面上。
+    // pointerdown 已经打过标记时要复用：click 的预计数缓存就是按这个 mark 对上的。
     let mark = null;
     try {
-      mark = 'ac' + Math.random().toString(36).slice(2, 10);
-      el.setAttribute('data-autocase-target', mark);
+      mark = el.getAttribute('data-autocase-target');
+      if (!mark) {
+        mark = 'ac' + Math.random().toString(36).slice(2, 10);
+        el.setAttribute('data-autocase-target', mark);
+      }
     } catch (e) {
       mark = null;
     }
@@ -460,6 +464,32 @@
 
   ensureHud();
   document.addEventListener('DOMContentLoaded', ensureHud);
+
+  // 这条点击会不会真的变成一步（文本框的点击由随后的 fill 表达、select/label 由 change 表达）。
+  // 不会成步的元素不做预计数，省一次没用的扫描。判断口径要和 Python 的 click 过滤保持一致。
+  const clickDropped = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input') {
+      const ty = (el.type || 'text').toLowerCase();
+      const textLike = !['button', 'submit', 'reset', 'checkbox', 'radio'].includes(ty);
+      return textLike && !el.readOnly;
+    }
+    if (tag === 'textarea') return !el.readOnly;
+    return tag === 'select' || tag === 'label';
+  };
+
+  // 按下鼠标时先让 Python 数一遍候选。下拉项、选中态、菜单按钮这类元素会被 click
+  // 自己从页面上带走，等 click 回来再数只能数到 0（未核实）；按下这一刻它还在。
+  // 只做缓存，不产生步骤；click 会用同一个 mark 取这份结果（见 snap 里的复用）。
+  document.addEventListener('pointerdown', (e) => {
+    if (isHudEvent(e)) return;
+    if (e.button !== 0 || state.pick || state.paused) return;
+    const target = e.target;
+    if (!target || target.nodeType !== 1) return;
+    const el = target.closest(INTERACTIVE) || target;
+    if (!el || clickDropped(el)) return;
+    emit({ type: 'precount', snap: snap(el) });
+  }, true);
 
   document.addEventListener('click', (e) => {
     if (isHudEvent(e)) return;

@@ -3,7 +3,7 @@
 两件事都在「看不见的地方」出错，只能靠断言守住：
 - 进度是跨窗口的唯一事实，start/mark/finish/fail 的时序错了，按钮会在两个窗口里各说各话；
 - 写权限的 pattern 必须用**相对工作区路径**（opencode 内部 `path.relative(worktree, filepath)`），
-  写成 `**/x` 或绝对路径对根目录文件一条都不命中，最后只剩 `*: deny`，表现是「agent 写不出文件」。
+  且不能用 `**/文件名`：它会把「只许写一个文件」放大成「任意目录下的同名文件都能写」。
 """
 import json
 import tempfile
@@ -38,9 +38,36 @@ class EmitProgressTest(unittest.TestCase):
         self.progress.mark('writing')
         snap = self.progress.snapshot()
         self.assertEqual(snap['stage'], 'writing')
-        self.assertEqual(snap['percent'], 26)
+        self.assertEqual(snap['percent'], progress.STAGES['writing'][1])
         self.assertTrue(snap['cap'] > snap['percent'], 'cap 要留出前端爬升空间')
         self.assertTrue(snap['stage_at'])
+
+    def test_plan_mode_has_its_own_stage_table(self):
+        """规划是一次独立请求：自己的百分比、自己的结束文案，不借用写入那套。"""
+        self.assertTrue(self.progress.start('plan'))
+        snap = self.progress.snapshot()
+        self.assertEqual(snap['mode'], 'plan')
+        self.assertEqual(snap['stage'], 'prepare')
+
+        self.progress.mark('planning', '正在读项目')
+        snap = self.progress.snapshot()
+        self.assertEqual(snap['stage'], 'planning')
+        self.assertEqual(snap['percent'], progress.PLAN_STAGES['planning'][1])
+        self.assertGreater(snap['cap'], 80, '规划要能爬到接近满格')
+
+        self.progress.mark('writing')  # 写入阶段才有的 stage，规划里应当被忽略
+        self.assertEqual(self.progress.snapshot()['stage'], 'planning')
+
+        self.progress.finish()
+        snap = self.progress.snapshot()
+        self.assertEqual(snap['label'], '任务书已就绪')
+        self.assertIsNone(snap['result'])
+
+    def test_write_mode_ignores_planning_stage(self):
+        """写入阶段不再跑规划；迟到的 planning 回调不该把进度拉回准备区。"""
+        self.progress.start('write')
+        self.progress.mark('planning')
+        self.assertEqual(self.progress.snapshot()['stage'], 'prepare')
 
     def test_unknown_stage_is_ignored(self):
         self.progress.start()
@@ -144,9 +171,11 @@ class EmitConfigPermissionTest(unittest.TestCase):
         edit = self._rules('a.spec.ts')['edit']
         allows = [p for p, action in edit.items() if action == 'allow']
         self.assertIn('a.spec.ts', allows)
-        # `**/a.spec.ts` 留着兜底，但不能是唯一的相对形式。
         self.assertIn('./a.spec.ts', allows)
-        self.assertIn('**/a.spec.ts', allows)
+        # `**/a.spec.ts` 会匹配 tests/ai-chat/a.spec.ts，等于允许写到任意同名文件，
+        # 必须不存在。上一版就是被它放行，模型把文件挪进子目录后才报「没写出目标文件」。
+        self.assertNotIn('**/a.spec.ts', allows)
+        self.assertFalse([p for p in allows if '**' in p], '白名单里不该有任何 globstar')
 
     def test_subdirectory_path_keeps_its_prefix(self):
         edit = self._rules('tests/login.spec.ts')['edit']

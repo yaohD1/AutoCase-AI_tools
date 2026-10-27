@@ -14,15 +14,23 @@ import time
 # 阶段 → (文案, 起始百分比, 插值上限)。上限只是前端爬升的终点，不是阶段结束值。
 STAGES = {
     'prepare': ('正在检查录制步骤与定位', 5, 10),
-    'detect': ('正在识别工作区框架与工具链', 10, 20),
-    'snapshot': ('正在记录工作区快照', 20, 26),
-    'writing': ('正在让 AI 写脚本', 26, 62),
+    'detect': ('正在识别工作区框架与工具链', 10, 16),
+    'snapshot': ('正在记录工作区快照', 16, 22),
+    'writing': ('正在让 AI 写脚本', 22, 62),
     'check': ('正在确认目标文件已写出', 62, 68),
     'validate': ('正在校验脚本', 68, 92),
     # 修复要重写文件，进度退回去是实情：不伪装成还在前进。
     'repair': ('正在修正校验错误', 62, 78),
     'record': ('正在登记生成记录', 92, 98),
     'done': ('完成', 100, 100),
+}
+
+# 规划是独立的一次请求：它只读项目、不写文件，耗时可到一分多钟，
+# 阶段比写入少，但必须自己有一份，别让它借用写入的百分比。
+PLAN_STAGES = {
+    'prepare': ('正在检查录制步骤与定位', 4, 8),
+    'planning': ('正在读项目、整理任务书', 8, 92),
+    'done': ('任务书已就绪', 100, 100),
 }
 
 # 前端只展示这些字段，reply 可能上万字，不跟着进度一起传。
@@ -38,27 +46,34 @@ class EmitProgress:
     @staticmethod
     def _idle():
         return {
-            'status': 'idle', 'stage': None, 'label': '', 'detail': '',
+            'status': 'idle', 'mode': None, 'stage': None, 'label': '', 'detail': '',
             'percent': 0, 'cap': 0,
             'started_at': None, 'stage_at': None, 'finished_at': None,
             'elapsed': 0.0, 'result': None, 'error': None,
         }
+
+    def _stages(self):
+        return PLAN_STAGES if self._state.get('mode') == 'plan' else STAGES
 
     def reset(self):
         """新录制的起点：上一个会话的进度不该出现在这一条里。"""
         with self._lock:
             self._state = self._idle()
 
-    def start(self):
-        """占住任务位。返回 False 表示已经有一个生成在跑（另一个窗口先点了）。"""
+    def start(self, mode='write'):
+        """占住任务位。返回 False 表示已经有一个任务在跑（另一个窗口先点了，或规划还没结束）。
+
+        mode 区分「出任务书」和「写脚本」：两者互斥，但它们各自的阶段表不一样。
+        """
         with self._lock:
             if self._state['status'] == 'running':
                 return False
             now = time.time()
-            label, percent, cap = STAGES['prepare']
+            table = PLAN_STAGES if mode == 'plan' else STAGES
+            label, percent, cap = table['prepare']
             self._state = self._idle()
             self._state.update({
-                'status': 'running', 'stage': 'prepare', 'label': label,
+                'status': 'running', 'mode': mode, 'stage': 'prepare', 'label': label,
                 'percent': percent, 'cap': cap,
                 'started_at': now, 'stage_at': now,
             })
@@ -69,7 +84,7 @@ class EmitProgress:
         with self._lock:
             if self._state['status'] != 'running':
                 return
-            info = STAGES.get(stage)
+            info = self._stages().get(stage)
             if info is None:
                 return
             label, percent, cap = info
@@ -78,14 +93,15 @@ class EmitProgress:
                 'percent': percent, 'cap': cap, 'stage_at': time.time(),
             })
 
-    def finish(self, result):
+    def finish(self, result=None):
         with self._lock:
             now = time.time()
+            label = self._stages()['done'][0]
             self._state.update({
-                'status': 'done', 'stage': 'done', 'label': STAGES['done'][0],
+                'status': 'done', 'stage': 'done', 'label': label,
                 'detail': '', 'percent': 100, 'cap': 100,
                 'stage_at': now, 'finished_at': now,
-                'result': {k: result.get(k) for k in RESULT_FIELDS if k in result},
+                'result': {k: result.get(k) for k in RESULT_FIELDS if k in result} if result else None,
                 'error': None,
             })
 

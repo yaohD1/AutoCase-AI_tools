@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from app.services.recording import detect, toolchain
 
@@ -82,13 +83,66 @@ class DetectTest(unittest.TestCase):
         paths = [s['path'] for s in detect.sample_robot_files(ws)]
         self.assertEqual(paths, ['tests/real.robot'])
 
+    def test_playwright_samples_are_collected_too(self):
+        """PW 项目以前拿到的 samples 永远是空数组，提示词却让模型「照 samples 的风格写」。"""
+        ws = self._ws({
+            'tests/login/login.test.ts': 'test("login", async () => {});\n',
+            'tests/other/x.spec.ts': 'test("x", async () => {});\n',
+            'node_modules/pkg/y.spec.ts': 'test("noise", async () => {});\n',
+            'src/pages/LoginPage.ts': 'export class LoginPage {}\n',
+        })
+        got = detect.sample_test_files(ws)
+        paths = sorted(s['path'] for s in got)
+        self.assertEqual(paths, ['tests/login/login.test.ts', 'tests/other/x.spec.ts'])
+        self.assertIn('login', got[0]['head'] + got[1]['head'])
+
 
 class ToolchainTest(unittest.TestCase):
+    @staticmethod
+    def _tsc_workspace():
+        """造一个「装了 tsc」的假项目，把 _run 挡掉，只验判定逻辑。"""
+        ws = _workspace({})
+        bin_dir = ws / 'node_modules' / '.bin'
+        bin_dir.mkdir(parents=True)
+        (bin_dir / 'tsc.cmd').write_text('', encoding='utf-8')
+        return ws
+
     def test_tsc_missing_is_an_error_not_a_skip(self):
         ws = _workspace({'package.json': '{}'})
         try:
             with self.assertRaises(toolchain.ToolchainError):
                 toolchain.tsc_check(ws)
+        finally:
+            shutil.rmtree(ws, ignore_errors=True)
+
+    def test_tsc_ignores_baseline_errors_outside_the_target(self):
+        """全项目 tsc 会撞上项目本来就有的类型错误，那不该算到这次生成头上。
+
+        真实踩过的坑：基线里的 seed.spec.ts 报 TS6133，每次生成都判失败，
+        然后把已经写对的目标文件删了。
+        """
+        ws = self._tsc_workspace()
+        baseline = 'src/fixtures/seed.spec.ts(3,7): error TS6133: var is declared but never read\n'
+        try:
+            with mock.patch.object(toolchain, '_run') as run:
+                run.return_value = mock.Mock(returncode=1, stdout=baseline, stderr='')
+                ok, out = toolchain.tsc_check(ws, target_path='tests/login/login.spec.ts')
+            self.assertTrue(ok, '目标文件一行错都没有，就该放行')
+            self.assertEqual(out, '')
+        finally:
+            shutil.rmtree(ws, ignore_errors=True)
+
+    def test_tsc_reports_errors_that_belong_to_the_target(self):
+        ws = self._tsc_workspace()
+        target = 'tests/login/login.spec.ts'
+        stdout = target + '(12,5): error TS2322: Type string is not assignable\n'
+        try:
+            with mock.patch.object(toolchain, '_run') as run:
+                run.return_value = mock.Mock(returncode=1, stdout=stdout, stderr='')
+                ok, out = toolchain.tsc_check(ws, target_path=target)
+            self.assertFalse(ok)
+            self.assertIn('TS2322', out)
+            self.assertIn(target, out)
         finally:
             shutil.rmtree(ws, ignore_errors=True)
 

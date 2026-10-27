@@ -18,6 +18,8 @@ REQ_FILES = ('requirements.txt', 'requirements-dev.txt', 'pyproject.toml', 'Pipf
              'poetry.lock', 'setup.cfg')
 SAMPLE_LIMIT = 3
 SAMPLE_LINES = 60
+TS_TEST_SUFFIXES = ('.spec.ts', '.test.ts', '.spec.tsx', '.test.tsx',
+                    '.spec.js', '.test.js', '.spec.mjs', '.test.mjs')
 PROBE_TIMEOUT = 20
 
 # 只读取安装记录，不导入库本身。
@@ -110,6 +112,30 @@ def sample_robot_files(workspace):
     return samples
 
 
+def _is_ts_test(path):
+    return path.name.lower().endswith(TS_TEST_SUFFIXES)
+
+
+def sample_test_files(workspace):
+    """最近修改的 Playwright 测试文件，作为项目写法的样例。
+
+    之前 Playwright 项目拿到的 samples 永远是空数组，提示词却说「照 samples 的风格写」——
+    模型只能按通用 Playwright 风格硬写，跟项目里那套 TestModule / 断言习惯完全对不上。
+    这里和 sample_robot_files 做同一件事，只是后缀不同。
+    """
+    root = Path(workspace)
+    files = [p for p in _walk(root) if _is_ts_test(p)]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    samples = []
+    for path in files[:SAMPLE_LIMIT]:
+        try:
+            lines = path.read_text(encoding='utf-8', errors='replace').splitlines()[:SAMPLE_LINES]
+        except OSError:
+            continue
+        samples.append({'path': str(path.relative_to(root)).replace('\\', '/'), 'head': '\n'.join(lines)})
+    return samples
+
+
 def playwright_ts_present(workspace):
     package = Path(workspace) / 'package.json'
     if not package.is_file():
@@ -162,7 +188,12 @@ def detect(workspace, python=None):
         framework = None
         evidence.append({'kind': 'framework', 'value': None, 'source': '未识别到 robot 或 @playwright/test'})
 
-    samples = sample_robot_files(root) if framework == 'robot-selenium' else []
+    if framework == 'robot-selenium':
+        samples = sample_robot_files(root)
+    elif framework == 'playwright-ts':
+        samples = sample_test_files(root)
+    else:
+        samples = []
     if samples:
         evidence.append({'kind': 'samples', 'value': [s['path'] for s in samples], 'source': 'mtime'})
 

@@ -227,6 +227,11 @@ batchDeleteTestcases(ids) {
     if (python) params.python = python
     return api.get('/automation/recording/detect', { params })
   },
+  planRecording(data) {
+    // 规划只读项目，实测一次 1~2 分钟（9 个文件、8 轮工具调用）；超时给足，
+    // 但比写入短：它不该被写入的耗时节流。
+    return api.post('/automation/recording/plan', data, { timeout: 600000 })
+  },
   generateRecording(data) {
     return api.post('/automation/recording/generate', data, { timeout: 1900000 })
   },

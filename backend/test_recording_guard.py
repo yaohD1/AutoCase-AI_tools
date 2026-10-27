@@ -179,7 +179,9 @@ class EmitConfigTest(unittest.TestCase):
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
             rules = data['agent']['recording-emitter']['permission']['edit']
-            self.assertIn('**/autocase/tests/login.spec.ts', rules)
+            self.assertIn('autocase/tests/login.spec.ts', rules)
+            self.assertNotIn('**/autocase/tests/login.spec.ts', rules,
+                             'globstar 会把「只写一个文件」放大成「任意目录同名文件都能写」')
             self.assertNotIn('**/autocase\\tests\\login.spec.ts', rules)
         finally:
             drop()

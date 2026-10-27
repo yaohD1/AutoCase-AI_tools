@@ -147,7 +147,7 @@ class RecordRouteTest(unittest.TestCase):
 
     def _fake_generate(self, content):
         def generate(runner, workspace, model, steps, framework, target_path, title, python=None,
-                     overwrite=False, progress=None):
+                     overwrite=False, plan=None, plan_feedback=None, progress=None):
             path = Path(workspace) / target_path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
@@ -160,6 +160,8 @@ class RecordRouteTest(unittest.TestCase):
             return self.client.post('/api/automation/recording/generate', json={
                 'model': 'p/m', 'workspace_path': 'proj', 'framework': 'robot-selenium',
                 'target_path': target, 'title': 'Login', 'overwrite': overwrite,
+                # 写入必须带任务书；这里只关心记录逻辑，任务书内容取最小可用形状。
+                'plan': {'steps': [{'no': 1, 'action': 'write'}]},
             })
 
     def test_generate_creates_a_record_visible_only_in_recording_list(self):
@@ -198,7 +200,8 @@ class RecordRouteTest(unittest.TestCase):
         with mock.patch.object(emit, 'generate', side_effect=emit.EmitError('校验未通过，已还原', details=['x'])):
             r = self.client.post('/api/automation/recording/generate', json={
                 'model': 'p/m', 'workspace_path': 'proj', 'framework': 'robot-selenium',
-                'target_path': 'tests/route_c.robot'})
+                'target_path': 'tests/route_c.robot',
+                'plan': {'steps': [{'no': 1, 'action': 'write'}]}})
         self.assertEqual(r.status_code, 422)
         self.assertEqual(RecordingGeneration.query.count(), before)
 

@@ -2,6 +2,7 @@
 
 录制会话全局只有一个，不绑定项目；项目、工作区与目标路径在「生成」时才确定。
 """
+import json
 import os
 from urllib.parse import urlencode, urlparse
 
@@ -330,45 +331,107 @@ def parse_recording_intent():
     return jsonify({'intent': parsed, 'model': model}), 200
 
 
-@recording_bp.route('/automation/recording/generate', methods=['POST'])
-def generate_recording():
-    """把已停止的录制写入目标工作区。成功返回写入的文件；失败已还原工作区并返回具体错误。"""
+@recording_bp.route('/automation/recording/plan', methods=['POST'])
+def plan_recording():
+    """只出任务书，不写任何文件。任务书由用户看完、改完，再走 /generate 执行。"""
+    body = request.get_json(silent=True) or {}
+    ctx, failed = _prepare_generation(body)
+    if failed is not None:
+        return failed
+    previous = body.get('previous_plan')
+    if previous is not None:
+        if not isinstance(previous, dict):
+            return _error('上一版任务书格式不对', 400)
+        if len(json.dumps(previous, ensure_ascii=False)) > emit.MAX_PLAN_BYTES:
+            return _error('上一版任务书过大', 400)
+    if not progress.PROGRESS.start('plan'):
+        return _error('已有生成任务正在进行，请等它结束', 409)
+    try:
+        result = emit.plan(
+            ctx['runner'], ctx['workspace'], ctx['model'], ctx['steps'],
+            ctx['framework'], ctx['target_path'], ctx['title'],
+            python=body.get('python') or None,
+            feedback=body.get('feedback') or [],
+            previous_plan=previous,
+            progress=progress.mark,
+        )
+        progress.PROGRESS.finish()
+        return jsonify(result), 200
+    except emit.EmitError as exc:
+        progress.PROGRESS.fail(str(exc), exc.details)
+        return jsonify({'error': str(exc), 'details': exc.details}), 422
+    except Exception as exc:
+        progress.PROGRESS.fail('规划失败：%s' % exc)
+        raise
+
+
+def _prepare_generation(body):
+    """规划和写入共用的请求校验。返回 (上下文, 错误响应)，两者必有一个为 None。"""
     session = RecordingSession.current()
     if session is None:
-        return _error('没有录制', 404)
+        return None, _error('没有录制', 404)
     if session.status not in ('stopped', 'idle_timeout', 'closed'):
-        return _error('请先停止录制再生成', 409)
-    body = request.get_json(silent=True) or {}
+        return None, _error('请先停止录制', 409)
     model = (body.get('model') or '').strip()
     framework = (body.get('framework') or '').strip()
     target_path = (body.get('target_path') or '').strip()
     title = (body.get('title') or '').strip() or 'recorded flow'
     if '/' not in model:
-        return _error('请先选择模型', 400)
+        return None, _error('请先选择模型', 400)
     try:
         _, workspace = AutomationScriptGenerator(current_app.config)._resolve_workspace(body.get('workspace_path'))
     except ValueError as exc:
-        return _error(str(exc), 400)
+        return None, _error(str(exc), 400)
     if not emit.target_ok(target_path):
-        return _error('目标路径无效：必须是工作区内的相对路径，不能含 .. 或 * ? [ ]', 400)
-    target_abs = workspace / target_path
+        return None, _error('目标路径无效：必须是工作区内的相对路径，不能含 .. 或 * ? [ ]', 400)
+    return {
+        'session': session,
+        'runner': OpenCodeRunner(current_app.config),
+        'workspace': workspace,
+        'model': model,
+        'framework': framework,
+        'target_path': target_path,
+        'title': title,
+        'steps': session.ir(),
+    }, None
+
+
+@recording_bp.route('/automation/recording/generate', methods=['POST'])
+def generate_recording():
+    """按已确认的任务书写入目标工作区。任务书是唯一入口：没带任务书直接拒绝。"""
+    body = request.get_json(silent=True) or {}
+    ctx, failed = _prepare_generation(body)
+    if failed is not None:
+        return failed
+    plan = body.get('plan')
+    if not isinstance(plan, dict):
+        return _error('缺少任务书：请先生成任务书，再按它执行', 400)
+    if len(json.dumps(plan, ensure_ascii=False)) > emit.MAX_PLAN_BYTES:
+        return _error('任务书过大，请重新规划', 400)
+    steps = ctx['steps']
+    if not emit.plan_matches_steps(plan, steps):
+        # 录制被改过之后，旧任务书里的 note 已经对不上步骤了；硬写只会漏步骤。
+        return jsonify({'error': '录制步骤已变化，请重新生成任务书', 'details': ['plan_stale']}), 409
+
+    target_path = ctx['target_path']
+    target_abs = ctx['workspace'] / target_path
     # 生成前先保存原内容，未提交时回滚要用到。
     original = target_abs.read_bytes() if target_abs.is_file() else None
-    steps = session.ir()
-    runner = OpenCodeRunner(current_app.config)
     # 主界面和录制面板都能点生成，服务端只放行一个：后点到的直接 409，
     # 而不是两个请求各自写一遍同一个文件。
-    if not progress.PROGRESS.start():
+    if not progress.PROGRESS.start('write'):
         return _error('已有生成任务正在进行，请等它结束', 409)
     try:
         result = emit.generate(
-            runner, workspace, model, steps, framework, target_path, title,
+            ctx['runner'], ctx['workspace'], ctx['model'], steps,
+            ctx['framework'], target_path, ctx['title'],
             python=(body.get('python') or None), overwrite=bool(body.get('overwrite')),
+            plan=plan, plan_feedback=body.get('plan_feedback') or [],
             progress=progress.mark,
         )
         progress.mark('record')
         record = records.create(
-            workspace, target_path, framework, title, model, original,
+            ctx['workspace'], target_path, ctx['framework'], ctx['title'], ctx['model'], original,
             target_abs.read_bytes(), steps, result.get('reply'),
         )
         result['generation_id'] = record.id

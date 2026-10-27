@@ -63,7 +63,15 @@ IDLE_SECONDS = 15 * 60
 # 停止后浏览器继续开着（用户还要拾取元素、验证断言），但不能永远占着：
 # 一小时没有任何命令就自己收掉。
 STOPPED_IDLE_SECONDS = 60 * 60
-PUMP_MS = 150
+# 事件泵的间隔。Playwright 同步 API 只在调用期间分发事件，binding 回调又只能入队，
+# 所以这个值直接决定「页面上的动作 → Python 计数」的延迟。原来 150ms：点完一下，
+# 元素早被页面卸掉了，再去数就是 0（未核实）。压到 30ms，按下鼠标的那次预计数
+# 才来得及在 click 之前跑完；代价只是录制线程每秒多醒几次。
+PUMP_MS = 30
+# 按下鼠标时的预计数缓存多久：拖拽、按下后移开鼠标都不会有 click，过期就丢。
+PRECOUNT_TTL = 5.0
+# 最多留几条：只可能命中紧接着的那次 click，不需要攒。
+PRECOUNT_MAX = 8
 COMMAND_TIMEOUT = 60
 # 关闭浏览器这类命令不能把请求线程拖住：关不掉就让线程自己退出。
 CLOSE_TIMEOUT = 8
@@ -207,6 +215,9 @@ class RecordingSession(object):
         self._skip_nav = set()
         # frame id → 最近一次点击的时间。用来判断「这次导航是不是点击引起的」，取用即失效。
         self._pending_click = {}
+        # mark → (时间, 候选计数, 同名元素快照)：pointerdown 时先数一遍，click 命中后即取走。
+        # 下拉项、选中态这类元素会被点击自己从 DOM 上带走，click 回来再数只能数到 0。
+        self._precounts = {}
         self._pick = False
         # 暂停录制：浏览器照常可用，但操作不再记为步骤（同 Playwright codegen 的 Pause）。
         self._paused = False
@@ -843,6 +854,8 @@ class RecordingSession(object):
         self._process_inbox()
         with self._lock:
             self.status = 'stopping'
+            # 没等到 click 的预计数不能再落到下一轮，缓存清掉。
+            self._precounts.clear()
         if revalidate:
             self._revalidate_all()
         with self._lock:
@@ -1382,12 +1395,15 @@ class RecordingSession(object):
         stamp = self._doc_stamp.get(id(frame))
         return doc.get('stamp') is not None and stamp is not None and doc['stamp'] == stamp
 
-    def _count(self, frame, specs, mark=None):
+    def _count(self, frame, specs, mark=None, keep_mark=False):
         """逐条在页面上数匹配数；mark 存在时顺带算出「用户点的是第几个匹配」。
 
         Playwright 的语义选择器（get_by_role 等）内部怎么排序我们拿不到，
         所以录制那一刻由 recorder.js 给目标元素打一个临时属性，再在页面里 findIndex，
         这样不唯一的步骤也能生成 .nth(i)，指向用户真正操作的那个元素。
+
+        keep_mark=True 用于 pointerdown 的预计数：标记要留到 click 那一下，
+        否则 click 的 snap 会换个新 mark，缓存就对不上了。
         """
         out = []
         for spec in specs:
@@ -1404,13 +1420,61 @@ class RecordingSession(object):
             if index is not None:
                 item['index'] = index
             out.append(item)
-        if mark:
-            # 计数完立刻摘掉临时属性，不把痕迹留在被测页面上。
-            try:
-                frame.evaluate(CLEAR_MARK_JS)
-            except Exception:
-                pass
+        if mark and not keep_mark:
+            self._clear_marks(frame)
         return out
+
+    def _clear_marks(self, frame):
+        """摘掉本页所有临时标记。只在正常事件计数完 / 预计数被取走时调用。"""
+        try:
+            frame.evaluate(CLEAR_MARK_JS)
+        except Exception:
+            pass
+
+    def _mark_alive(self, frame, mark):
+        """按下时打了标记的元素现在还在不在：被这次点击带走的，界面就不该再弹确认框。"""
+        try:
+            return frame.locator('css=[%s="%s"]' % (TARGET_MARK_ATTR, mark)).count() > 0
+        except Exception:
+            # 页面正在导航 / frame 已销毁：当作不在了，宁可少弹一次。
+            return False
+
+    def _handle_precount(self, frame, snap):
+        """pointerdown 时先数一遍候选，按 mark 缓存，等 click 来取。
+
+        下拉项、选中态、菜单按钮这类元素会被点击自己从 DOM 上带走：等 click 回来再数，
+        所有候选都是 0，只能标成「未核实」，而这恰恰是录制里很常见的一类点击。
+        按下这一刻元素还在，数出来的才是用户点的时候页面的真实情况。
+
+        只缓存、不落库：按下后拖走、或者按了没点（拖拽排序）都不会有 click，
+        靠 TTL 过期，不会凭空多出步骤。
+        """
+        mark = snap.get('_mark')
+        if not mark:
+            return
+        counted = self._count(frame, build_specs(snap), mark=mark, keep_mark=True)
+        # 一条都没数到：按下时页面已经在动（或元素本来就在别的 frame），缓存没有意义。
+        if not any((c.get('count') or 0) > 0 for c in counted):
+            return
+        # 同名元素的快照也在这时候取：点完它们可能就没了，这份快照是「当场选第几个」的依据。
+        matches = self._collect_matches(frame, counted)
+        now = time.monotonic()
+        with self._lock:
+            self._precounts = {k: v for k, v in self._precounts.items()
+                               if now - v[0] <= PRECOUNT_TTL}
+            self._precounts[mark] = (now, counted, matches)
+            while len(self._precounts) > PRECOUNT_MAX:
+                self._precounts.pop(next(iter(self._precounts)))
+
+    def _take_precount(self, mark):
+        """取走按下鼠标时算好的计数；过期或没有就返回 None（退回现场再数）。"""
+        if not mark:
+            return None
+        with self._lock:
+            item = self._precounts.pop(mark, None)
+        if item is None or time.monotonic() - item[0] > PRECOUNT_TTL:
+            return None
+        return item[1], item[2]
 
     def _collect_matches(self, frame, counted):
         """不唯一时，把「这批匹配到底是哪几个」存一份到 target 上。
@@ -1550,6 +1614,11 @@ class RecordingSession(object):
         page = source['page']
         self._touch()
 
+        # 按下鼠标时先数一遍候选：只存缓存，不落库。随后的 click 会按 mark 取走。
+        if kind == 'precount':
+            self._handle_precount(frame, snap)
+            return
+
         # 点可写入的文本框只是聚焦，值由随后的 fill 表达，记成 click 会多一步。
         # 只读框例外：点它是展开日期面板 / 下拉筛选，那一步是流程的一部分。
         if (kind == 'click' and snap['tag'] == 'input'
@@ -1575,7 +1644,22 @@ class RecordingSession(object):
         doc = {'url': snap.pop('_doc_url', None), 'stamp': snap.pop('_doc_stamp', None)}
         if not doc['url'] and doc['stamp'] is None:
             doc = self._doc_identity(frame)
-        counted = self._count(frame, build_specs(snap), mark=mark)
+        counted = None
+        cached_matches = None
+        vanished_after = False
+        if mark:
+            # 按下鼠标时已经数过：直接用那一刻的结果。点击自己把元素带走后，
+            # 现在再数只会得到 0（未核实），但用户点的时候它明明在。
+            cached = self._take_precount(mark)
+            if cached is not None:
+                counted, cached_matches = cached
+                # 缓存来自按下那一刻，元素现在可能已经被这次点击带走了。
+                # 界面靠这个标记决定还弹不弹「当场选第几个」：元素都没了，
+                # 再框只会框到页面上剩下的同名元素，张冠李戴。
+                vanished_after = not self._mark_alive(frame, mark)
+                self._clear_marks(frame)
+        if counted is None:
+            counted = self._count(frame, build_specs(snap), mark=mark)
         primary, ordered = rank(counted)
         unverified = False
         if primary is None:
@@ -1583,6 +1667,8 @@ class RecordingSession(object):
             unverified = primary is not None
         status = 'stale' if unverified else status_of(primary)
         target = ir.make_target(snap, ordered, primary, status)
+        if vanished_after:
+            target['vanished_after'] = True
         if unverified:
             target['unverified'] = True
         elif any((c.get('count') or 0) > 1 for c in ordered):
@@ -1590,7 +1676,7 @@ class RecordingSession(object):
             # 不止 ambiguous 要记：更常见的是 getByRole 命中 3 个、于是退到 css 绝对路径
             # 标成「结构定位」——那种步骤用户更该看见「其实有 3 个，你点的是第 2 个」。
             # 浏览器一关这份快照就取不到了，必须在录制当时存。
-            matches = self._collect_matches(frame, ordered)
+            matches = cached_matches or self._collect_matches(frame, ordered)
             if matches:
                 target['matches'] = matches
         index = self._page_index(page)

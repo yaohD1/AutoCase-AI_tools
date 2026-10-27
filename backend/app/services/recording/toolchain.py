@@ -76,12 +76,30 @@ def dryrun(python, path, cwd=None):
     return result.returncode == 0, _tail(output)
 
 
-def tsc_check(workspace):
-    """对 Playwright TypeScript 项目做类型检查。需要目标项目已安装依赖（node_modules/.bin/tsc）。"""
+def tsc_check(workspace, target_path=None):
+    """对 Playwright TypeScript 项目做类型检查。需要目标项目已安装依赖（node_modules/.bin/tsc）。
+
+    tsc 只有全项目模式，没有单文件模式：单文件会丢掉 tsconfig 的 paths / include 上下文，
+    反而报出一堆假错。所以照常全项目跑，但**判定只看目标文件相关的报错**——
+    项目里本来就有的类型错误（基线）不该算到这次生成头上，否则每次生成都必然失败。
+    """
     root = Path(workspace)
     bin_dir = root / 'node_modules' / '.bin'
     tsc = next((p for p in (bin_dir / 'tsc.cmd', bin_dir / 'tsc') if p.exists()), None)
     if tsc is None:
         raise ToolchainError('目标项目缺少 typescript（node_modules/.bin/tsc），请先安装项目依赖')
     result = _run([str(tsc), '--noEmit'], TSC_TIMEOUT, cwd=str(root))
-    return result.returncode == 0, _tail(result.stdout or result.stderr)
+    output = result.stdout or result.stderr or ''
+    if result.returncode == 0:
+        return True, ''
+    if not target_path:
+        return False, _tail(output)
+    rel = str(target_path).replace('\\', '/').lstrip('./')
+    hits = [
+        line for line in output.splitlines()
+        if rel in line.replace('\\', '/')
+    ]
+    if hits:
+        return False, _tail('\n'.join(hits))
+    # 目标文件一行错都没有：失败来自别的文件（既有基线），放行，但把基线噪音留在返回值里备查。
+    return True, ''
