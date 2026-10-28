@@ -26,6 +26,9 @@ MAX_CANDIDATES_IN_PROMPT = 5
 # 否则模型偶尔吐一份巨型 JSON 就能把一次生成撑爆。
 MAX_PLAN_BYTES = 64 * 1024
 MAX_PLAN_FEEDBACK = 20
+# 规划的项目事实最多扫几个测试文件：要给「项目原有用例」和「我们自己生成的旧版本」
+# 各留位置，只扫 3 个时后者会把前者挤掉。
+FACT_TEST_SCAN = 8
 LOCATOR_RULES = (
     '要求：\n'
     '- 只写 target_path 指定的那一个文件。运行环境只给它开了写权限，'
@@ -152,6 +155,51 @@ def target_ok(target_path):
     return not any(ch in target_path for ch in '*?[]')
 
 
+# 目标路径光「相对、无 ..」不够：这条路径既是写权限白名单，也是生成后的验收对象。
+# 所以再收一层——必须是本框架的测试文件、必须在工作区里、不能是依赖或配置。
+TARGET_SUFFIXES = {
+    PW_FRAMEWORK: ('.spec.ts', '.test.ts', '.spec.js', '.test.js'),
+    RF_FRAMEWORK: ('.robot',),
+}
+TARGET_DENY_DIRS = ('node_modules', '.git', '.autocase', '.venv', 'venv', 'dist', 'build')
+TARGET_DENY_NAMES = (
+    'playwright.config.ts', 'playwright.config.js', 'tsconfig.json', 'package.json',
+    'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
+)
+
+
+def target_problem(workspace, target_path, framework):
+    """校验目标文件路径，返回中文原因；没问题返回 None。
+
+    模型现在可以自己提名路径（见 plan），这条校验就是那道闸：用户确认的值和
+    模型提名的值都要过这里，不能因为「模型读过项目」就信它给的字符串。
+    """
+    if not target_path:
+        return '没有写入路径'
+    if not target_ok(target_path):
+        return '目标路径无效：必须是工作区内的相对路径，不能含 .. 或 * ? [ ]'
+    rel = target_path.replace('\\', '/')
+    parts = Path(rel).parts
+    if any(part in TARGET_DENY_DIRS for part in parts[:-1]):
+        return '目标路径不能放在 %s 这类目录里' % '/'.join(
+            sorted({p for p in parts[:-1] if p in TARGET_DENY_DIRS}))
+    if parts[-1].lower() in TARGET_DENY_NAMES:
+        return '目标路径不能是项目配置文件：%s' % parts[-1]
+    suffixes = TARGET_SUFFIXES.get(framework) or ()
+    if suffixes and not parts[-1].lower().endswith(suffixes):
+        return '目标文件扩展名不对：%s 需要 %s' % (
+            framework, ' / '.join(suffixes))
+    try:
+        root = Path(workspace).resolve()
+        resolved = (root / rel).resolve()
+        # resolve() 会把符号链接和 ../ 都展开，这里再比一次，防止绕过前面的字符串检查。
+        if resolved != root and root not in resolved.parents:
+            return '目标路径跑出工作区了：%s' % target_path
+    except OSError:
+        return '目标路径无法解析：%s' % target_path
+    return None
+
+
 def _steps_for_prompt(steps, framework):
     """把 IR 整理成 agent 能直接用的形式：每一步只带需要的定位与意图，不带内部字段。"""
     out = []
@@ -274,15 +322,27 @@ def _candidates_for_prompt(target, framework):
 
 PLAN_RULES = (
     '规划要求：\n'
+    '- 你只做三件事：定写入路径、定项目风格、给每一步一句施工说明。'
+    '「项目里有没有现成封装」不是你的职责——写手动笔时会读项目，别为了找封装翻目录。\n'
     '- 任务书里的每个 file / symbol / import 必须来自你真正读过的文件，不许编造。'
-    '项目里没有现成封装时 reusable 留空数组，不要硬凑。\n'
-    '- steps 要覆盖每一个录制步骤，顺序一致。只有「这个封装覆盖了该步的全部意图」才标 reuse，'
-    '其余一律 write；标 reuse 时把要传的参数写进 args。每个步骤都要写 note，'
-    '说清这一步具体怎么定位、怎么断言，写手会照它施工。\n'
-    '- target_path 是用户配置的写入位置，必须原样返回，不要改动它。'
-    '如果你判断这个位置不合适（例如测试框架只会收集某个目录，根目录的脚本根本不会被执行），'
-    '把建议路径写进 target_path_suggestion、把依据写进 target_path_reason，'
-    '但 target_path 仍要保留原值。\n'
+    'reusable 只填「读过的参考用例里本来就在调用、并且覆盖了该步全部意图」的封装；'
+    '其余情况留空数组，不要专门去找。\n'
+    '- steps 要覆盖每一个录制步骤，顺序一致。标 reuse 时把要传的参数写进 args。'
+    '每个步骤都要写 note，说清这一步做什么；只有录制里的 assert / wait 步骤才写断言或等待要求，'
+    'click / fill 这类步骤不要自己加断言。不要写定位表达式——'
+    '录制时已经把定位算准了，写手会直接用 dispatch 里的 locator，'
+    '你猜的跟它不一致反而要让写手在两个版本之间打架。\n'
+    '- 同一流程可能已经有旧版本：project_facts.previous_outputs 就是 AutoCase 以前为它生成的文件，'
+    '它们不是项目惯例。遇到时不要覆盖旧版本，另起一个新文件名（在原名后加动作后缀），'
+    '并在 risks 里写一句「已存在旧版本 xxx，本次写新文件」。'
+    '只有 payload.target_path 明确指向旧版本时才覆盖。\n'
+    '- 时间预算很紧：最多读 4 个文件、最多 4 轮工具调用。读完 1 个同业务域用例就够动笔，'
+    '第 4 轮之后必须直接输出 JSON，不要再做任何确认。\n'
+    '- 写入路径：payload.target_path 非空表示用户已经指定，必须原样返回；'
+    '为空表示由你按项目约定选一个，直接写进 target_path，并在 target_path_reason 里给一句依据'
+    '（例如「playwright.config.ts 的 testDir 是 ./tests，参考 tests/login-page/login-success.spec.ts」）。'
+    '路径必须是工作区内的相对路径，不能含 ..，不能放进 node_modules，也不能指向配置文件。'
+    '定一次就够，不要为路径反复权衡：用户会在任务书上确认最终位置。\n'
     '- 如果给了 feedback，必须逐条落实：quote 是用户选中的任务书原文，comment 是他的要求。'
     '和任务书原文冲突时以 feedback 为准，并在 changes 里说明每条意见怎么改的。\n'
     '- 你只读不写。确实需要改目标文件以外的文件才能跑通时，写进 needs，不要试图绕过，'
@@ -331,14 +391,55 @@ def _clean_feedback(feedback):
     return out
 
 
-def _plan_payload(framework, steps, target_path, title, feedback=None, previous_plan=None):
+def _project_facts(workspace, framework):
+    """把「路径该怎么放」的客观依据直接给模型，省掉它自己 glob 三轮。
+
+    上一版什么都不给，模型要读 playwright.config.ts、再翻同目录用例，才敢判断
+    该写哪个位置；这一步的 reasoning 经常就是几十秒。这些事实后端本来就能算，
+    提前给，模型的思考量直接砍一半。
+
+    recent_tests 和 previous_outputs 必须分开：前者是项目自己的写法，
+    后者是 AutoCase 以前为同一条流程生成的旧版本。混在一起时，规划会读出一份
+    「已经有一模一样的用例了」，然后在覆盖还是新建之间反复权衡——240 秒超时就是这么来的。
+    """
+    root = Path(workspace)
+    facts = {}
+    try:
+        if framework == PW_FRAMEWORK:
+            config = root / 'playwright.config.ts'
+            if config.is_file():
+                text = config.read_text(encoding='utf-8', errors='replace')
+                found = re.search(r"testDir\s*:\s*['\"]([^'\"]+)['\"]", text)
+                if found:
+                    facts['test_dir'] = found.group(1)
+        entries = detect.recent_test_paths(root, robot=framework == RF_FRAMEWORK,
+                                          limit=FACT_TEST_SCAN)
+        recent = [e['path'] for e in entries if not e['generated']][:3]
+        previous = [e['path'] for e in entries if e['generated']][:2]
+        if recent:
+            facts['recent_tests'] = recent
+        if previous:
+            facts['previous_outputs'] = previous
+    except (OSError, ValueError):
+        # 探测失败不影响规划：模型自己会读项目。
+        pass
+    return facts
+
+
+def _plan_payload(framework, steps, target_path, title, feedback=None, previous_plan=None,
+                  workspace=None):
     payload = {
         'framework': framework,
-        'target_path': target_path,
+        # 空字符串 = 用户没指定，由规划按项目约定选一个。
+        'target_path': target_path or '',
         'title': title,
         'steps': [_plan_step(step) for step in steps],
         'output_language': 'Simplified Chinese',
     }
+    if workspace:
+        facts = _project_facts(workspace, framework)
+        if facts:
+            payload['project_facts'] = facts
     notes = _clean_feedback(feedback)
     if notes:
         payload['feedback'] = notes
@@ -350,9 +451,16 @@ def _plan_payload(framework, steps, target_path, title, feedback=None, previous_
 
 def _plan_prompt(payload):
     head = (
-        '下面是一条录制好的测试流程。请先扫一遍这个项目，再产出任务书。\n'
+        '下面是一条录制好的测试流程。请产出任务书。\n'
         '你没有写权限，也不应该尝试写任何文件。\n'
+        '时间预算很紧：读完 1 个同业务域用例就动笔，最多 4 轮工具调用，然后直接输出 JSON。\n'
     )
+    if payload.get('project_facts'):
+        head += (
+            '项目事实已经探好放在 project_facts 里（测试目录、项目原有用例 recent_tests、'
+            '你自己以前生成的旧版本 previous_outputs），直接用它们定写入路径和风格，'
+            '不要为了这两件事再翻一遍目录。\n'
+        )
     if payload.get('feedback'):
         head += '用户对上一版任务书提了意见，这次必须按意见修订，不要装作没看见。\n'
     return (
@@ -360,6 +468,21 @@ def _plan_prompt(payload):
         + PLAN_RULES
         + '```json\n' + json.dumps(payload, ensure_ascii=False, indent=2) + '\n```\n'
     )
+
+
+def _partial_note(partial):
+    """超时诊断：跑了几轮、推理写了多少。
+
+    用户看「超过 420 秒」只知道失败，看不出它是跑偏了还是只差收尾。
+    带上这两个数，就能判断该改提示词还是该加预算。
+    """
+    if not partial:
+        return ''
+    rounds = partial.get('rounds') or 0
+    reasoning = partial.get('reasoning_chars') or 0
+    if not rounds and not reasoning:
+        return ''
+    return '（已跑 %d 轮，推理 %d 字符）' % (rounds, reasoning)
 
 
 def _extract_plan(text):
@@ -391,28 +514,41 @@ def _extract_plan(text):
     return data, None
 
 
-def _normalize_plan(plan, target_path):
-    """把任务书整理成「路径只当建议」的形状。
+def _normalize_plan(plan, target_path, workspace=None, framework=None):
+    """整理任务书里的写入路径：用户给了就锁死，没给就采用规划提名的那条。
 
-    模型确实会顺手改 target_path（这次就改了：它读了 playwright.config.ts，
-    发现 testDir 是 ./tests，于是把根目录的 spec 挪进了 tests/ai-chat/）。
-    这个判断可能对，但**不能由它直接决定写哪里**：写路径要经过用户确认，
-    而且验收和权限也只认请求里的 target_path。所以这里把原值强制写回，
-    它改过的路径降级成 target_path_suggestion，交给界面展示。
+    以前是「永远用请求里的路径」：用户随手填一个根目录的 spec，模型读了
+    playwright.config.ts 发现 testDir 是 ./tests、那个位置根本不会被收集，
+    想改又不敢改，于是在 reasoning 里反复权衡——上次 240 秒超时就是这么烧掉的。
+    现在路径可以由规划提名，但只到「建议」为止：真正写哪个文件仍要看用户在
+    任务书上确认的值，而且提名本身要过 target_problem 那道校验。
     """
     data = dict(plan)
     raw_path = str(data.get('target_path') or '').strip().replace('\\', '/')
     explicit = str(data.get('target_path_suggestion') or '').strip().replace('\\', '/')
     reason = str(data.get('target_path_reason') or '').strip()
-    suggestion = explicit or raw_path
 
-    data['target_path'] = target_path
-    if suggestion and suggestion != target_path and target_ok(suggestion):
-        data['target_path_suggestion'] = suggestion
-        data['target_path_reason'] = reason or '规划认为这个位置更符合项目约定'
+    if target_path:
+        # 用户明确指定了路径：以请求为准，模型改过的降级成建议。
+        suggestion = explicit or raw_path
+        data['target_path'] = target_path
+        if suggestion and suggestion != target_path and target_ok(suggestion):
+            data['target_path_suggestion'] = suggestion
+            data['target_path_reason'] = reason or '规划认为这个位置更符合项目约定'
+        else:
+            data.pop('target_path_suggestion', None)
+            data.pop('target_path_reason', None)
     else:
+        # 没指定：采纳规划提名的路径（有 suggestion 优先），再校验一次。
+        chosen = explicit or raw_path
+        problem = target_problem(workspace, chosen, framework) if chosen else '规划没有给出写入路径'
+        if problem:
+            raise EmitError('规划给的写入路径不可用：%s。请重新规划，或在配置里自己指定目标文件。'
+                            % problem)
+        data['target_path'] = chosen
+        # 已经采纳成正式路径，就不该再展示成「建议改到」。
         data.pop('target_path_suggestion', None)
-        data.pop('target_path_reason', None)
+        data['target_path_reason'] = reason or '规划按项目约定选的位置'
 
     steps = []
     for item in data.get('steps') or []:
@@ -469,9 +605,16 @@ def plan_matches_steps(plan, steps):
 
 
 def _prepare(workspace, steps, framework, target_path):
-    """规划和写入共用的入口校验：路径、框架、步骤、以及「元素还在不在」。"""
-    if not target_ok(target_path):
-        raise EmitError('目标路径无效：必须是工作区内的相对路径，不能含 .. 或 * ? [ ]')
+    """规划和写入共用的入口校验：路径、框架、步骤、以及「元素还在不在」。
+
+    target_path 允许为空：规划阶段可以不给路径，让 agent 自己按项目约定提名，
+    用户确认后再带着确定路径进入写入。为空时跳过路径校验，由调用方在拿到
+    规划结果后补一次（见 target_problem）。
+    """
+    if target_path:
+        problem = target_problem(workspace, target_path, framework)
+        if problem:
+            raise EmitError(problem)
     root = Path(workspace).resolve()
     if not root.is_dir():
         raise EmitError('工作区目录不存在：%s' % workspace)
@@ -510,8 +653,9 @@ def plan(runner, workspace, model, steps, framework, target_path, title, python=
          feedback=None, previous_plan=None, progress=None):
     """只跑规划：读项目、出任务书，不写任何文件。
 
-    返回值里的 plan 已经归一化：target_path 一定是请求里的路径，
-    模型想改的那条只出现在 target_path_suggestion 里。
+    返回值里的 plan 已经归一化：用户配了 target_path 就锁死它、把模型想改的
+    那条留在 target_path_suggestion；没配就用规划提名的路径，此时 `chosen`
+    标记为 True，告诉界面「这个位置是 AI 定的，需要你确认」。
     """
     def mark(stage, detail=''):
         if progress is not None:
@@ -519,22 +663,45 @@ def plan(runner, workspace, model, steps, framework, target_path, title, python=
 
     root, _ = _prepare(workspace, steps, framework, target_path)
     mark('planning')
+    partial = {}
     try:
         text = runner.emit_planning(
             root, model,
             _plan_prompt(_plan_payload(framework, steps, target_path, title,
-                                       feedback=feedback, previous_plan=previous_plan)),
+                                       feedback=feedback, previous_plan=previous_plan,
+                                       workspace=workspace)),
         )
     except Exception as exc:
-        raise EmitError('规划失败：%s' % (str(exc) or exc.__class__.__name__))
+        # 超时不一定颗粒无收：模型经常已经在正文里把 JSON 写了大半。
+        # 能拼出完整任务书就直接用，拼不出才报错，并且说清它跑到哪一步。
+        partial = dict(getattr(exc, 'partial', None) or {})
+        reason = str(exc) or exc.__class__.__name__
+        partial['_reason'] = reason
+        text = (partial.get('text') or '').strip()
+        if not text:
+            raise EmitError('规划失败：%s%s' % (reason, _partial_note(partial)))
+        logger.warning('规划中止（%s），正文已有 %d 字符，尝试抢救', reason, len(text))
 
     data, error = _extract_plan(text)
     if data is None:
+        if partial:
+            raise EmitError(
+                '规划失败：%s%s（已输出 %d 字符，没能拼成完整任务书）'
+                % (partial.get('_reason') or '规划中止', _partial_note(partial), len(text)),
+                details=[text[-600:]],
+            )
         raise EmitError('任务书解析失败：%s' % error, details=[(text or '')[:500]])
-    data = _normalize_plan(data, target_path)
+    if partial:
+        logger.warning('规划在中止前已写出完整任务书（%d 字符），直接采用', len(text))
+    data = _normalize_plan(data, target_path, workspace=workspace, framework=framework)
     # 指纹由服务端算，不采信模型给的：写入时要拿它判断「录制有没有变过」。
     data['steps_sig'] = steps_signature(steps)
     if not data['steps']:
+        if partial:
+            raise EmitError(
+                '规划失败：%s%s（任务书里没有任何步骤）'
+                % (partial.get('_reason') or '规划中止', _partial_note(partial))
+            )
         raise EmitError('任务书没有覆盖任何录制步骤，请重试或换一个模型')
     if not plan_matches_steps(data, steps):
         raise EmitError('任务书与录制步骤对不上（录制可能变过），请重新规划')
@@ -542,12 +709,15 @@ def plan(runner, workspace, model, steps, framework, target_path, title, python=
     if size > MAX_PLAN_BYTES:
         raise EmitError('任务书过大（%d 字符），请重新规划' % size)
 
-    logger.info('录制规划：%s 步 / %s 个复用项 / %s 项额外改动 / %s 字符',
-                len(data['steps']), len(data['reusable']), len(data.get('needs') or []), size)
+    logger.info('录制规划：%s 步 / %s 个复用项 / %s 项额外改动 / %s 字符 / 写入 %s',
+                len(data['steps']), len(data['reusable']), len(data.get('needs') or []),
+                size, data['target_path'])
     logger.debug('录制规划：任务书全文 %s', json.dumps(data, ensure_ascii=False))
     return {
         'plan': data,
-        'target_path': target_path,
+        'target_path': data['target_path'],
+        # 用户没配路径时，这个位置是 AI 选的：界面要明确提示「需要你确认」。
+        'chosen': not target_path,
         'suggestion': data.get('target_path_suggestion'),
         'reason': data.get('target_path_reason'),
         'steps': len(data['steps']),

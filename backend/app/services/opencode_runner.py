@@ -23,6 +23,19 @@ class WorkspaceBusyError(ValueError):
     pass
 
 
+class PartialResult(RuntimeError):
+    """超时中止时已经拿到的部分输出。
+
+    规划最常见的失败不是「什么都没干」，而是「在推理里把任务书想完了、正文还没开始吐」。
+    把这段扔掉等于每次重来，也看不出它离成功有多远。异常里带上就能让上层决定：
+    能解析出完整 JSON 就直接用，解析不了至少把「跑了几轮、推理多少字符」报给用户。
+    """
+
+    def __init__(self, message, partial=None):
+        super().__init__(message)
+        self.partial = partial or {}
+
+
 # 一次性文本调用时关闭的内置工具，避免模型在解析意图时去读写文件。
 ASK_NO_TOOLS = {
     'bash': False, 'edit': False, 'write': False, 'read': False, 'glob': False,
@@ -1365,12 +1378,15 @@ class OpenCodeRunner:
 
         return path, drop
 
-    def emit_planning(self, workspace, model, prompt, timeout=240):
+    def emit_planning(self, workspace, model, prompt, timeout=420):
         """规划阶段：只读 agent 扫一遍项目，产出一份任务书（JSON 文本）。
 
         writable 传 None 表示不改写权限配置，直接用项目里 recording-planner 的定义——
         那个 agent 的 permission 已经是 edit/write 全 deny，读得到项目、写不了任何文件。
         规划失败不该让整次生成失败，调用方负责降级（见 emit._plan）。
+
+        超时给 420 秒而不是 240：实测 10 步录制最省的路径也要「读 1 个用例 + 写 1500 token
+        JSON」约 90 秒，多数成功案例在 80-190 秒之间，240 秒卡在分布中间，等于每次都在赌。
         """
         return self.emit_recording(
             workspace, model, prompt, timeout=timeout, writable=None,
@@ -1426,7 +1442,11 @@ class OpenCodeRunner:
                     raise RuntimeError(f'OpenCode 服务提前退出（{process.returncode}）')
                 now = time.monotonic()
                 if now > deadline:
-                    raise RuntimeError(f'录制生成超过 {timeout} 秒仍未结束')
+                    # 先把已经生成的东西抢出来再抛：abort 之后就查不到这条会话了。
+                    raise PartialResult(
+                        f'录制生成超过 {timeout} 秒仍未结束',
+                        self._salvage(base_url, session_id),
+                    )
                 status = requests.get(f'{base_url}/session/status', timeout=10).json() or {}
                 busy = session_id in status
                 if busy:
@@ -1448,6 +1468,36 @@ class OpenCodeRunner:
                     pass
             self._terminate_process(process)
             drop_config()
+
+    @staticmethod
+    def _salvage(base_url, session_id):
+        """超时中止前，把会话里已经生成的内容抢出来。
+
+        返回 {'text': 正文, 'reasoning_chars': 推理字符数, 'rounds': 已跑轮数}。
+        正文能拼出完整 JSON 时上层会直接用；拼不出也能告诉用户「它跑到第几轮、
+        推理写了多少」，而不是只丢一句超时。
+        """
+        try:
+            messages = requests.get(f'{base_url}/session/{session_id}/message', timeout=10).json() or []
+        except requests.RequestException:
+            return {}
+        text, reasoning, rounds = [], 0, 0
+        for message in messages if isinstance(messages, list) else []:
+            info = message.get('info') or {}
+            if info.get('role') != 'assistant':
+                continue
+            rounds += 1
+            for part in message.get('parts') or []:
+                kind = part.get('type')
+                if kind == 'text':
+                    text.append(part.get('text') or '')
+                elif kind == 'reasoning':
+                    reasoning += len(part.get('text') or '')
+        return {
+            'text': ''.join(text).strip(),
+            'reasoning_chars': reasoning,
+            'rounds': rounds,
+        }
 
     @staticmethod
     def _last_text(messages):

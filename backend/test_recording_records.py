@@ -195,7 +195,7 @@ class RecordRouteTest(unittest.TestCase):
         self.assertEqual(self.client.get('/api/automation/recording/generations/nope').status_code, 404)
         self.assertEqual(self.client.post('/api/automation/recording/generations/nope/revert').status_code, 404)
 
-    def test_failed_generation_creates_no_record(self):
+    def test_failed_generation_without_touching_the_file_creates_no_record(self):
         before = RecordingGeneration.query.count()
         with mock.patch.object(emit, 'generate', side_effect=emit.EmitError('校验未通过，已还原', details=['x'])):
             r = self.client.post('/api/automation/recording/generate', json={
@@ -204,6 +204,34 @@ class RecordRouteTest(unittest.TestCase):
                 'plan': {'steps': [{'no': 1, 'action': 'write'}]}})
         self.assertEqual(r.status_code, 422)
         self.assertEqual(RecordingGeneration.query.count(), before)
+
+    def test_failed_generation_keeps_a_revertible_record_when_the_file_was_touched(self):
+        """写了一半才失败：原文件已经被覆盖，必须留下能还原的记录。"""
+        target = self.ws / 'tests' / 'route_fail.robot'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('*** Test Cases ***\nOLD\n', encoding='utf-8')
+
+        def boom(runner, workspace, model, steps, framework, target_path, *args, **kwargs):
+            (Path(workspace) / target_path).write_text('半截内容', encoding='utf-8')
+            raise emit.EmitError('校验没过')
+
+        with mock.patch.object(emit, 'generate', side_effect=boom):
+            r = self.client.post('/api/automation/recording/generate', json={
+                'model': 'p/m', 'workspace_path': 'proj', 'framework': 'robot-selenium',
+                'target_path': 'tests/route_fail.robot',
+                'overwrite': True,
+                'plan': {'steps': [{'no': 1, 'action': 'write'}]}})
+        self.assertEqual(r.status_code, 422, r.get_json())
+        details = r.get_json()['details']
+        record_id = next((d.split(':', 1)[1] for d in details if d.startswith('record:')), None)
+        self.assertIsNotNone(record_id, '失败后要给出可回滚的记录 id')
+
+        detail = self.client.get('/api/automation/recording/generations/' + record_id).get_json()
+        self.assertEqual(detail['status'], 'failed')
+        self.assertIn('半截内容', detail['content'])
+
+        self.client.post('/api/automation/recording/generations/%s/revert' % record_id)
+        self.assertIn('OLD', target.read_text(encoding='utf-8'), '回滚要把原内容写回去')
 
     def test_target_with_parent_segment_is_rejected_before_reading(self):
         r = self.client.post('/api/automation/recording/generate', json={

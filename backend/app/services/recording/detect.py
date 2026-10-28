@@ -97,10 +97,42 @@ def requirement_hints(workspace):
     return hints[:10]
 
 
-def sample_robot_files(workspace):
-    """最近修改的 .robot 文件，作为项目写法的样例。只返回前若干行。"""
-    root = Path(workspace)
-    files = [p for p in _walk(root) if p.suffix == '.robot']
+def _is_artifact_copy(path):
+    """AutoCase 自己跑出来的工作区副本（autocase/runs/<时间戳>/tests/...）。
+
+    它们是被生成或复制出来的产物，不是项目的真实写法；拿它们当样例会让模型
+    以为那就是项目约定，甚至照着这个目录去定写入路径。
+    """
+    parts = [part.lower() for part in path.parts[:-1]]
+    for index, part in enumerate(parts):
+        if part == 'autocase' and index + 1 < len(parts) and parts[index + 1] == 'runs':
+            return True
+    return False
+
+
+# AutoCase 写出来的文件带这两种痕迹：新版会在首行写 @autocase，
+# 旧版（自动加标记之前）留下的注释是「spec: 录制自」。都只出现在文件头。
+AUTOCASE_MARKERS = ('@autocase', 'spec: 录制自')
+MARKER_SCAN_LINES = 4
+
+
+def is_generated_by_autocase(path):
+    """这个测试文件是不是 AutoCase 自己录出来的产物。
+
+    它跟「项目里原本就有的用例」性质完全不同：它是这条流程上一次生成的结果。
+    规划把两者混为一谈，就会读出一份「已经有一模一样的用例了」，
+    然后在「覆盖它还是新建一个」上来回权衡——上次 240 秒超时就是这样烧掉的。
+    """
+    try:
+        with path.open('r', encoding='utf-8', errors='replace') as handle:
+            head = ''.join(next(handle, '') for _ in range(MARKER_SCAN_LINES))
+    except OSError:
+        return False
+    head = head.lower()
+    return any(marker in head for marker in AUTOCASE_MARKERS)
+
+
+def _samples(root, files):
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     samples = []
     for path in files[:SAMPLE_LIMIT]:
@@ -108,12 +140,49 @@ def sample_robot_files(workspace):
             lines = path.read_text(encoding='utf-8', errors='replace').splitlines()[:SAMPLE_LINES]
         except OSError:
             continue
-        samples.append({'path': str(path.relative_to(root)).replace('\\', '/'), 'head': '\n'.join(lines)})
+        samples.append({
+            'path': str(path.relative_to(root)).replace('\\', '/'),
+            'head': '\n'.join(lines),
+            # 调用方（规划的项目事实）要把自己的产物单独归类，所以顺手标出来，
+            # 免得再读一遍文件。
+            'generated': is_generated_by_autocase(path),
+        })
     return samples
+
+
+def sample_robot_files(workspace):
+    """最近修改的 .robot 文件，作为项目写法的样例。只返回前若干行。"""
+    root = Path(workspace)
+    files = [p for p in _walk(root) if p.suffix == '.robot' and not _is_artifact_copy(p)]
+    return _samples(root, files)
 
 
 def _is_ts_test(path):
     return path.name.lower().endswith(TS_TEST_SUFFIXES)
+
+
+def recent_test_paths(workspace, robot=False, limit=6):
+    """最近的测试文件路径，带「是不是 AutoCase 自己生成的」标记。
+
+    样例（samples）要带正文，最多给 3 个；但规划需要看得更宽——它得同时分清
+    「项目原有的用例」和「这条流程上一次生成的旧版本」。后者不能当项目惯例，
+    否则规划会读出一份等价用例，然后在「覆盖还是新建」上来回权衡。
+    这里只读文件头几行，成本可以忽略。
+    """
+    root = Path(workspace)
+    if robot:
+        files = [p for p in _walk(root) if p.suffix == '.robot' and not _is_artifact_copy(p)]
+    else:
+        files = [p for p in _walk(root) if _is_ts_test(p) and not _is_artifact_copy(p)]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    out = []
+    for path in files[:limit]:
+        try:
+            rel = str(path.relative_to(root)).replace('\\', '/')
+        except ValueError:
+            continue
+        out.append({'path': rel, 'generated': is_generated_by_autocase(path)})
+    return out
 
 
 def sample_test_files(workspace):
@@ -124,16 +193,8 @@ def sample_test_files(workspace):
     这里和 sample_robot_files 做同一件事，只是后缀不同。
     """
     root = Path(workspace)
-    files = [p for p in _walk(root) if _is_ts_test(p)]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    samples = []
-    for path in files[:SAMPLE_LIMIT]:
-        try:
-            lines = path.read_text(encoding='utf-8', errors='replace').splitlines()[:SAMPLE_LINES]
-        except OSError:
-            continue
-        samples.append({'path': str(path.relative_to(root)).replace('\\', '/'), 'head': '\n'.join(lines)})
-    return samples
+    files = [p for p in _walk(root) if _is_ts_test(p) and not _is_artifact_copy(p)]
+    return _samples(root, files)
 
 
 def playwright_ts_present(workspace):

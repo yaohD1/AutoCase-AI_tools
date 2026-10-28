@@ -28,18 +28,22 @@ class FakeRunner(object):
     混在一起断言分不清是「谁看到了什么」。
     """
 
-    def __init__(self, *actions, plan=None, plan_error=None):
+    def __init__(self, *actions, plan=None, plan_error=None, plan_partial=None):
         self.actions = list(actions)
         self.prompts = []
         self.writables = []
         self.plan_text = plan
         self.plan_error = plan_error
+        self.plan_partial = plan_partial
         self.plan_prompts = []
 
-    def emit_planning(self, workspace, model, prompt, timeout=240):
+    def emit_planning(self, workspace, model, prompt, timeout=420):
         self.plan_prompts.append(prompt)
         if self.plan_error:
-            raise RuntimeError(self.plan_error)
+            error = RuntimeError(self.plan_error)
+            if self.plan_partial is not None:
+                error.partial = self.plan_partial
+            raise error
         return self.plan_text if self.plan_text is not None else '{}'
 
     def emit_recording(self, workspace, model, prompt, timeout=600, writable=None, **kwargs):
@@ -154,12 +158,123 @@ class EmitTest(unittest.TestCase):
         self.assertEqual(result['steps'], 1)
         self.assertEqual(runner.prompts, [], '规划不该写文件')
 
+    def test_plan_without_a_configured_path_adopts_the_model_choice(self):
+        """配置留空 = 位置交给规划。这时它写的 target_path 就是正式路径，不是建议。"""
+        chosen = json.dumps({
+            'steps': [{'no': 1, 'action': 'write', 'note': 'x'}],
+            'target_path': 'tests/login.robot',
+            'target_path_reason': 'robot 文件都放在 tests/ 下',
+        }, ensure_ascii=False)
+        runner = FakeRunner(plan=chosen)
+        result = emit.plan(runner, self.ws, 'p/m', [_rf_step()], 'robot-selenium',
+                           '', 'Login', python=sys.executable)
+
+        self.assertEqual(result['plan']['target_path'], 'tests/login.robot')
+        self.assertEqual(result['target_path'], 'tests/login.robot')
+        self.assertTrue(result['chosen'], '需要告诉界面「这是 AI 选的，等用户确认」')
+        self.assertIsNone(result['suggestion'], '已经采纳成正式路径，不该再挂一条建议')
+        self.assertIn('tests/', result['reason'])
+
+    def test_plan_without_a_path_rejects_a_dangerous_model_choice(self):
+        """「自己定位置」不是放权：模型提名的路径同样要过校验。"""
+        bad = json.dumps({'steps': [{'no': 1, 'action': 'write'}],
+                          'target_path': 'node_modules/x.robot'})
+        runner = FakeRunner(plan=bad)
+        with self.assertRaises(emit.EmitError) as ctx:
+            emit.plan(runner, self.ws, 'p/m', [_rf_step()], 'robot-selenium', '', 'Login')
+        self.assertIn('node_modules', str(ctx.exception))
+
+    def test_target_problem_rejects_paths_that_cannot_be_the_target(self):
+        cases = [
+            ('playwright-ts', 'tests/a.robot', '扩展名'),
+            ('playwright-ts', 'playwright.config.ts', '配置文件'),
+            ('playwright-ts', 'node_modules/a.spec.ts', 'node_modules'),
+            ('playwright-ts', '../a.spec.ts', '..'),
+            ('playwright-ts', '', '没有写入路径'),
+        ]
+        for framework, path, expect in cases:
+            with self.subTest(path=path):
+                problem = emit.target_problem(self.ws, path, framework)
+                self.assertIsNotNone(problem)
+                self.assertIn(expect, problem)
+        self.assertIsNone(emit.target_problem(self.ws, 'tests/a.spec.ts', 'playwright-ts'))
+
+    def test_plan_payload_carries_project_facts(self):
+        """测试目录和最近用例要提前给模型，省掉它为了定路径多跑几轮 glob。"""
+        (self.ws / 'playwright.config.ts').write_text(
+            "export default { testDir: './tests' };", encoding='utf-8')
+        (self.ws / 'tests').mkdir()
+        (self.ws / 'tests' / 'a.spec.ts').write_text('test("a", () => {});', encoding='utf-8')
+        # AutoCase 自己跑出来的工作区副本不能被当成「项目写法」推荐给模型。
+        copy = self.ws / 'autocase' / 'runs' / '20260101-000000' / 'tests' / 'b.spec.ts'
+        copy.parent.mkdir(parents=True)
+        copy.write_text('test("b", () => {});', encoding='utf-8')
+
+        payload = emit._plan_payload('playwright-ts', [_rf_step()], '', 'Login',
+                                     workspace=str(self.ws))
+        self.assertEqual(payload['target_path'], '')
+        self.assertEqual(payload['project_facts']['test_dir'], './tests')
+        recent = payload['project_facts']['recent_tests']
+        self.assertIn('tests/a.spec.ts', recent)
+        self.assertNotIn('autocase/runs/20260101-000000/tests/b.spec.ts', recent)
+        text = emit._plan_prompt(payload)
+        self.assertIn('project_facts', text)
+
     def test_plan_failure_is_reported_not_swallowed(self):
         """规划已经是独立一步：失败要明确报错，不能悄悄降级成「没有任务书」。"""
         runner = FakeRunner(plan_error='模型超时')
         with self.assertRaises(emit.EmitError) as ctx:
             emit.plan(runner, self.ws, 'p/m', [_rf_step()], 'robot-selenium', TARGET, 'Login')
         self.assertIn('模型超时', str(ctx.exception))
+
+    def test_aborted_run_keeps_the_task_sheet_it_already_wrote(self):
+        """超时前正文里已经写完整份任务书时，别丢掉——实测就差了最后一次输出。"""
+        finished = json.dumps({
+            'steps': [{'no': 1, 'action': 'write', 'note': '填入用户名'}],
+            'target_path': TARGET,
+        }, ensure_ascii=False)
+        runner = FakeRunner(
+            plan_error='录制生成超过 420 秒仍未结束',
+            plan_partial={'text': finished, 'rounds': 7, 'reasoning_chars': 11444},
+        )
+        result = emit.plan(runner, self.ws, 'p/m', [_rf_step()], 'robot-selenium', TARGET, 'Login')
+
+        self.assertEqual(result['steps'], 1)
+        self.assertEqual(result['plan']['steps'][0]['note'], '填入用户名')
+
+    def test_aborted_run_reports_how_far_it_got(self):
+        """抢救不到 JSON 时，至少要说清它跑了几轮、推理写了多少，而不是只报超时。"""
+        runner = FakeRunner(
+            plan_error='录制生成超过 420 秒仍未结束',
+            plan_partial={'text': '让我再看看这个项目……', 'rounds': 7, 'reasoning_chars': 11444},
+        )
+        with self.assertRaises(emit.EmitError) as ctx:
+            emit.plan(runner, self.ws, 'p/m', [_rf_step()], 'robot-selenium', TARGET, 'Login')
+        message = str(ctx.exception)
+        self.assertIn('420 秒', message)
+        self.assertIn('已跑 7 轮', message)
+        self.assertIn('推理 11444 字符', message)
+
+    def test_project_facts_keep_our_own_output_apart_from_project_tests(self):
+        """AutoCase 生成的旧版本不能混进「项目惯例」，否则规划会在覆盖/新建之间反复权衡。"""
+        (self.ws / 'tests').mkdir()
+        (self.ws / 'tests' / 'project.spec.ts').write_text(
+            'import { test } from "@playwright/test";\n', encoding='utf-8')
+        (self.ws / 'tests' / 'old-run.spec.ts').write_text(
+            '// @autocase 录制自 https://example.com —— 上次生成的\n'
+            'import { test } from "@playwright/test";\n', encoding='utf-8')
+
+        facts = emit._project_facts(str(self.ws), 'playwright-ts')
+        self.assertIn('tests/project.spec.ts', facts['recent_tests'])
+        self.assertNotIn('tests/old-run.spec.ts', facts['recent_tests'])
+        self.assertIn('tests/old-run.spec.ts', facts['previous_outputs'])
+
+    def test_planner_prompt_budgets_exploration(self):
+        """规划只负责路径、风格、每步说明；找封装和猜定位交给写手，且必须有轮数预算。"""
+        text = emit._plan_prompt(emit._plan_payload('playwright-ts', [_rf_step()], TARGET, 'Login'))
+        self.assertIn('最多读 4 个文件', text)
+        self.assertIn('previous_outputs', text)
+        self.assertIn('不要写定位表达式', text)
 
     def test_plan_must_cover_every_recorded_step(self):
         runner = FakeRunner(plan=json.dumps({'steps': [{'no': 2, 'action': 'write'}]}))
@@ -171,12 +286,15 @@ class EmitTest(unittest.TestCase):
         self.assertFalse(emit.plan_matches_steps(
             {'steps': [{'no': 1}], 'steps_sig': '1:click:别的元素'}, [_rf_step()]))
 
-    def test_plan_prompt_forbids_rewriting_target_path(self):
+    def test_plan_prompt_tells_the_planner_when_it_may_pick_the_path(self):
         text = emit._plan_prompt(emit._plan_payload('playwright-ts', [_rf_step()], TARGET, 'Login',
                                                    feedback=[{'quote': 'q', 'comment': 'c'}]))
         self.assertIn('必须原样返回', text)
         self.assertIn('feedback', text)
         self.assertIn('"comment": "c"', text)
+        # 配置留空时必须明确说「你来选」，否则模型还是会绕着空路径纠结。
+        blank = emit._plan_prompt(emit._plan_payload('playwright-ts', [_rf_step()], '', 'Login'))
+        self.assertIn('为空表示由你按项目约定选一个', blank)
 
     def test_writer_prompt_forbids_using_the_plan_path(self):
         prompt = emit._prompt({'framework': 'robot-selenium', 'target_path': TARGET,

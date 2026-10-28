@@ -3,6 +3,7 @@
 录制会话全局只有一个，不绑定项目；项目、工作区与目标路径在「生成」时才确定。
 """
 import json
+import logging
 import os
 from urllib.parse import urlencode, urlparse
 
@@ -19,6 +20,7 @@ from app.services.recording.session import RecordingBusy, RecordingError, Record
 
 
 recording_bp = Blueprint('recording', __name__)
+logger = logging.getLogger(__name__)
 
 # 解析进程要用的 OpenCode 启动参数：只传存在的那几项，其余走 OpenCodeRunner 的默认值。
 OPENCODE_CONFIG_KEYS = ('OPENCODE_BIN', 'OPENCODE_CONFIG', 'OPENCODE_PURE', 'OPENCODE_SERVE_HOST')
@@ -366,7 +368,11 @@ def plan_recording():
 
 
 def _prepare_generation(body):
-    """规划和写入共用的请求校验。返回 (上下文, 错误响应)，两者必有一个为 None。"""
+    """规划和写入共用的请求校验。返回 (上下文, 错误响应)，两者必有一个为 None。
+
+    target_path 允许为空：为空表示「让规划按项目约定选一个」，规划结果里会给出
+    具体路径，用户确认后再带着它走 /generate。
+    """
     session = RecordingSession.current()
     if session is None:
         return None, _error('没有录制', 404)
@@ -382,8 +388,10 @@ def _prepare_generation(body):
         _, workspace = AutomationScriptGenerator(current_app.config)._resolve_workspace(body.get('workspace_path'))
     except ValueError as exc:
         return None, _error(str(exc), 400)
-    if not emit.target_ok(target_path):
-        return None, _error('目标路径无效：必须是工作区内的相对路径，不能含 .. 或 * ? [ ]', 400)
+    if target_path:
+        problem = emit.target_problem(workspace, target_path, framework)
+        if problem:
+            return None, _error(problem, 400)
     return {
         'session': session,
         'runner': OpenCodeRunner(current_app.config),
@@ -413,7 +421,15 @@ def generate_recording():
         # 录制被改过之后，旧任务书里的 note 已经对不上步骤了；硬写只会漏步骤。
         return jsonify({'error': '录制步骤已变化，请重新生成任务书', 'details': ['plan_stale']}), 409
 
-    target_path = ctx['target_path']
+    # 路径以「用户确认过的」为准：配置里填了就用配置，没填就用任务书里那条。
+    # 任务书本身可以改路径（用户在卡片上改），所以这里必须重新校验一次，
+    # 不能因为它是从上一轮响应里回传的就当可信值。
+    target_path = (ctx['target_path'] or str(plan.get('target_path') or '').strip()).replace('\\', '/')
+    problem = emit.target_problem(ctx['workspace'], target_path, ctx['framework'])
+    if problem:
+        return _error('写入路径不可用：%s' % problem, 400)
+    # 写手会同时看到 prompt 里的 target_path 和 plan.target_path，两处必须一致。
+    plan = {**plan, 'target_path': target_path}
     target_abs = ctx['workspace'] / target_path
     # 生成前先保存原内容，未提交时回滚要用到。
     original = target_abs.read_bytes() if target_abs.is_file() else None
@@ -444,12 +460,38 @@ def generate_recording():
             # 别让另一个窗口看到一条没有意义的「失败」。
             progress.PROGRESS.reset()
         else:
+            # 失败也可能已经动过文件（写了一半、校验不过）。留一条可回滚的记录，
+            # 否则覆盖掉的旧内容就再也拿不回来了——路径放给 AI 选之后，这一步是底线。
+            record_id = _keep_failed_record(ctx, target_path, original)
+            if record_id:
+                exc.details = list(exc.details or []) + ['record:%s' % record_id]
             progress.PROGRESS.fail(str(exc), exc.details)
         return jsonify({'error': str(exc), 'details': exc.details}), status
     except Exception as exc:
         # 500 也要落到进度里：否则进度条会永远停在「正在写入」，用户只能刷新。
         progress.PROGRESS.fail('生成失败：%s' % exc)
         raise
+
+
+def _keep_failed_record(ctx, target_path, original):
+    """写入失败时也留一条记录，让用户能把原文件拿回来。
+
+    只记「文件确实被动过」的情况：agent 一个字没写、原文件也没被覆盖时建记录，
+    只会给记录页添一条没有内容的废数据。
+    """
+    target_abs = ctx['workspace'] / target_path
+    current = target_abs.read_bytes() if target_abs.is_file() else None
+    if current == original:
+        return None
+    try:
+        record = records.create(
+            ctx['workspace'], target_path, ctx['framework'], ctx['title'], ctx['model'],
+            original, None, ctx['steps'], '', status='failed',
+        )
+        return record.id
+    except Exception:
+        logger.exception('录制生成失败后未能留下回滚记录：%s', target_path)
+        return None
 
 
 def _record_or_404(generation_id):

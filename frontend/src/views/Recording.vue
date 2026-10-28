@@ -167,7 +167,7 @@
             <el-option v-for="m in modelOptions" :key="m.value" :label="m.value" :value="m.value" />
           </el-select>
         </el-form-item>
-        <el-form-item label="目标文件（工作区内相对路径）">
+        <el-form-item label="目标文件（可选，留空由任务书决定）">
           <el-input v-model="config.targetPath" :placeholder="targetPlaceholder" clearable>
             <template #append>
               <!-- 包一层 append-group：Element Plus 给 append 内 .el-button 加 margin:0 -20px，
@@ -178,7 +178,8 @@
             </template>
           </el-input>
           <div class="field-hint">
-            选已有文件会覆盖（生成前会再次确认）；也可以填新文件名。
+            留空就让任务书读项目自己定一个位置（会被 testDir 等约定校正），你在任务书里确认后再写入；
+            填了就以你填的为准，选已有文件会覆盖（生成前会再次确认）。
             <span v-if="!config.workspace.trim()">需先选择工作区。</span>
           </div>
         </el-form-item>
@@ -712,8 +713,9 @@
           <div v-if="fragileCount" class="check warn">
             <span class="check-dot"></span>{{ fragileCount }} 个步骤使用结构定位，已标黄，生成后请留意
           </div>
-          <div :class="['check', { ok: !!config.workspace && !!config.targetPath && !!config.model }]">
-            <span class="check-dot"></span>工作区、目标文件、模型均已填写
+          <div :class="['check', { ok: !!config.workspace && !!config.model }]">
+            <span class="check-dot"></span>
+            工作区、模型均已填写<span v-if="!config.targetPath.trim()">（目标文件留空，交给任务书定）</span>
           </div>
         </div>
         <!-- 没停录制时把 4 行检查压成一行，别占掉半屏 -->
@@ -748,7 +750,7 @@
         </el-button>
         <div v-else class="gen-plan-ready">
           <span class="check-dot ok"></span>
-          任务书已就绪 · {{ planSteps.length }} 步 · 复用 {{ planReusable.length }} 项
+          任务书已就绪 · {{ planSteps.length }} 步<template v-if="planReusable.length"> · 复用 {{ planReusable.length }} 项</template>
           <span class="gen-plan-ready-hint">确认后到任务书里点「按此执行」</span>
         </div>
         <div v-if="!generating && !planState && !canPlan && generateBlockReason" class="gen-block-reason">
@@ -844,7 +846,7 @@
           <div class="section-header">
             <span class="card-title">任务书</span>
             <span v-if="planData" class="plan-head-meta">
-              {{ planSteps.length }} 步 · 复用 {{ planReusable.length }} 项
+              {{ planSteps.length }} 步<template v-if="planReusable.length"> · 复用 {{ planReusable.length }} 项</template>
             </span>
           </div>
         </template>
@@ -876,18 +878,45 @@
             </div>
 
             <div class="plan-block">
-              <div class="plan-block-title">目标文件</div>
-              <div class="plan-target">
-                <code>{{ config.targetPath.trim() }}</code>
-                <span v-if="!planSuggestion" class="plan-path-ok">与当前配置一致</span>
+              <div class="plan-block-title">
+                写入位置
+                <span v-if="planTargetChosen" class="plan-path-badge">AI 按项目约定选的</span>
               </div>
-              <div v-if="planSuggestion" class="plan-suggest">
+              <div v-if="!planTargetEditing" class="plan-target">
+                <code>{{ planTarget || '—' }}</code>
+                <el-button
+                  class="plan-target-edit-btn"
+                  text
+                  size="small"
+                  :icon="EditPen"
+                  title="改写入位置"
+                  @click="startEditPlanTarget"
+                />
+              </div>
+              <div v-else class="plan-target-edit">
+                <el-input
+                  v-model="planTargetDraft"
+                  size="small"
+                  placeholder="工作区内相对路径，例如 tests/login.spec.ts"
+                  @keyup.enter="savePlanTarget"
+                />
+                <el-button size="small" type="primary" @click="savePlanTarget">确定</el-button>
+                <el-button size="small" text @click="cancelEditPlanTarget">取消</el-button>
+              </div>
+              <div v-if="planTargetError" class="plan-target-error">{{ planTargetError }}</div>
+              <div v-if="planResult.reason" class="plan-suggest-reason">{{ planResult.reason }}</div>
+              <div v-if="planTargetChanged" class="plan-target-changed">
+                位置是你改的。任务书里的相对 import 是按规划给的位置算的，可能已经不对；
+                不确定就点「重新规划」，让 AI 按新位置重算一遍。
+              </div>
+              <div v-if="planSuggestion && !planTargetChosen" class="plan-suggest">
                 <div class="plan-suggest-title">
                   规划建议改到 <code>{{ planSuggestion }}</code>
                 </div>
-                <div v-if="planResult.reason" class="plan-suggest-reason">{{ planResult.reason }}</div>
                 <el-button size="small" type="warning" plain @click="adoptSuggestion">采用这个路径</el-button>
-                <div class="field-hint">不采用也没关系：写入只会落在上面的目标文件。</div>
+              </div>
+              <div class="field-hint">
+                这是本次唯一允许写入的文件。点「按此执行」才算授权，不点什么都不写。
               </div>
             </div>
 
@@ -1233,10 +1262,14 @@ let pollEnabled = true
 let tickTimer = null
 
 // ---- 配置持久化（仅浏览器本地便捷设置，不含敏感信息）----
+// targetPath 故意不持久化：它跟具体项目绑定，留着上一次的值等于替用户把路径锁死，
+// 下次换个项目还是那个路径，又回到「用户盲填、模型不敢改」的老问题。每次默认留空。
 function loadConfig() {
   const defaults = { baseUrl: '', workspace: '', framework: 'robot-selenium', targetPath: '', model: '', title: '', python: '' }
   try {
-    return { ...defaults, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') }
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+    delete saved.targetPath
+    return { ...defaults, ...saved }
   } catch {
     return defaults
   }
@@ -1244,15 +1277,17 @@ function loadConfig() {
 
 watch(config, (value) => {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(value))
+    const rest = { ...value }
+    delete rest.targetPath
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(rest))
   } catch {
     // 隐私模式或存储被禁用时忽略，页面照常工作。
   }
 }, { deep: true })
 
-const targetPlaceholder = computed(() =>
-  config.framework === 'robot-selenium' ? 'tests/login.robot' : 'tests/login.spec.ts'
-)
+const targetPlaceholder = computed(() => (config.framework === 'robot-selenium'
+  ? '留空由任务书决定，也可以填 tests/login.robot'
+  : '留空由任务书决定，也可以填 tests/login.spec.ts'))
 
 // ---- 路径选择（浏览工作区目录 / 目标文件）----
 // 浏览器拿不到本地绝对路径，所以由后端在 AUTOMATION_WORKSPACE_ROOT 内列目录，前端只填相对路径。
@@ -1293,37 +1328,17 @@ function onRootLoaded({ root }) {
   workspaceRoot.value = root || ''
 }
 
-function onPathSelected({ path, dirs = [], dirsOf = '' }) {
+function onPathSelected({ path }) {
   if (picker.mode === 'dir') {
     const changed = path !== config.workspace.trim()
     config.workspace = path
     if (changed) detect.value = null
-    if (!config.targetPath.trim()) autoFillTargetPath(path, dirs, dirsOf)
+    // 目标文件不再按目录名自动猜：留空就是「让任务书按项目约定定」，
+    // 偷偷填一个 tests/xxx 反而会把它锁死成用户指定，又回到盲填路径的老路。
     detectWorkspace()
     return
   }
   config.targetPath = path
-}
-
-// 选完工作区后按它是否存在 tests/specs 目录推荐目标路径；dirs 不属于刚选中的目录时补一次查询。
-async function autoFillTargetPath(path, dirs, dirsOf) {
-  const names = dirsOf === path && dirs.length ? dirs : await workspaceDirs(path)
-  if (!config.targetPath.trim()) config.targetPath = suggestTargetPath(names)
-}
-
-async function workspaceDirs(path) {
-  try {
-    const { data } = await api.browseAutomationFiles(path, '', config.framework)
-    return (data.dirs || []).map(item => item.name)
-  } catch {
-    return []
-  }
-}
-
-function suggestTargetPath(dirs) {
-  const dir = dirs.includes('tests') ? 'tests' : dirs.includes('specs') ? 'specs' : ''
-  const name = `${suggestedFileName.value}${EXT_BY_FRAMEWORK[config.framework] || '.robot'}`
-  return dir ? `${dir}/${name}` : name
 }
 
 // 切换框架时同步目标文件扩展名，避免出现「Robot 框架 + .spec.ts」这种组合。
@@ -1433,11 +1448,26 @@ const planSteps = computed(() => planData.value?.steps || [])
 const planReusable = computed(() => planData.value?.reusable || [])
 const planRisks = computed(() => planData.value?.risks || [])
 const planNeeds = computed(() => planData.value?.needs || [])
+// 最终写哪个文件：任务书里的 target_path 才是唯一事实，配置只是「要不要锁死它」。
+// 用户在卡片上改路径时改的是这里，不是全局配置——改配置会影响下一次录制。
+const planTargetOverride = ref('')
+// 只有「用户自己敲的路径」才提示 import 可能失效：采用规划建议时，
+// 那套 import 本来就是按建议位置算的，再吓唬他一次没有意义。
+const planTargetManual = ref(false)
+const planTarget = computed(() =>
+  planTargetOverride.value || String(planData.value?.target_path || ''))
+const planTargetChanged = computed(() => planTargetManual.value && !!planTargetOverride.value
+  && planTargetOverride.value !== String(planData.value?.target_path || ''))
 const planSuggestion = computed(() => {
   const suggestion = planResult.value?.suggestion || ''
-  // 已经采纳过（配置路径 == 建议路径）就不再提示，否则黄框会一直挂着。
-  return suggestion && suggestion !== config.targetPath.trim() ? suggestion : ''
+  // 已经采纳过（写入位置 == 建议路径）就不再提示，否则黄框会一直挂着。
+  return suggestion && suggestion !== planTarget.value ? suggestion : ''
 })
+// AI 自己定的位置：需要在卡片上明确「这是它选的，你确认后才写」。
+const planTargetChosen = computed(() => !!planResult.value?.chosen)
+const planTargetEditing = ref(false)
+const planTargetDraft = ref('')
+const planTargetError = ref('')
 // 录制步骤变了（增删、改写），旧任务书就不再可信：后端也会用 plan_stale 拦一次，
 // 这里提前把「按此执行」置灰，别让用户白等一次请求。
 const stepsSignature = computed(() => steps.value
@@ -1455,22 +1485,22 @@ watch(() => emit.value.status, (status) => {
 
 const canPlan = computed(() =>
   isStopped.value && steps.value.length > 0 &&
-  !!config.workspace.trim() && !!config.targetPath.trim() && !!config.model && !generating.value
+  !!config.workspace.trim() && !!config.model && !generating.value
 )
 const canExecute = computed(() =>
-  !!planData.value && !planStale.value && !generating.value
+  !!planData.value && !!planTarget.value && !planStale.value && !generating.value
 )
 // 按钮置灰时，告诉用户第一个不满足的条件是什么（定位不唯一不再是阻断项，见 executePlan 的确认框）
 const generateBlockReason = computed(() => {
   if (!isStopped.value) return '' // 未停止时「gen-compact」一行已经说明了原因，不重复
   if (!steps.value.length) return '还没有录制任何步骤'
   if (!config.workspace.trim()) return '还没有填写工作区（Git 目录）'
-  if (!config.targetPath.trim()) return '还没有填写目标文件（工作区内相对路径）'
   if (!config.model) return '还没有选择模型'
   return ''
 })
 const executeBlockReason = computed(() => {
   if (!planData.value) return '还没有任务书'
+  if (!planTarget.value) return '任务书没有给出写入路径，请重新规划或手动指定'
   if (planStale.value) return '录制步骤已变化，请重新规划'
   if (generating.value) return ''
   return ''
@@ -1820,8 +1850,8 @@ async function startRecording() {
       model: config.model,
       workspace: config.workspace.trim(),
       framework: config.framework,
-      // 录制窗口是新的浏览器 profile，这三项不随请求带过去就会丢；
-      // target_path 为空会直接让停止后的「生成」按钮不可用。
+      // 录制窗口是新的浏览器 profile，模型/工作区/框架这三项不随请求带过去就会丢。
+      // target_path 可以留空：停止录制后由任务书按项目约定定位置。
       target_path: config.targetPath.trim(),
       title: config.title.trim(),
       python: (config.python || '').trim()
@@ -2576,8 +2606,40 @@ function removeNote(id) {
 
 function adoptSuggestion() {
   if (!planSuggestion.value) return
-  config.targetPath = planSuggestion.value
-  ElMessage.success(`目标文件已改为 ${planSuggestion.value}`)
+  planTargetOverride.value = planSuggestion.value
+  planTargetManual.value = false
+  ElMessage.success(`这次会写到 ${planSuggestion.value}`)
+}
+
+function startEditPlanTarget() {
+  planTargetDraft.value = planTarget.value
+  planTargetError.value = ''
+  planTargetEditing.value = true
+}
+
+function cancelEditPlanTarget() {
+  planTargetEditing.value = false
+  planTargetError.value = ''
+}
+
+function savePlanTarget() {
+  const next = planTargetDraft.value.trim().replace(/\\/g, '/')
+  if (!next) {
+    planTargetError.value = '路径不能为空'
+    return
+  }
+  if (next.startsWith('/') || /^[a-zA-Z]:/.test(next) || next.split('/').includes('..')) {
+    planTargetError.value = '要填工作区内的相对路径，不能是绝对路径或带 ..'
+    return
+  }
+  if (/[*?[\]]/.test(next)) {
+    planTargetError.value = '路径里不能有 * ? [ ]'
+    return
+  }
+  planTargetOverride.value = next === String(planData.value?.target_path || '') ? '' : next
+  planTargetManual.value = true
+  planTargetEditing.value = false
+  planTargetError.value = ''
 }
 
 function notePayload() {
@@ -2600,7 +2662,8 @@ async function runPlan(replan) {
       model: config.model,
       workspace_path: config.workspace.trim(),
       framework: config.framework,
-      target_path: config.targetPath.trim(),
+      // 留空 = 让规划按项目约定选；用户手改过就用他改的那条，重新规划也不丢。
+      target_path: (planTargetOverride.value || config.targetPath.trim()),
       title: config.title.trim() || 'recorded flow',
       python: (config.python || '').trim() || undefined,
       // 重新规划时把上一版和用户意见一起带上，规划 agent 才知道要改哪里。
@@ -2608,6 +2671,11 @@ async function runPlan(replan) {
       feedback: replan ? notePayload() : []
     })
     planState.value = { result: data, sig: stepsSignature.value, at: Date.now() }
+    // 新一版任务书自带路径，上一轮的手改作废，否则会拿旧 override 覆盖新结果。
+    planTargetOverride.value = ''
+    planTargetManual.value = false
+    planTargetEditing.value = false
+    planTargetError.value = ''
     if (replan) {
       const count = planNotes.value.length
       planNotes.value = []
@@ -2634,7 +2702,8 @@ async function runPlan(replan) {
 
 // ---- 写入：只从任务书的「按此执行」进来 ----
 async function executePlan(overwrite) {
-  if (!planData.value || planStale.value || generating.value) return
+  // 没有确认过的写入位置就不写：任务书的「按此执行」本身就是授权动作。
+  if (!planData.value || !planTarget.value || planStale.value || generating.value) return
   if (!overwrite && blockers.value.length) {
     // 不唯一不再阻断生成，但要让用户知道哪几步会降级、降到什么程度。
     const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
@@ -2678,7 +2747,8 @@ async function executePlan(overwrite) {
       model: config.model,
       workspace_path: config.workspace.trim(),
       framework: config.framework,
-      target_path: config.targetPath.trim(),
+      // 用户确认过的位置：可能来自规划，也可能是他在卡片上手改的。
+      target_path: planTarget.value,
       title: config.title.trim() || 'recorded flow',
       python: (config.python || '').trim() || undefined,
       overwrite,
@@ -2706,7 +2776,7 @@ async function executePlan(overwrite) {
     if (isConflict) {
       try {
         await ElMessageBox.confirm(
-          `目标文件 ${config.targetPath.trim()} 已存在。覆盖后可以在「生成记录」里撤销，恢复原内容。是否覆盖？`,
+          `目标文件 ${planTarget.value} 已存在。覆盖后可以在「生成记录」里撤销，恢复原内容。是否覆盖？`,
           '文件已存在',
           { confirmButtonText: '覆盖', cancelButtonText: '取消', type: 'warning' }
         )
@@ -3433,6 +3503,20 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 }
 .plan-target { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .plan-path-ok { color:#12a150; font-size:11.5px; }
+/* 「这是 AI 选的」标记：路径本身是重点，别做成彩色按钮抢注意力 */
+.plan-path-badge {
+  margin-left:6px; padding:1px 6px; border-radius:4px;
+  background:#eef3fd; color:#2f6bd8; font-size:11px; font-weight:500;
+}
+.plan-target-edit-btn { color:#8e8e93; }
+.plan-target-edit { display:flex; align-items:center; gap:6px; }
+.plan-target-edit :deep(.el-input) { flex:1; }
+.plan-target-error { margin-top:5px; color:#d93025; font-size:11.5px; }
+.plan-target-changed {
+  margin-top:8px; padding:7px 9px; border-radius:7px;
+  background:#fff9ea; border:1px solid #f1ddb0; color:#7a5a12;
+  font-size:11.5px; line-height:1.6;
+}
 .plan-suggest {
   margin-top:8px; padding:9px 10px; border:1px solid #f1ddb0; border-radius:8px;
   background:#fff9ea; font-size:11.5px; color:#7a5a12;

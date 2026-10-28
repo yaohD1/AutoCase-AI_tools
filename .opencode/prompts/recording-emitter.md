@@ -13,12 +13,16 @@ You write one test file from a recorded flow. Everything you need is in the disp
 # Task sheet and user feedback
 - The dispatch may contain `plan`: a task sheet produced by another agent that read the project. Follow it — `project_style` describes this project's real conventions and wins over generic rules below.
 - `plan.reusable` entries that cover a step must be called, not reimplemented. Copy their `import` / `usage` shape.
-- `plan.steps[].note` tells you how to write that step. Use it as the primary instruction.
+- `plan.steps[].note` says what that step does and what it asserts. Follow it for intent, but take the locator from `target.locator` — the note deliberately carries no locator, because the recorded one is authoritative.
 - `plan_feedback` is the user's own review of that task sheet (`quote` = the text they selected, `comment` = what they want changed). **User feedback wins over the plan.** Apply every item.
 
 # How to write the file
 - Follow the project's existing style. The dispatch includes `samples`: copy their import / resource style, indentation, naming, and locator habits.
 - One test per recorded flow. Give it the title from the dispatch.
+- **The very first line must be a marker comment containing `@autocase`**, plus where the flow came from:
+  - TypeScript: `// @autocase 录制自 https://... —— <one-line description>`
+  - Robot Framework: `# @autocase 录制自 https://... —— <one-line description>`
+  This is how later runs recognise the file as AutoCase output instead of mistaking it for a project convention. Never omit it, and never put anything above it.
 - Each recorded step becomes one action. Put the step's user text (if any) as a comment above it.
 - Each `assert` or `wait` step becomes one verification using the framework's standard keyword for its intent.
 - Use `target.locator` from the dispatch for each step. Do not replace it with a different locator.

@@ -142,6 +142,37 @@ class GenerateRouteTest(unittest.TestCase):
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.get_json()['details'], ['plan_stale'])
 
+    def test_empty_target_path_takes_the_one_from_the_plan(self):
+        """配置留空 = 位置由任务书定，执行时必须落到任务书那条路径上。"""
+        self._stopped_session()
+        root = Path(tempfile.mkdtemp(prefix='gen-planpath-'))
+        (root / 'proj').mkdir()
+        before = self.app.config['AUTOMATION_WORKSPACE_ROOT']
+        self.app.config['AUTOMATION_WORKSPACE_ROOT'] = str(root)
+        self.addCleanup(self.app.config.__setitem__, 'AUTOMATION_WORKSPACE_ROOT', before)
+        seen = {}
+
+        def fake_generate(runner, workspace, model, steps, framework, target_path, *args, **kwargs):
+            seen['target'] = target_path
+            path = Path(workspace) / target_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('*** Test Cases ***', encoding='utf-8')
+            return {'path': target_path, 'changed': [target_path], 'validated': True,
+                    'framework': framework, 'detected': None, 'reply': 'ok'}
+
+        with mock.patch.object(emit, 'generate', side_effect=fake_generate):
+            r = self._post(target_path='', plan={'steps': [], 'target_path': 'tests/from_plan.robot'})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(seen['target'], 'tests/from_plan.robot')
+        self.assertEqual(r.get_json()['path'], 'tests/from_plan.robot')
+
+    def test_plan_path_outside_the_workspace_is_rejected(self):
+        """任务书是回传值，可以被人改过：写之前必须重新校验，不能照单全收。"""
+        self._stopped_session()
+        r = self._post(target_path='', plan={'steps': [], 'target_path': '../escape.robot'})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('路径', r.get_json()['error'])
+
     def test_plan_route_returns_task_sheet_without_writing(self):
         self._stopped_session(steps=[{'no': 1}])
         result = {'plan': {'steps': [{'no': 1, 'action': 'write'}]}, 'target_path': 'a.robot',

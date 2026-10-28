@@ -34,18 +34,24 @@ def _summary(steps):
             for s in steps]
 
 
-def create(workspace, target_path, framework, title, model, original, generated, steps, reply):
-    """original / generated 为字节内容；original 为 None 表示生成前文件不存在。"""
+def create(workspace, target_path, framework, title, model, original, generated, steps, reply,
+           status='generated'):
+    """original / generated 为字节内容；original 为 None 表示生成前文件不存在。
+
+    status='failed' 用于「写了一半就失败」的场景：这时没有可信的 generated 内容，
+    但 original 仍然要留下来，否则覆盖掉的旧文件就再也拿不回来了。
+    """
     record = RecordingGeneration(
         workspace=str(Path(workspace).resolve()),
         target_path=target_path,
         framework=framework,
         title=title,
         model=model,
-        status='generated',
+        status=status,
         original_existed=original is not None,
         original_content=base64.b64encode(original).decode('ascii') if original is not None else None,
-        generated_sha256=_sha(generated),
+        # 字段是 NOT NULL，失败记录没有可信的写入内容，存空串表示「这条没有生成结果」。
+        generated_sha256=_sha(generated) if generated is not None else '',
         step_summary=json.dumps(_summary(steps), ensure_ascii=False),
         reply=reply or '',
     )
@@ -79,13 +85,25 @@ def _git(workspace, args, timeout=GIT_TIMEOUT, check=True):
 def preview(record):
     current = _current_bytes(record)
     text = current.decode('utf-8', errors='replace') if current is not None else ''
+    if record.status == 'failed' or not record.generated_sha256:
+        changed = current is not None
+    else:
+        changed = current is None or _sha(current) != record.generated_sha256
     return {
         'content': text[:PREVIEW_LIMIT],
         'truncated': len(text) > PREVIEW_LIMIT,
         'file_exists': current is not None,
-        'changed_since_generation': current is None or _sha(current) != record.generated_sha256,
+        'changed_since_generation': changed,
         'reply': record.reply or '',
     }
+
+
+def _restore_original(record):
+    target = _target(record)
+    if record.original_existed:
+        target.write_bytes(base64.b64decode(record.original_content))
+    elif target.is_file():
+        target.unlink()
 
 
 def commit(record, message):
@@ -115,11 +133,11 @@ def commit(record, message):
 def revert(record):
     if record.status == 'generated':
         _ensure_unchanged(record)
-        target = _target(record)
-        if record.original_existed:
-            target.write_bytes(base64.b64decode(record.original_content))
-        elif target.is_file():
-            target.unlink()
+        _restore_original(record)
+    elif record.status == 'failed':
+        # 写入失败的记录：文件可能只写了一半，也可能根本没写。这时不校验哈希——
+        # 用户要的就是「把原来的东西还回来」，多校验反而把唯一的救命通道堵死。
+        _restore_original(record)
     elif record.status == 'committed':
         if not record.commit_hash:
             raise RecordError('记录缺少提交哈希，无法回滚')
