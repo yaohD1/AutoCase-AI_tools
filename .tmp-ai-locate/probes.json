@@ -1,0 +1,418 @@
+{
+ "inventory": [
+  {
+   "tag": "a",
+   "role": "link",
+   "text": "test998",
+   "name": "test998",
+   "placeholder": null,
+   "aria": null,
+   "testid": null,
+   "cls": "_sidebarHeaderTitle_1rfyg_31 _sidebarHea",
+   "box": [
+    15,
+    12,
+    90,
+    28
+   ]
+  },
+  {
+   "tag": "input",
+   "role": "textbox",
+   "text": null,
+   "name": null,
+   "placeholder": "搜索",
+   "aria": null,
+   "testid": null,
+   "cls": "ant-input css-1l86wfl",
+   "box": [
+    45,
+    68,
+    153,
+    22
+   ]
+  },
+  {
+   "tag": "a",
+   "role": "link",
+   "text": "问AI",
+   "name": "问AI",
+   "placeholder": null,
+   "aria": null,
+   "testid": null,
+   "cls": "",
+   "box": [
+    15,
+    98,
+    194,
+    30
+   ]
+  },
+  {
+   "tag": "a",
+   "role": "link",
+   "text": "知识库",
+   "name": "知识库",
+   "placeholder": null,
+   "aria": null,
+   "testid": null,
+   "cls": "",
+   "box": [
+    15,
+    130,
+    194,
+    30
+   ]
+  },
+  {
+   "tag": "a",
+   "role": "link",
+   "text": "知识图谱",
+   "name": "知识图谱",
+   "placeholder": null,
+   "aria": null,
+   "testid": null,
+   "cls": "",
+   "box": [
+    15,
+    162,
+    194,
+    30
+   ]
+  },
+  {
+   "tag": "a",
+   "role": "link",
+   "text": "写作空间",
+   "name": "写作空间",
+   "placeholder": null,
+   "aria": null,
+   "testid": null,
+   "cls": "",
+   "box": [
+    15,
+    194,
+    194,
+    30
+   ]
+  },
+  {
+   "tag": "a",
+   "role": "link",
+   "text": "智能体",
+   "name": "智能体",
+   "placeholder": null,
+   "aria": null,
+   "testid": null,
+   "cls": "",
+   "box": [
+    15,
+    226,
+    194,
+    30
+   ]
+  },
+  {
+   "tag": "span",
+   "role": "button",
+   "text": null,
+   "name": null,
+   "placeholder": null,
+   "aria": null,
+   "testid": null,
+   "cls": "_sidebarListHeaderAddTrigger_ce5l0_59",
+   "box": [
+    182,
+    283,
+    13,
+    13
+   ]
+  },
+  {
+   "tag": "a",
+   "role": "link",
+   "text": "帮助与支持",
+   "name": "帮助与支持",
+   "placeholder": null,
+   "aria": null,
+   "testid": null,
+   "cls": "",
+   "box": [
+    15,
+    791,
+    194,
+    30
+   ]
+  },
+  {
+   "tag": "textarea",
+   "role": "textbox",
+   "text": null,
+   "name": null,
+   "placeholder": "输入内容并发送（或按 Enter），即可生成回答",
+   "aria": null,
+   "testid": null,
+   "cls": "ant-input css-1l86wfl ant-input-outlined",
+   "box": [
+    418,
+    422,
+    824,
+    96
+   ]
+  },
+  {
+   "tag": "textarea",
+   "role": "textbox",
+   "text": null,
+   "name": null,
+   "placeholder": null,
+   "aria": null,
+   "testid": null,
+   "cls": "ant-input css-1l86wfl ant-input-outlined",
+   "box": [
+    418,
+    518,
+    824,
+    52
+   ]
+  },
+  {
+   "tag": "button",
+   "role": "button",
+   "text": null,
+   "name": "Open assistant",
+   "placeholder": null,
+   "aria": "Open assistant",
+   "testid": null,
+   "cls": " cursor-[inherit] relative group animate",
+   "box": [
+    1384,
+    698,
+    96,
+    96
+   ]
+  }
+ ],
+ "targets": {
+  "T1": {
+   "desc": "聊天输入区右下角的发送按钮（圆形图标按钮，点了会把输入框内容发出去）",
+   "snap": {
+    "tag": "svg",
+    "type": null,
+    "role": null,
+    "role_attr": null,
+    "name": null,
+    "label": null,
+    "aria_label": null,
+    "placeholder": null,
+    "testid": null,
+    "text": null,
+    "id": null,
+    "attr_name": null,
+    "cls": "",
+    "css": "div > div:nth-of-type(3) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(2) > svg",
+    "box": [
+     1218,
+     531,
+     24,
+     24
+    ],
+    "chain": [
+     {
+      "tag": "div",
+      "cls": "ml-auto flex items-center gap-3",
+      "text": "deepseek-v3"
+     },
+     {
+      "tag": "div",
+      "cls": "w-full relative flex-none mt-2.5 h-[30px] flex justify-betwe",
+      "text": "上传文件 联网搜索 deepseek-v3"
+     },
+     {
+      "tag": "div",
+      "cls": "bg-white p-3 overflow-auto transition-all duration-300 ease-",
+      "text": "上传文件 联网搜索 deepseek-v3"
+     }
+    ]
+   },
+   "dom": "<div class=\"w-full relative flex-none mt-2.5 h-[30px] flex justify-between items-center gap-1\"><div class=\"flex items-center gap-2\"><div class=\"cursor-pointer border border-[#eff1f4] rounded-full bg-[#f7f7f7] text-[13px] text-[#6e757f] py-1 px-3 flex items-center gap-1 font-[500] transition-colors hover:bg-[#FBE9FF] hover:text-[#CC5DE8] hover:border-[#CC5DE833]\"><svg width=\"24\" height=\"24\" viewBox=\"0 0 48 48\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" class=\"w-[15.368px] h-[15.368px]\" style=\"color: currentcolor;\"><mask id=\"icon-1eadfed97f10b972\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"48\" height=\"48\" style=\"mask-type: alpha;\"><path d=\"M48 0H0V48H48V0Z\" fill=\"currentColor\"></path></mask><g mask=\"url(#icon-1eadfed97f10b972)\"><path d=\"M6 24.0083V42H42V24\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M33 15L24 6L15 15\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M23.9917 32V6\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></g></svg><span>上传文件</span></div><div class=\"cursor-pointer border rounded-full text-[13px] py-1 px-3 flex items-center gap-1 font-[500] transition-colors bg-[#f7f7f7] text-[#6e757f] border-[#eff1f4] hover:bg-[#FBE9FF] hover:text-[#CC5DE8] hover:border-[#CC5DE833]\"><svg width=\"24\" height=\"24\" viewBox=\"0 0 48 48\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" class=\"w-[15.368px] h-[15.368px]\" style=\"color: currentcolor;\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M24 44C35.0457 44 44 35.0457 44 24C44 12.9543 35.0457 4 24 4C12.9543 4 4 12.9543 4 24C4 35.0457 12.9543 44 24 44Z\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M4 24H44\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M24 44C28.4183 44 32 35.0457 32 24C32 12.9543 28.4183 4 24 4C19.5817 4 16 12.9543 16 24C16 35.0457 19.5817 44 24 44Z\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M9.85791 10.1421C13.4772 13.7614 18.4772 16 24 16C29.5229 16 34.5229 13.7614 38.1422 10.1421\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M38.1422 37.8579C34.5229 34.2386 29.5229 32 24 32C18.4772 32 13.4772 34.2386 9.85791 37.8579\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg><span>联网搜索</span></div></div><span aria-describedby=\":r1hu:\"></span><span aria-describedby=\":r1i0:\"></span><div class=\"ml-auto flex items-center gap-3\"><div class=\"cursor-pointer text-[13px] py-1 px-3 flex items-center gap-1 text-[#CC5DE8] font-medium\" aria-describedby=\":r1i2:\"><svg width=\"14\" height=\"15\" viewBox=\"0 0 14 15\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M11.9949 2.50582C13.0455 3.55643 11.6615 6.64382 8.90364 9.40169C6.14578 12.1596 3.05839 13.5436 2.00777 12.4929C0.957153 11.4423 2.34115 8.35494 5.09902 5.59707C7.85689 2.8392 10.9443 1.4552 11.9949 2.50582Z\" stroke=\"currentColor\"></path><path d=\"M11.9949 12.4929C10.9443 13.5436 7.85689 12.1596 5.09902 9.40169C2.34115 6.64382 0.95715 3.55643 2.00777 2.50581C3.05838 1.4552 6.14577 2.8392 8.90364 5.59707C11.6615 8.35494 13.0455 11.4423 11.9949 12.4929Z\" stroke=\"currentColor\"></path></svg>deepseek-v3<svg fill=\"none\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" class=\"t-icon t-icon-chevron-down\"><path fill=\"currentColor\" d=\"M17.5001 8.08582L12.0002 13.5858L6.50015 8.08582L5.08594 9.50003L12.0002 16.4142L18.9144 9.50003L17.5001 8.08582Z\"></path></svg></div><svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"24\" height=\"24\" rx=\"6\" fill=\"#919497\" fill-opacity=\"0.1\"></rect><path d=\"M7.91675 11.2708L12.0001 7.1875L16.0834 11.2708M12.0001 17.25V7.625\" stroke=\"#919497\" stroke-width=\"1.3\"></path></svg></div></div>",
+   "dom_len": 4012
+  },
+  "T2": {
+   "desc": "聊天输入框（多行文本域，placeholder 是「输入内容并发送（或按 Enter），即可生成回答」）",
+   "snap": {
+    "tag": "textarea",
+    "type": null,
+    "role": "textbox",
+    "role_attr": null,
+    "name": null,
+    "label": null,
+    "aria_label": null,
+    "placeholder": "输入内容并发送（或按 Enter），即可生成回答",
+    "testid": null,
+    "text": null,
+    "id": null,
+    "attr_name": null,
+    "cls": "ant-input css-1l86wfl ant-input-outlined _input_xsgme_1",
+    "css": "div > div:nth-of-type(2) > div > div:nth-of-type(3) > div:nth-of-type(1) > textarea",
+    "box": [
+     418,
+     422,
+     824,
+     96
+    ],
+    "chain": [
+     {
+      "tag": "div",
+      "cls": "bg-white p-3 overflow-auto transition-all duration-300 ease-",
+      "text": "上传文件 联网搜索 deepseek-v3"
+     },
+     {
+      "tag": "div",
+      "cls": "w-[850px] mx-auto mt-18 flex flex-col",
+      "text": "上传文件 联网搜索 deepseek-v3 大模型 文档模式 表格模式 数据库模式 图谱洞察 外接数"
+     },
+     {
+      "tag": "div",
+      "cls": "w-full h-full overflow-hidden flex flex-col",
+      "text": "与CoreKG一起，探索更多可能 上传文件 联网搜索 deepseek-v3 大模型 文档模式 表格"
+     }
+    ]
+   },
+   "dom": "<div class=\"w-[850px] mx-auto mt-18 flex flex-col\"><div class=\"bg-white p-3 overflow-auto transition-all duration-300 ease-in-out relative flex flex-col border border-[rgb(230,178,243)] rounded-[20px] shadow-[0_0_10px_rgba(0,0,0,0.1)] focus-within:shadow-[0_0_20px_rgba(0,0,0,0.15)]\"><textarea placeholder=\"输入内容并发送（或按 Enter），即可生成回答\" maxlength=\"10000\" class=\"ant-input css-1l86wfl ant-input-outlined _input_xsgme_1\" style=\"height: 96px; max-height: 96px; line-height: 24px;\"></textarea><div class=\"w-full h-0 overflow-hidden\"><textarea class=\"ant-input css-1l86wfl ant-input-outlined _input_xsgme_1\" style=\"line-height: 24px;\"></textarea></div><div class=\"w-full relative flex-none mt-2.5 h-[30px] flex justify-between items-center gap-1\"><div class=\"flex items-center gap-2\"><div class=\"cursor-pointer border border-[#eff1f4] rounded-full bg-[#f7f7f7] text-[13px] text-[#6e757f] py-1 px-3 flex items-center gap-1 font-[500] transition-colors hover:bg-[#FBE9FF] hover:text-[#CC5DE8] hover:border-[#CC5DE833]\"><svg width=\"24\" height=\"24\" viewBox=\"0 0 48 48\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" class=\"w-[15.368px] h-[15.368px]\" style=\"color: currentcolor;\"><mask id=\"icon-1eadfed97f10b972\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"48\" height=\"48\" style=\"mask-type: alpha;\"><path d=\"M48 0H0V48H48V0Z\" fill=\"currentColor\"></path></mask><g mask=\"url(#icon-1eadfed97f10b972)\"><path d=\"M6 24.0083V42H42V24\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M33 15L24 6L15 15\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M23.9917 32V6\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></g></svg><span>上传文件</span></div><div class=\"cursor-pointer border rounded-full text-[13px] py-1 px-3 flex items-center gap-1 font-[500] transition-colors bg-[#f7f7f7] text-[#6e757f] border-[#eff1f4] hover:bg-[#FBE9FF] hover:text-[#CC5DE8] hover:border-[#CC5DE833]\"><svg width=\"24\" height=\"24\" viewBox=\"0 0 48 48\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\" class=\"w-[15.368px] h-[15.368px]\" style=\"color: currentcolor;\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M24 44C35.0457 44 44 35.0457 44 24C44 12.9543 35.0457 4 24 4C12.9543 4 4 12.9543 4 24C4 35.0457 12.9543 44 24 44Z\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M4 24H44\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M24 44C28.4183 44 32 35.0457 32 24C32 12.9543 28.4183 4 24 4C19.5817 4 16 12.9543 16 24C16 35.0457 19.5817 44 24 44Z\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M9.85791 10.1421C13.4772 13.7614 18.4772 16 24 16C29.5229 16 34.5229 13.7614 38.1422 10.1421\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M38.1422 37.8579C34.5229 34.2386 29.5229 32 24 32C18.4772 32 13.4772 34.2386 9.85791 37.8579\" stroke=\"currentColor\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg><span>联网搜索</span></div></div><span aria-describedby=\":r1hu:\"></span><span aria-describedby=\":r1i0:\"></span><div class=\"ml-auto flex items-center gap-3\"><div class=\"cursor-pointer text-[13px] py-1 px-3 flex items-center gap-1 text-[#CC5DE8] font-medium\" aria-describedby=\":r1i2:\"><svg width=\"14\" height=\"15\" viewBox=\"0 0 14 15\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M11.9949 2.50582C13.0455 3.55643 11.6615 6.64382 8.90364 9.40169C6.14578 12.1596 3.05839 13.5436 2.00777 12.4929C0.957153 11.4423 2.34115 8.35494 5.09902 5.59707C7.85689 2.8392 10.9443 1.4552 11.9949 2.50582Z\" stroke=\"currentColor\"></path><path d=\"M11.9949 12.4929C10.9443 13.5436 7.85689 12.1596 5.09902 9.40169C2.34115 6.64382 0.95715 3.55643 2.00777 2.50581C3.05838 1.4552 6.14577 2.8392 8.90364 5.59707C11.6615 8.35494 13.0455 11.4423 11.9949 12.4929Z\" stroke=\"currentColor\"></path></svg>deepseek-v3<svg fill=\"none\" viewBox=\"0 0 24 24\" width=\"1em\" height=\"1em\" class=\"t-icon t-icon-chevron-down\"><path fill=\"currentColor\" d=\"M17.5001 8.08582L12.0002 13.5858L6.50015 8.08582L5.08594 9.50003L12.0002 16.4142L18.9144 9.50003L17.5001 8.08582Z\"></path></svg></div><svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"24\" height=\"24\" rx=\"6\" fill=\"#919497\" fill-opacity=\"0.1\"></rect><path d=\"M7.91675 11.2708L12.0001 7.1875L16.0834 11.2708M12.0001 17.25V7.625\" stroke=\"#919497\" stroke-width=\"1.3\"></path></svg></div></div></div><div class=\"mt-12 flex gap-10 mx-auto\"><div class=\"cursor-pointer flex flex-col gap-2 items-center text-[#CC5DE8]\"><div class=\"p-3 border-2 rounded-xl bg-[#FBE9FF] border-[#CC5DE833]\"><svg width=\"25\" height=\"25\" viewBox=\"0 0 25 25\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M10.5417 2.771H4.11353C3.2688 2.771 2.58276 3.45703 2.58276 4.30176V10.73C2.58276 11.5747 3.2688 12.2607 4.11353 12.2607H10.5417C11.3865 12.2607 12.0725 11.5747 12.0725 10.73V4.3042C12.075 3.45947 11.3865 2.771 10.5417 2.771ZM10.5417 10.7324H4.11353V4.3042H10.5417V10.7324ZM10.4661 13.0347H4.03784C3.19312 13.0347 2.50708 13.7207 2.50708 14.5654V20.9961C2.50708 21.8408 3.19312 22.5269 4.03784 22.5269H10.4661C11.3108 22.5269 11.9968 21.8408 11.9968 20.9961V14.5679C11.9968 13.7231 11.3108 13.0347 10.4661 13.0347ZM10.4661 20.9961H4.03784V14.5679H10.4661V20.9961ZM14.5359 12.2632H20.9641C21.8088 12.2632 22.4949 11.6064 22.4949 10.8008V9.62646C22.4949 9.2041 22.1531 8.85986 21.7283 8.85986C21.3035 8.85986 20.9617 9.20166 20.9617 9.62646V10.7324H14.5359V4.3042H20.9641V4.99023C20.9641 5.4126 21.3059 5.75684 21.7307 5.75684C22.1555 5.75684 22.4973 5.41504 22.4973 4.99023V4.21631C22.4973 3.41797 21.8113 2.771 20.9666 2.771H14.5359C13.6912 2.771 13.0051 3.45703 13.0051 4.30176V10.73C13.0027 11.5771 13.6912 12.2632 14.5359 12.2632Z\" fill=\"currentColor\"></path><path d=\"M20.9641 7.29004C20.9641 7.39071 20.9839 7.4904 21.0225 7.5834C21.061 7.67641 21.1175 7.76092 21.1886 7.83211C21.2598 7.90329 21.3443 7.95976 21.4373 7.99829C21.5304 8.03681 21.63 8.05664 21.7307 8.05664C21.8314 8.05664 21.9311 8.03681 22.0241 7.99829C22.1171 7.95976 22.2016 7.90329 22.2728 7.83211C22.344 7.76092 22.4004 7.67641 22.439 7.5834C22.4775 7.4904 22.4973 7.39071 22.4973 7.29004C22.4973 7.18937 22.4775 7.08968 22.439 6.99667C22.4004 6.90366 22.344 6.81916 22.2728 6.74797C22.2016 6.67678 22.1171 6.62032 22.0241 6.58179C21.9311 6.54327 21.8314 6.52344 21.7307 6.52344C21.63 6.52344 21.5304 6.54327 21.4373 6.58179C21.3443 6.62032 21.2598 6.67678 21.1886 6.74797C21.1175 6.81916 21.061 6.90366 21.0225 6.99667C20.9839 7.08968 20.9641 7.18937 20.9641 7.29004Z\" fill=\"currentColor\"></path><path d=\"M22.2609 14.3917C21.9191 14.1402 21.4406 14.2135 21.1891 14.5553L16.8263 20.4854L14.4362 18.5787C14.1066 18.315 13.6232 18.3687 13.3595 18.6983C13.0959 19.0279 13.1496 19.5113 13.4792 19.775L16.443 22.1431C16.5138 22.1993 16.5895 22.2408 16.6701 22.2677C16.7677 22.3116 16.8727 22.3336 16.9777 22.3336C17.2121 22.3336 17.444 22.2262 17.5954 22.0211L22.422 15.4635C22.6759 15.1217 22.6027 14.6431 22.2609 14.3917Z\" fill=\"currentColor\"></path></svg></div>大模型</div><div class=\"text-[#6E757F] cursor-pointer flex flex-col gap-2 items-center\"><div class=\"p-3 border-2 border-[#EFF1F4] bg-[#F7F7F7] rounded-xl\"><svg width=\"25\" height=\"25\" viewBox=\"0 0 25 25\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><g clip-path=\"url(#clip0_3262_3576)\"><path d=\"M12.52 23.4102C11.9004 23.4102 11.3213 23.1172 10.9709 22.6238L10.4595 21.9053C10.4402 21.8828 10.4162 21.865 10.3891 21.8532C10.362 21.8414 10.3325 21.8359 10.303 21.8372L2.51245 21.8792C1.1272 21.8792 0 20.801 0 19.4753V4.03589C0 2.71021 1.1272 1.63232 2.51245 1.63232L8.76562 1.59033C9.98633 1.59033 11.1367 2.03491 12.0029 2.84229C12.1924 3.0188 12.366 3.21151 12.522 3.41821C12.6769 3.21425 12.8489 3.02386 13.0361 2.849...<!--截断-->",
+   "dom_len": 8012
+  },
+  "T3": {
+   "desc": "左侧导航栏里的「问AI」菜单项",
+   "snap": {
+    "tag": "a",
+    "type": null,
+    "role": "link",
+    "role_attr": null,
+    "name": "问AI",
+    "label": null,
+    "aria_label": null,
+    "placeholder": null,
+    "testid": null,
+    "text": "问AI",
+    "id": null,
+    "attr_name": null,
+    "cls": "",
+    "css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(3) > div:nth-of-type(1) > a",
+    "box": [
+     15,
+     98,
+     194,
+     30
+    ],
+    "chain": [
+     {
+      "tag": "div",
+      "cls": "_sidebarQAMenu_1rfyg_73",
+      "text": "问AI"
+     },
+     {
+      "tag": "div",
+      "cls": "_sidebarNavigationContainer_1rfyg_77",
+      "text": "问AI 知识库 知识图谱 写作空间 智能体 会话分组 1 未分组 日常问候开场 New Chat 问"
+     },
+     {
+      "tag": "div",
+      "cls": "_sidebarWrapper_1rfyg_2",
+      "text": "test998 问AI 知识库 知识图谱 写作空间 智能体 会话分组 1 未分组 日常问候开场 Ne"
+     }
+    ]
+   },
+   "dom": "<div class=\"_sidebarNavigationContainer_1rfyg_77\"><div class=\"_sidebarQAMenu_1rfyg_73\"><a href=\"/global\" data-discover=\"true\"><div class=\"_item_fxrlp_1 _itemActive_fxrlp_63 _qaMenuItem_1rfyg_88\"><div><svg width=\"15\" height=\"14\" viewBox=\"0 0 15 14\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><g clip-path=\"url(#clip0_1132_20160)\"><path d=\"M1.02344 7.48547C1.02344 7.59592 1.11314 7.68529 1.22359 7.68698C3.10243 7.71572 4.32624 8.15276 5.09536 8.92188C5.86447 9.691 6.30152 10.9148 6.33026 12.7936C6.33195 12.9041 6.42131 12.9938 6.53177 12.9938H7.45885C7.56931 12.9938 7.65868 12.9041 7.66037 12.7936C7.68911 10.9148 8.12615 9.691 8.89527 8.92188C9.66438 8.15276 10.8882 7.71572 12.767 7.68698C12.8775 7.68529 12.9672 7.59592 12.9672 7.48547V6.55838C12.9672 6.44793 12.8775 6.35856 12.767 6.35687C10.8882 6.32813 9.66438 5.89108 8.89527 5.12197C8.12615 4.35285 7.68911 3.12904 7.66037 1.2502C7.65868 1.13976 7.56931 1.05005 7.45885 1.05005H6.53177C6.42131 1.05005 6.33195 1.13975 6.33026 1.2502C6.30152 3.12904 5.86447 4.35285 5.09536 5.12197C4.32624 5.89108 3.10243 6.32813 1.22359 6.35687C1.11314 6.35856 1.02344 6.44793 1.02344 6.55838V7.48547Z\" fill=\"url(#paint0_linear_1132_20160)\"></path><path d=\"M12.6206 1.99193C12.3606 1.72716 12.1951 1.3388 12.1317 0.795765V0.669092C12.1317 0.613863 12.0869 0.569092 12.0317 0.569092H11.7558C11.7006 0.569092 11.6558 0.613863 11.6558 0.669092V0.795523C11.5902 1.34765 11.4247 1.72735 11.1665 1.98555C10.9083 2.24376 10.5286 2.4093 9.97643 2.47491H9.85C9.79477 2.47491 9.75 2.51968 9.75 2.57491V2.85077C9.75 2.906 9.79477 2.95077 9.85 2.95077H9.97667C10.5197 3.01421 10.9081 3.17973 11.1728 3.43971C11.4366 3.69874 11.6054 4.0788 11.6558 4.62701V4.75659C11.6558 4.81182 11.7006 4.85659 11.7558 4.85659H12.0317C12.0869 4.85659 12.1317 4.81182 12.1317 4.75659V4.62674C12.18 4.08756 12.3487 3.6989 12.6143 3.43335C12.8798 3.16779 13.2685 2.9991 13.8076 2.95077H13.9375C13.9927 2.95077 14.0375 2.906 14.0375 2.85077V2.57491C14.0375 2.51968 13.9927 2.47491 13.9375 2.47491H13.8079C13.2597 2.42454 12.8797 2.25573 12.6206 1.99193Z\" fill=\"#CC5DE8\"></path></g><defs><linearGradient id=\"paint0_linear_1132_20160\" x1=\"6.99531\" y1=\"1.05005\" x2=\"6.99531\" y2=\"12.9938\" gradientUnits=\"userSpaceOnUse\"><stop stop-color=\"#CC5DE8\"></stop><stop offset=\"1\" stop-color=\"#845EF6\"></stop></linearGradient><clipPath id=\"clip0_1132_20160\"><rect width=\"14\" height=\"14\" fill=\"white\" transform=\"translate(0.5)\"></rect></clipPath></defs></svg></div><div class=\"_itemText_fxrlp_69\" title=\"问AI\"><span class=\"_itemTextEllipsis_fxrlp_76\">问AI</span></div></div></a></div><div class=\"_mainSidebar_rt4b9_1\"><div class=\"_mainSidebarContent_rt4b9_6\"><a href=\"/docs\" data-discover=\"true\"><div class=\"_item_fxrlp_1\"><div><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><g clip-path=\"url(#clip0_2851_21927)\"><circle cx=\"6.32562\" cy=\"4.18525\" r=\"1.97549\" transform=\"rotate(-14.9759 6.32562 4.18525)\" stroke=\"#6E757F\" stroke-width=\"1.28407\"></circle><circle cx=\"4.04144\" cy=\"10.9335\" r=\"1.97549\" transform=\"rotate(-14.9759 4.04144 10.9335)\" stroke=\"#6E757F\" stroke-width=\"1.28407\"></circle><circle cx=\"11.1273\" cy=\"10.0968\" r=\"2.96323\" transform=\"rotate(-14.9759 11.1273 10.0968)\" stroke=\"#6E757F\" stroke-width=\"1.28407\"></circle></g><defs><clipPath id=\"clip0_2851_21927\"><rect width=\"16\" height=\"16\" fill=\"white\"></rect></clipPath></defs></svg></div><div class=\"_itemText_fxrlp_69\" title=\"知识库\"><span class=\"_itemTextEllipsis_fxrlp_76\">知识库</span></div></div></a><a href=\"/graph\" data-discover=\"true\"><div class=\"_item_fxrlp_1\"><div><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><g clip-path=\"url(#clip0_2851_21940)\"><path d=\"M2.85693 3.71429C2.85693 3.93941 2.90127 4.16233 2.98743 4.37031C3.07358 4.5783 3.19985 4.76728 3.35904 4.92647C3.51822 5.08566 3.7072 5.21193 3.91519 5.29808C4.12318 5.38423 4.3461 5.42857 4.57122 5.42857C4.79634 5.42857 5.01926 5.38423 5.22725 5.29808C5.43523 5.21193 5.62422 5.08566 5.7834 4.92647C5.94259 4.76728 6.06886 4.5783 6.15501 4.37031C6.24116 4.16233 6.28551 3.93941 6.28551 3.71429C6.28551 3.48916 6.24116 3.26624 6.15501 3.05826C6.06886 2.85027 5.94259 2.66129 5.7834 2.5021C5.62422 2.34292 5.43523 2.21664 5.22725 2.13049C5.01926 2.04434 4.79634 2 4.57122 2C4.3461 2 4.12318 2.04434 3.91519 2.13049C3.7072 2.21664 3.51822 2.34292 3.35904 2.5021C3.19985 2.66129 3.07358 2.85027 2.98743 3.05826C2.90127 3.26624 2.85693 3.48916 2.85693 3.71429Z\" stroke=\"#6E757F\" stroke-width=\"1.3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M10.5713 12.2858C10.5713 12.5109 10.6156 12.7339 10.7018 12.9418C10.7879 13.1498 10.9142 13.3388 11.0734 13.498C11.2326 13.6572 11.4216 13.7835 11.6295 13.8696C11.8375 13.9558 12.0605 14.0001 12.2856 14.0001C12.5107 14.0001 12.7336 13.9558 12.9416 13.8696C13.1496 13.7835 13.3386 13.6572 13.4978 13.498C13.6569 13.3388 13.7832 13.1498 13.8694 12.9418C13.9555 12.7339 13.9999 12.5109 13.9999 12.2858C13.9999 12.0607 13.9555 11.8378 13.8694 11.6298C13.7832 11.4218 13.6569 11.2328 13.4978 11.0736C13.3386 10.9144 13.1496 10.7882 12.9416 10.702C12.7336 10.6159 12.5107 10.5715 12.2856 10.5715C12.0605 10.5715 11.8375 10.6159 11.6295 10.702C11.4216 10.7882 11.2326 10.9144 11.0734 11.0736C10.9142 11.2328 10.7879 11.4218 10.7018 11.6298C10.6156 11.8378 10.5713 12.0607 10.5713 12.2858Z\" stroke=\"#6E757F\" stroke-width=\"1.3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M10.5713 3.71429C10.5713 3.93941 10.6156 4.16233 10.7018 4.37031C10.7879 4.5783 10.9142 4.76728 11.0734 4.92647C11.2326 5.08566 11.4216 5.21193 11.6295 5.29808C11.8375 5.38423 12.0605 5.42857 12.2856 5.42857C12.5107 5.42857 12.7336 5.38423 12.9416 5.29808C13.1496 5.21193 13.3386 5.08566 13.4978 4.92647C13.6569 4.76728 13.7832 4.5783 13.8694 4.37031C13.9555 4.16233 13.9999 3.93941 13.9999 3.71429C13.9999 3.48916 13.9555 3.26624 13.8694 3.05826C13.7832 2.85027 13.6569 2.66129 13.4978 2.5021C13.3386 2.34292 13.1496 2.21664 12.9416 2.13049C12.7336 2.04434 12.5107 2 12.2856 2C12.0605 2 11.8375 2.04434 11.6295 2.13049C11.4216 2.21664 11.2326 2.34292 11.0734 2.5021C10.9142 2.66129 10.7879 2.85027 10.7018 3.05826C10.6156 3.26624 10.5713 3.48916 10.5713 3.71429Z\" stroke=\"#6E757F\" stroke-width=\"1.3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M2 12.2858C2 12.5109 2.04434 12.7339 2.13049 12.9418C2.21664 13.1498 2.34292 13.3388 2.5021 13.498C2.66129 13.6572 2.85027 13.7835 3.05826 13.8696C3.26624 13.9558 3.48916 14.0001 3.71429 14.0001C3.93941 14.0001 4.16233 13.9558 4.37031 13.8696C4.5783 13.7835 4.76728 13.6572 4.92647 13.498C5.08565 13.3388 5.21193 13.1498 5.29808 12.9418C5.38423 12.7339 5.42857 12.5109 5.42857 12.2858C5.42857 12.0607 5.38423 11.8378 5.29808 11.6298C5.21193 11.4218 5.08565 11.2328 4.92647 11.0736C4.76728 10.9144 4.5783 10.7882 4.37031 10.702C4.16233 10.6159 3.93941 10.5715 3.71429 10.5715C3.48916 10.5715 3.26624 10.6159 3.05826 10.702C2.85027 10.7882 2.66129 10.9144 2.5021 11.0736C2.34292 11.2328 2.21664 11.4218 2.13049 11.6298C2.04434 11.8378 2 12.0607 2 12.2858Z\" stroke=\"#6E757F\" stroke-width=\"1.3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M5.25752 10.7596L10.7769 5.24023M4.50488 5.49111V10.5087M11.5295 5.49111V10.5087\" stroke=\"#6E757F\" stroke-width=\"1.3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></g><defs><clipPath id=\"clip0_2851_21940\"><rect width=\"16\" height=\"16\" fill=\"white\"></rect></clipPath></defs></svg></div><div class=\"_itemText_fxrlp_69\" title=\"知识图谱\"><span class=\"_itemTextEllipsis_fxrlp_76\">知识图谱</span></div></div></a><a href=\"/write\" data-discover=\"true\"><div class=\"_item_fxrlp_1\"><div><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M11.5283 3.09961L13.4214 4.99266L6.41922 11.9948L4.04633 12.4747L4.52617 10.1018L11.5283 3.09961Z\" stroke=\"#6E757F\" stroke-width=\"1.3\" stroke-linejoin=\"round\"></path><path d=\"M11.3742 9.60423C11.4...<!--截断-->",
+   "dom_len": 8012
+  },
+  "T4": {
+   "desc": "左上角显示当前用户「test998」的入口",
+   "snap": {
+    "tag": "a",
+    "type": null,
+    "role": "link",
+    "role_attr": null,
+    "name": "test998",
+    "label": null,
+    "aria_label": null,
+    "placeholder": null,
+    "testid": null,
+    "text": "test998",
+    "id": null,
+    "attr_name": null,
+    "cls": "_sidebarHeaderTitle_1rfyg_31 _sidebarHeaderTitleLink_1rfyg_106",
+    "css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > a",
+    "box": [
+     15,
+     12,
+     90,
+     28
+    ],
+    "chain": [
+     {
+      "tag": "div",
+      "cls": "_sidebarHeaderTitle_1rfyg_31",
+      "text": "test998"
+     },
+     {
+      "tag": "div",
+      "cls": "_sidebarHeader_1rfyg_24",
+      "text": "test998"
+     },
+     {
+      "tag": "div",
+      "cls": "_sidebarWrapper_1rfyg_2",
+      "text": "test998 问AI 知识库 知识图谱 写作空间 智能体 会话分组 1 未分组 日常问候开场 Ne"
+     }
+    ]
+   },
+   "dom": "<div class=\"_sidebarHeader_1rfyg_24\"><div class=\"_sidebarHeaderTitle_1rfyg_31\"><a class=\"_sidebarHeaderTitle_1rfyg_31 _sidebarHeaderTitleLink_1rfyg_106\" href=\"/global\" data-discover=\"true\"><img src=\"data:image/svg+xml,%3csvg%20width='25'%20height='25'%20viewBox='0%200%2025%2025'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M12.3998%206.03811L11.3528%203.83184C11.6369%203.65059%2011.8617%203.38964%2011.9992%203.08139C12.1366%202.77315%2012.1808%202.4312%2012.1261%202.09802C12.1025%201.87239%2012.0334%201.65393%2011.9229%201.45595C11.8125%201.25796%2011.663%201.08458%2011.4836%200.946352C11.3042%200.808127%2011.0986%200.707949%2010.8794%200.651914C10.6602%200.595879%2010.4319%200.585158%2010.2084%200.620404C9.98491%200.65565%209.77091%200.736127%209.57942%200.856936C9.38793%200.977745%209.22296%201.13636%209.09453%201.32313C8.96611%201.5099%208.87693%201.72092%208.83241%201.94335C8.78789%202.16578%208.78897%202.39497%208.83558%202.61696C8.88611%202.95455%209.03548%203.26948%209.26475%203.52182C9.49402%203.77416%209.79286%203.95253%2010.1234%204.03432L9.85714%206.2001L12.3998%206.03811Z'%20fill='%231E1F28'/%3e%3cpath%20d='M7.29708%207.31286C11.5488%204.42625%2017.1928%205.246%2019.8754%209.3367L19.9149%209.39934C20.1155%209.72667%2020.3449%2010.2612%2020.5424%2010.7462C20.7627%2011.2871%2020.9891%2011.8841%2021.1427%2012.2746C21.1999%2012.4198%2021.2826%2012.5585%2021.3883%2012.6858C22.2363%2013.7065%2022.6112%2014.0506%2023.6266%2014.9449C23.9882%2015.2634%2024.124%2015.8123%2023.8681%2016.2836C23.5317%2016.9033%2022.5149%2018.9281%2020.7428%2020.6676C18.9715%2022.4063%2016.2724%2024.1346%2013.0214%2024.3764C10.1246%2024.592%207.55965%2023.2983%205.49883%2022.0769C3.43046%2020.851%201.91372%2019.4309%201.32294%2018.8404C0.801031%2018.3187%200.970259%2017.5454%201.41527%2017.1743L1.49576%2017.1054C1.92134%2016.7297%202.71372%2015.7734%203.46274%2013.9929C3.50729%2013.7374%203.60284%2013.51%203.64413%2013.2107C3.68897%2012.8857%203.83594%2012.349%203.9%2012.0001C4.02618%2011.3128%204.53127%2010.3405%204.9524%209.69661C5.65248%208.62621%206.14758%208.10043%207.19525%207.38174L7.29708%207.31286ZM18.5496%2010.218C16.4214%206.97149%2011.808%206.17539%208.18117%208.6412L8.17826%208.64315L8.17555%208.64511C7.26373%209.2537%206.48124%2010.0444%205.8757%2010.9702C5.63276%2011.3417%205.4796%2011.848%205.36441%2012.4754C5.30779%2012.7838%205.26361%2013.101%205.21816%2013.4304C5.17365%2013.753%205.12733%2014.0921%205.06842%2014.413L5.05309%2014.4963L5.0207%2014.5746C4.28079%2016.366%203.4191%2017.4527%202.80775%2018.0593C3.49572%2018.7055%204.73054%2019.7662%206.30533%2020.6996C8.22504%2021.8373%2010.5765%2022.7426%2013.0214%2022.5606C15.7669%2022.3564%2017.9652%2020.9138%2019.5821%2019.3267C20.9312%2018.0025%2021.8361%2016.6143%2022.2708%2015.8744C21.4343%2015.1321%2020.994%2014.7039%2020.1692%2013.711C19.961%2013.4604%2019.7883%2013.1755%2019.6653%2012.8628C19.4998%2012.4422%2019.2886%2011.8839%2019.0721%2011.3523C18.8461%2010.7972%2018.657%2010.381%2018.5504%2010.2189L18.5496%2010.218Z'%20fill='%231E1F28'/%3e%3cpath%20d='M12.6999%2018.6838C15.627%2018.6838%2017.9999%2016.6056%2017.9999%2014.042C17.9999%2011.4784%2015.627%209.40015%2012.6999%209.40015C9.77279%209.40015%207.3999%2011.4784%207.3999%2014.042C7.3999%2016.6056%209.77279%2018.6838%2012.6999%2018.6838Z'%20fill='%231E1F28'/%3e%3cpath%20d='M12.7532%2014.4146C13.2299%2014.4146%2013.6164%2013.8993%2013.6164%2013.2636C13.6164%2012.6279%2013.2299%2012.1125%2012.7532%2012.1125C12.2764%2012.1125%2011.8899%2012.6279%2011.8899%2013.2636C11.8899%2013.8993%2012.2764%2014.4146%2012.7532%2014.4146Z'%20fill='white'/%3e%3cpath%20d='M16.4025%2014.4788C16.8784%2014.4499%2017.2331%2013.9122%2017.1946%2013.2776C17.1562%2012.6431%2016.7392%2012.1521%2016.2633%2012.1809C15.7874%2012.2098%2015.4328%2012.7475%2015.4712%2013.3821C15.5097%2014.0166%2015.9266%2014.5076%2016.4025%2014.4788Z'%20fill='white'/%3e%3c/svg%3e\" class=\"w-7 h-7 rounded-full\"><span class=\"_sidebarHeaderOrgName_1rfyg_119\" title=\"test998\">test998</span></a><span class=\"ant-dropdown-trigger\"></span></div><div class=\"_sidebarHeaderActions_1rfyg_42\" style=\"margin-top: 2px;\"><div class=\"_sidebarHeaderExpandable_1rfyg_48\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M5.27273 12L2 7L5.27273 2M11 12L7.72727 7L11 2\" stroke=\"#6E757F\" stroke-width=\"1.3\" stroke-linecap=\"square\"></path></svg></div></div></div>",
+   "dom_len": 4450
+  },
+  "T5": {
+   "desc": "左侧导航栏顶部的搜索输入框（placeholder 是「搜索」）",
+   "snap": {
+    "tag": "input",
+    "type": "text",
+    "role": "textbox",
+    "role_attr": null,
+    "name": null,
+    "label": null,
+    "aria_label": null,
+    "placeholder": "搜索",
+    "testid": null,
+    "text": null,
+    "id": null,
+    "attr_name": null,
+    "cls": "ant-input css-1l86wfl",
+    "css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > span > input",
+    "box": [
+     45,
+     68,
+     153,
+     22
+    ],
+    "chain": [
+     {
+      "tag": "span",
+      "cls": "ant-input-affix-wrapper ant-input-affix-wrapper-readonly css",
+      "text": ""
+     },
+     {
+      "tag": "div",
+      "cls": "_sidebarSearchInput_1rfyg_59",
+      "text": ""
+     },
+     {
+      "tag": "div",
+      "cls": "_sidebarWrapper_1rfyg_2",
+      "text": "test998 问AI 知识库 知识图谱 写作空间 智能体 会话分组 1 未分组 日常问候开场 Ne"
+     }
+    ]
+   },
+   "dom": "<div class=\"_sidebarSearchInput_1rfyg_59\"><span class=\"ant-input-affix-wrapper ant-input-affix-wrapper-readonly css-1l86wfl ant-input-outlined\"><span class=\"ant-input-prefix\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 15 15\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M13.3984 13.3982L10.4359 10.4357M12.0859 6.46069C12.0859 9.56729 9.56754 12.0857 6.46094 12.0857C3.35434 12.0857 0.835938 9.56729 0.835938 6.46069C0.835938 3.35409 3.35434 0.835693 6.46094 0.835693C9.56754 0.835693 12.0859 3.35409 12.0859 6.46069Z\" stroke=\"#919497\" stroke-width=\"1.67143\" stroke-linecap=\"square\"></path></svg></span><input placeholder=\"搜索\" readonly=\"\" class=\"ant-input css-1l86wfl\" type=\"text\" value=\"\"></span></div>",
+   "dom_len": 712
+  }
+ }
+}

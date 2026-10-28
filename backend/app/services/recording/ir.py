@@ -89,8 +89,11 @@ def public_step(step):
     if step.get('target'):
         out['target'] = dict(step['target'])
         # index：不唯一时用户点的是第几个匹配（降级定位要用），前端据此显示「将取第 2 个」。
+        # relation：这一条到底有没有落在目标上（self/ancestor/descendant/other/gone），
+        # 前端据此把「唯一但指错」的候选标出来——以前这种候选和真正可靠的看起来一模一样。
         out['target']['candidates'] = [
-            {'kind': c['kind'], 'desc': c['desc'], 'count': c['count'], 'index': c.get('index')}
+            {'kind': c['kind'], 'desc': c['desc'], 'count': c['count'],
+             'index': c.get('index'), 'relation': c.get('relation')}
             for c in step['target']['candidates']
         ]
         if step['target'].get('primary'):

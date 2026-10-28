@@ -19,16 +19,32 @@ from app.services.recording import intent as intent_mod
 from app.services.recording import ir, progress, verify
 from app.services.recording.ask_pool import STOP_DELAY_SECONDS as ASK_STOP_DELAY_SECONDS
 from app.services.recording.ask_pool import AskPool, disabled_snapshot
-from app.services.recording.locators import (best_effort, build_specs, narrowest,
-                                             pick_for, rank, stale_check, status_of)
+from app.services.recording.locators import (PW_SEMANTIC_KINDS, RF_SEMANTIC_KINDS,
+                                             best_effort, build_locator, build_specs,
+                                             narrowest, pick_for, rank, rf_row_scoped_specs,
+                                             row_scoped_spec, stale_check, status_of)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RECORDER_JS = os.path.join(HERE, 'recorder.js')
 # 录制时给目标元素打的临时属性，用来算出「用户点的是第几个匹配」（见 _count）。
 TARGET_MARK_ATTR = 'data-autocase-target'
-FIND_INDEX_JS = (
-    "(els, mark) => els.findIndex((el) => el.getAttribute('%s') === mark)" % TARGET_MARK_ATTR
-)
+# 光有 index 不够：count 数到 1 也可能数错人。这里把「命中元素与目标的关系」一并算出来，
+# 上层据此排除「指向别人」的候选（locators.hits_target），并给 index 找到的 nth 定位背书。
+FIND_INDEX_JS = """(els, mark) => {
+  const attr = '%s';
+  const target = document.querySelector('[' + attr + '="' + mark + '"]');
+  if (!target) return { index: -1, relation: 'gone' };
+  const at = els.indexOf(target);
+  if (at >= 0) return { index: at, relation: 'self' };
+  for (let i = 0; i < els.length; i++) {
+    if (els[i].contains(target)) return { index: i, relation: 'ancestor' };
+  }
+  for (let i = 0; i < els.length; i++) {
+    if (target.contains(els[i])) return { index: i, relation: 'descendant' };
+  }
+  return { index: -1, relation: 'other' };
+}""" % TARGET_MARK_ATTR
+# 唯一候选快查：直接读那一个元素身上的标记，省一次 evaluate_all（录制时每步都要跑）。
 CLEAR_MARK_JS = (
     "() => document.querySelectorAll('[%s]').forEach((el) => el.removeAttribute('%s'))"
     % (TARGET_MARK_ATTR, TARGET_MARK_ATTR)
@@ -72,6 +88,13 @@ PUMP_MS = 30
 PRECOUNT_TTL = 5.0
 # 最多留几条：只可能命中紧接着的那次 click，不需要攒。
 PRECOUNT_MAX = 8
+# 「回到这一步的页面」用记下来的地址重新打开，不走浏览器后退：
+# 实测后退会被登录跳转留下的历史条目带偏（URL 落到 /login，前进也回不去）。
+# 静音 4 秒是给 SPA 连续几次 framenavigated 上报留的窗口。
+NAV_MUTE_SECONDS = 4.0
+# goto 到 domcontentloaded 时列表还是空壳，等一拍再框，否则什么都数不到。
+GOTO_SETTLE_MS = 900
+GOTO_TIMEOUT_MS = 20000
 COMMAND_TIMEOUT = 60
 # 关闭浏览器这类命令不能把请求线程拖住：关不掉就让线程自己退出。
 CLOSE_TIMEOUT = 8
@@ -213,6 +236,12 @@ class RecordingSession(object):
         self._doc_stamp = {}
         # 新标签页已经由 new_page 那一步表示过的首次导航，不该再判成一次跳转。
         self._skip_nav = set()
+        # 「回到这一步的页面」是录制器自己发起的导航：不能记成用户跳转了一步，
+        # 否则每回去看一次就多一条 goto。时间窗而不是一次性标记，因为 SPA 一次
+        # goto 会连续上报几次 framenavigated。
+        self._nav_mute_until = 0.0
+        # 离开时的地址：用户从「回去看」的页面选完，得能回到刚才停的地方。
+        self._return_url = None
         # frame id → 最近一次点击的时间。用来判断「这次导航是不是点击引起的」，取用即失效。
         self._pending_click = {}
         # mark → (时间, 候选计数, 同名元素快照)：pointerdown 时先数一遍，click 命中后即取走。
@@ -317,6 +346,22 @@ class RecordingSession(object):
         """把被测页面和面板窗口重新摆成左右并排。"""
         return self._call('relayout')
 
+    def focus_sheet(self, on=True):
+        """任务书浮层：把面板窗口临时铺到屏幕中央，关掉再摆回并排。
+
+        浮层是长文档，宽度不能受并排分栏限制——并排时面板只有屏幕的 45%，
+        两栏排版在里面挤成一条。停止录制后本来也不需要同时看两个窗口。
+        """
+        return self._call('focus_sheet', on=bool(on))
+
+    def goto_step_doc(self, no):
+        """回到第 no 步录制时所在的那个页面，供用户当场重新框选定位。"""
+        return self._call('goto_doc', no=int(no))
+
+    def goto_back(self):
+        """从「回去看」的页面回到离开时那一页。"""
+        return self._call('goto_back')
+
     def _call(self, name, timeout=COMMAND_TIMEOUT, **kwargs):
         # 用线程是否存活判断，而不是状态：停止后浏览器还开着，命令照样要能发进去。
         if not self._thread.is_alive():
@@ -332,6 +377,22 @@ class RecordingSession(object):
         return value
 
     # ---- 读取（任意线程，只读内存）----
+
+    @property
+    def paused(self):
+        """暂停中：状态仍是 recording（浏览器照常可用），但不再收新步骤。
+
+        有些测试/工具会绕过 __init__ 直接造会话，取值一律走 getattr。
+        """
+        return bool(getattr(self, '_paused', False))
+
+    @property
+    def pick(self):
+        """拾取模式：浏览器里点元素只登记为可引用元素，不记录成步骤。
+
+        可以在页面里按 Esc 退出，界面靠事件流读到这个值才发现状态变了。
+        """
+        return bool(getattr(self, '_pick', False))
 
     def snapshot(self):
         # 有些测试/工具会绕过 __init__ 直接造会话，取值一律走 getattr。
@@ -696,7 +757,11 @@ class RecordingSession(object):
                 # no_viewport：页面跟随真实窗口大小。Playwright 默认会给 1280×720 的
                 # viewport（用 CDP 覆盖渲染尺寸），窗口最大化后页面仍按 1280 渲染，
                 # 右边就会空一大块，录制到的也不是用户看到的尺寸。
-                self._context = self._browser.new_context(no_viewport=True)
+                # ignore_https_errors：被测系统多是内网地址 + 自签名证书，Chromium 默认
+                # 直接报 net::ERR_CERT_AUTHORITY_INVALID，页面根本进不去，录制无从开始。
+                # 这是给测试用的浏览器，不做证书校验；产物脚本的证书策略由目标项目的
+                # playwright.config 决定（那边需要 ignoreHTTPSErrors: true）。
+                self._context = self._browser.new_context(no_viewport=True, ignore_https_errors=True)
                 # 悬浮面板开关要在 recorder.js 之前写进页面。
                 self._context.add_init_script(
                     script='window.__AUTOCASE_HUD_PANEL = %s;' % ('true' if self._hud_panel else 'false')
@@ -719,7 +784,15 @@ class RecordingSession(object):
                 page.goto(self._embed_url or self.base_url, wait_until='domcontentloaded')
                 if self._embed:
                     # 外壳页很快，真正要等的是 iframe 里的被测系统。
-                    self._wait_app_frame(page)
+                    # 它要是被浏览器换成了错误页，启动就该失败并说清楚原因——
+                    # 否则状态是「录制中」，用户面对的却是一张打不开的错误页。
+                    state = self._wait_app_frame(page)
+                    if state == 'error':
+                        raise RecordingError(
+                            '被测系统没有打开：%s 在浏览器里显示的是错误页。'
+                            '常见原因：HTTPS 证书不受信任、地址或端口不通、内网不可达，'
+                            '或者该站点禁止被 iframe 嵌入（X-Frame-Options / frame-ancestors）。'
+                            % self.base_url)
                 self._open_panel()
                 self.status = 'recording'
                 self._start_ask_pool()
@@ -829,6 +902,12 @@ class RecordingSession(object):
                     result = {'paused': self._paused}
                 elif name == 'relayout':
                     result = {'laid_out': self.layout_windows()}
+                elif name == 'focus_sheet':
+                    result = {'focused': self.sheet_windows(bool(kwargs.get('on', True)))}
+                elif name == 'goto_doc':
+                    result = self._goto_doc_now(kwargs['no'])
+                elif name == 'goto_back':
+                    result = self._goto_back_now()
                 elif name == 'verify':
                     result = self._verify_now(kwargs['intent'])
                 elif name == 'reload':
@@ -938,7 +1017,9 @@ class RecordingSession(object):
             return
         try:
             # no_viewport：让页面跟随窗口大小，而不是被固定 viewport 框住。
-            self._panel_context = self._browser.new_context(no_viewport=True)
+            # ignore_https_errors：AutoCase 自己被 https + 自签名证书访问时（嵌入模式），
+            # 面板窗口同样不能因为证书被拦在外面。
+            self._panel_context = self._browser.new_context(no_viewport=True, ignore_https_errors=True)
             page = self._panel_context.new_page()
             page.goto(self._panel_url, wait_until='domcontentloaded', timeout=15000)
             self._panel_page = page
@@ -975,6 +1056,37 @@ class RecordingSession(object):
                     self._panel_page,
                     {'left': main_w + gap, 'top': 0, 'width': max(320, panel_w), 'height': total_h}
                 )
+            return True
+        except Exception:
+            return False
+
+    def sheet_windows(self, on=True):
+        """任务书浮层的窗口形态：铺宽读文档 / 收回并排。
+
+        embed 模式只有一个窗口、也没有独立面板窗口，直接返回 False，
+        前端拿到 False 就不做任何事（浮层照样是窗口内的 96vw）。
+        """
+        if self._context is None or self._embed or self._panel_page is None:
+            return False
+        if not on:
+            return self.layout_windows()
+        try:
+            size = self._panel_page.evaluate(
+                '() => ({ w: screen.availWidth, h: screen.availHeight })')
+            total_w = int(size.get('w') or 0)
+            total_h = int(size.get('h') or 0)
+            if total_w <= 0 or total_h <= 0:
+                return False
+            # 不铺满：留一圈桌面边缘，用户还能一眼看出这是原来的面板窗口，
+            # 也知道关掉之后它会回到右边那条。
+            width = max(720, min(total_w - 60, 1280))
+            height = max(480, total_h - 60)
+            self._set_window_bounds(self._panel_page, {
+                'left': max(0, (total_w - width) // 2),
+                'top': max(0, (total_h - height) // 2),
+                'width': width,
+                'height': height,
+            })
             return True
         except Exception:
             return False
@@ -1104,6 +1216,11 @@ class RecordingSession(object):
 
     def _handle_hud_action(self, payload):
         action = payload if isinstance(payload, str) else (payload or {}).get('action')
+        if action == 'pick-off':
+            # 页面里按 Esc 退出拾取。拾取开关存在 Python 这边（工具栏、轮询都读它），
+            # 页内 JS 自己关掉的话，面板会一直显示「退出拾取」，点了才同步。
+            self._set_pick(False)
+            return
         if action != 'undo':
             return
         with self._lock:
@@ -1134,22 +1251,58 @@ class RecordingSession(object):
             return False
 
     def _wait_app_frame(self, page, timeout=25):
-        """嵌入模式启动时等 iframe 里的被测系统就绪，避免第一屏操作还没加载完。"""
+        """嵌入模式启动时等 iframe 里的被测系统就绪，避免第一屏操作还没加载完。
+
+        返回 'loaded' / 'error' / 'timeout'：
+        'error' 表示这个 iframe 已经变成浏览器错误页（证书、DNS、端口），等下去没有意义，
+        调用方应当直接失败并报出原因，而不是让用户对着错误页点录制。
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if self._error_frames(page):
+                return 'error'
             for frame in page.frames:
                 if frame is page.main_frame or not self._is_app_frame(frame):
                     continue
                 try:
                     frame.wait_for_load_state('domcontentloaded', timeout=2000)
-                    return True
                 except Exception:
                     continue
+                # 错误页自己也会触发 domcontentloaded：等到了不等于加载对了。
+                # 不加这一句，点不动的那张「拒绝连接」错误页会被判成「已就绪」，
+                # 用户还能在上面点出两条假步骤来。
+                if self._frame_failed(frame):
+                    return 'error'
+                return 'loaded'
             try:
                 page.wait_for_timeout(200)
             except Exception:
-                return False
-        return False
+                return 'timeout'
+        return 'timeout'
+
+    def _error_frames(self, page):
+        """被浏览器换成错误页的 iframe。
+
+        这类 frame 的 url 是 chrome-error://chromewebdata/，`_is_app_frame` 不认它，
+        于是等待会一路空转到超时，最后「录制已开始」却只有一张错误页。
+        """
+        found = []
+        for frame in page.frames:
+            if frame is page.main_frame:
+                continue
+            if self._frame_failed(frame):
+                found.append(frame.url)
+        return found
+
+    def _frame_failed(self, frame):
+        """这个 frame 是不是被浏览器换成了错误页。
+
+        证书不受信任、端口不通、被 X-Frame-Options 拒绝嵌入，最终都是这个 URL。
+        """
+        try:
+            return frame.url.startswith('chrome-error://')
+        except Exception:
+            return False
 
     # ---- 页面与事件 ----
 
@@ -1247,6 +1400,14 @@ class RecordingSession(object):
         self._schedule_hud()
 
     def _handle_navigated(self, page, frame):
+        # 拾取模式是跨页面的：新 document 里 recorder.js 会重新注入，开关得重发一遍。
+        # 不重发的话，Alt+点开下一页之后高亮框和十字准星都没了，人还以为拾取自己退了。
+        if self.pick:
+            try:
+                frame.evaluate('window.__pwSetPick(true)')
+            except Exception:
+                # 新文档还没就绪：recorder.js 的 ensurePickLayer 会自己重试。
+                pass
         # 嵌入模式下被测页面是外壳里的 iframe，也要按「页面跳转」记录。
         if not self._is_app_frame(frame):
             return
@@ -1257,6 +1418,13 @@ class RecordingSession(object):
         nav_type = info.get('type') if info else None
         stamp = info.get('origin') if info else None
         key = id(frame)
+        # 录制器自己发起的「回去看」：这次页面变化不能记成用户跳转了一步，
+        # 但身份要更新掉，否则后面所有 same_url / stamp 判断都错位。
+        if time.monotonic() < getattr(self, '_nav_mute_until', 0):
+            self._last_url[key] = url
+            if stamp is not None:
+                self._doc_stamp[key] = stamp
+            return
         # 新标签页打开时的第一次导航已由 new_page 表示，这里只登记身份。
         if key in self._skip_nav:
             self._skip_nav.discard(key)
@@ -1395,12 +1563,19 @@ class RecordingSession(object):
         stamp = self._doc_stamp.get(id(frame))
         return doc.get('stamp') is not None and stamp is not None and doc['stamp'] == stamp
 
-    def _count(self, frame, specs, mark=None, keep_mark=False):
+    def _count(self, frame, specs, mark=None, keep_mark=False, snap=None):
         """逐条在页面上数匹配数；mark 存在时顺带算出「用户点的是第几个匹配」。
 
         Playwright 的语义选择器（get_by_role 等）内部怎么排序我们拿不到，
         所以录制那一刻由 recorder.js 给目标元素打一个临时属性，再在页面里 findIndex，
         这样不唯一的步骤也能生成 .nth(i)，指向用户真正操作的那个元素。
+
+        光知道「第几个」还不够：count 数到 1 也可能是数错了人。所以每条候选同时记下
+        命中元素与目标的关系（self / ancestor / descendant / other / gone），
+        count == 1 的候选也要过一遍——这是「唯一定位」唯一一次被证伪的机会。
+
+        snap 传进来时，还会尝试给「行内元素 + 自身定位不唯一」的目标挂一个行锚点
+        （getByRole('row').filter({hasText}) 再往下找），比 .nth(i) 耐得住列表增删。
 
         keep_mark=True 用于 pointerdown 的预计数：标记要留到 click 那一下，
         否则 click 的 snap 会换个新 mark，缓存就对不上了。
@@ -1408,21 +1583,103 @@ class RecordingSession(object):
         out = []
         for spec in specs:
             index = None
+            relation = None
             try:
-                locator = getattr(frame, spec['method'])(*spec['args'], **spec['kwargs'])
+                locator = build_locator(frame, spec)
                 n = locator.count()
-                if mark and n > 1:
-                    found = locator.evaluate_all(FIND_INDEX_JS, mark)
-                    index = found if isinstance(found, int) and found >= 0 else None
+                if mark and n == 1:
+                    # 唯一候选走便宜的一步：直接读那一个元素身上的标记。
+                    # 命中目标时一次往返就够，跟改造前一样快。
+                    # 注意这里不写 index：index 的语义是「多个匹配里排第几」，
+                    # count == 1 时它毫无意义，写个 0 会让前端把整条定位渲染成 .nth(0)。
+                    if locator.get_attribute(TARGET_MARK_ATTR) == mark:
+                        relation = 'self'
+                    else:
+                        _, relation = self._relation(locator, mark)
+                elif mark and n > 1:
+                    index, relation = self._relation(locator, mark)
             except Exception:
                 n = -1
             item = {'kind': spec['kind'], 'desc': spec['desc'], 'count': n, 'spec': spec}
             if index is not None:
                 item['index'] = index
+            if relation:
+                item['relation'] = relation
             out.append(item)
+        if mark and snap:
+            out.extend(self._row_anchors(frame, snap, out, mark))
         if mark and not keep_mark:
             self._clear_marks(frame)
         return out
+
+    def _row_anchors(self, frame, snap, counted, mark):
+        """给「行内元素 + 自身定位不唯一」的目标挂行锚点，两个框架各一条。
+
+        行键不是猜的：拿这一行每个单元格的文本挨个试，要求它能让这一行在全页唯一命中、
+        而且这一行真的包住目标元素。试不出来就不加——宁可退回 .nth(i)，也不要锚错行。
+
+        只在语义候选 count > 1 时才做：目标自己就有唯一定位时，再套一层行作用域
+        只会让脚本更长、依赖更多。两个框架各判各的——RF 快照能投影出 testid、Playwright
+        未必有同名属性，一边唯一不代表另一边唯一。
+
+        返回列表（可能 0~2 条）：Playwright 那条是链式 spec，RF 那条是一条自足的 xpath。
+        """
+        scope = snap.get('row_scope') or {}
+        role = scope.get('role')
+        texts = [t for t in (scope.get('texts') or []) if t]
+        if not role or not texts:
+            return []
+        pw_inner = narrowest([c for c in counted
+                              if c['kind'] in PW_SEMANTIC_KINDS and (c.get('count') or 0) > 1])
+        rf_inner = narrowest([c for c in counted
+                              if c['kind'] in RF_SEMANTIC_KINDS and (c.get('count') or 0) > 1])
+        out = []
+        for text in texts[:6]:
+            if pw_inner is not None:
+                spec = row_scoped_spec(role, text, pw_inner['spec'])
+                if spec is not None and self._anchor_ok(frame, spec, mark):
+                    out.append({'kind': 'row_scoped', 'desc': spec['desc'], 'count': 1,
+                                'relation': 'self', 'spec': spec})
+                    pw_inner = None
+            if rf_inner is not None:
+                for spec in rf_row_scoped_specs(scope, text, rf_inner):
+                    if self._anchor_ok(frame, spec, mark):
+                        out.append({'kind': 'rf_row_scoped', 'desc': spec['desc'], 'count': 1,
+                                    'relation': 'self', 'spec': spec})
+                        rf_inner = None
+                        break
+            if pw_inner is None and rf_inner is None:
+                break
+        return out
+
+    def _anchor_ok(self, frame, spec, mark):
+        """这条行锚点是不是真的框住了目标：全页唯一命中 + 命中的就是目标本身。"""
+        try:
+            locator = build_locator(frame, spec)
+            if locator.count() != 1:
+                return False
+            found = locator.evaluate_all(FIND_INDEX_JS, mark)
+        except Exception:
+            # 行里有奇怪字符、或页面正在变：这条键不能用，试下一个。
+            return False
+        return isinstance(found, dict) and found.get('relation') == 'self'
+
+    def _relation(self, locator, mark):
+        """目标在匹配集合里的位置，以及它与命中元素的关系。算不出来返回 (None, None)。"""
+        try:
+            found = locator.evaluate_all(FIND_INDEX_JS, mark)
+        except Exception:
+            # frame 已销毁 / 元素被这次点击带走：没有关系信息，交给上层按「未验证」放行。
+            return None, None
+        if not isinstance(found, dict):
+            return None, None
+        index = found.get('index')
+        if not isinstance(index, int) or isinstance(index, bool):
+            index = None
+        relation = found.get('relation')
+        if not isinstance(relation, str):
+            relation = None
+        return index, relation
 
     def _clear_marks(self, frame):
         """摘掉本页所有临时标记。只在正常事件计数完 / 预计数被取走时调用。"""
@@ -1452,6 +1709,8 @@ class RecordingSession(object):
         mark = snap.get('_mark')
         if not mark:
             return
+        # 不传 snap：行锚点要挨个试行内文本，放在 pointerdown 里会拖慢预计数，
+        # 让 click 赶不上这份缓存。真正的锚点在 click 拿到缓存后补（见 _handle_click）。
         counted = self._count(frame, build_specs(snap), mark=mark, keep_mark=True)
         # 一条都没数到：按下时页面已经在动（或元素本来就在别的 frame），缓存没有意义。
         if not any((c.get('count') or 0) > 0 for c in counted):
@@ -1491,7 +1750,7 @@ class RecordingSession(object):
             return None
         spec = best['spec']
         try:
-            locator = getattr(frame, spec['method'])(*spec['args'], **spec['kwargs'])
+            locator = build_locator(frame, spec)
             items = locator.evaluate_all(MATCH_SUMMARY_JS)
         except Exception:
             # 页面正在导航、或元素已消失：没有就没有，不能因此丢步骤。
@@ -1525,6 +1784,52 @@ class RecordingSession(object):
             pass
         return None
 
+    def _goto_doc_now(self, no):
+        """把浏览器带回第 no 步录制时所在的页面，让用户当场重新框选。
+
+        用每步记下来的 `_doc.url` 重新打开，而不是 go_back：那个地址是 click
+        捕获阶段读的，早于应用的路由，所以正是「点击之前」的那一页。
+        """
+        step = self._find_step(no)
+        url = ((step.get('_doc') or {}).get('url'))
+        if not url:
+            return {'ok': False, 'reason': 'no_url'}
+        # 步骤上那个 frame 可能是停止后才销毁的（页面重开过），退到当前应用 frame 再试一次。
+        for frame in (step.get('_frame'), self._app_frame()):
+            if frame is None:
+                continue
+            # 只记第一次离开的地方：用户可能连着看几条，最后要为「回到刚才那页」负责。
+            if self._return_url is None:
+                try:
+                    self._return_url = frame.url or None
+                except Exception:
+                    self._return_url = None
+            self._nav_mute_until = time.monotonic() + NAV_MUTE_SECONDS
+            try:
+                frame.goto(url, wait_until='domcontentloaded', timeout=GOTO_TIMEOUT_MS)
+            except Exception:  # noqa: BLE001 - 换一个 frame 再试
+                continue
+            frame.wait_for_timeout(GOTO_SETTLE_MS)
+            return {'ok': True, 'url': url, 'return_url': self._return_url, 'step': no}
+        return {'ok': False, 'reason': 'goto_failed'}
+
+    def _goto_back_now(self):
+        """从「回去看」的页面回到离开时那一页。"""
+        url = self._return_url
+        if not url:
+            return {'ok': False, 'reason': 'no_return'}
+        frame = self._app_frame()
+        if frame is None:
+            return {'ok': False, 'reason': 'no_frame'}
+        self._nav_mute_until = time.monotonic() + NAV_MUTE_SECONDS
+        try:
+            frame.goto(url, wait_until='domcontentloaded', timeout=GOTO_TIMEOUT_MS)
+        except Exception as exc:  # noqa: BLE001
+            return {'ok': False, 'reason': 'goto_failed', 'detail': str(exc)[:200]}
+        frame.wait_for_timeout(GOTO_SETTLE_MS)
+        self._return_url = None
+        return {'ok': True, 'url': url}
+
     def _highlight_now(self, no, index, framework):
         """在页面上框出这一步的目标元素。必须在录制线程里跑（Playwright 对象不跨线程）。"""
         step = self._find_step(no)
@@ -1551,8 +1856,7 @@ class RecordingSession(object):
         if chosen is None:
             return {'ok': False, 'reason': 'no_candidate', 'count': 0, 'items': [], 'active': 0}
         try:
-            locator = getattr(frame, chosen['spec']['method'])(
-                *chosen['spec']['args'], **chosen['spec']['kwargs'])
+            locator = build_locator(frame, chosen['spec'])
             count = locator.count()
         except Exception as exc:  # noqa: BLE001 - frame 已销毁/页面已关
             return {'ok': False, 'reason': 'frame_lost', 'detail': str(exc)[:200],
@@ -1657,9 +1961,15 @@ class RecordingSession(object):
                 # 界面靠这个标记决定还弹不弹「当场选第几个」：元素都没了，
                 # 再框只会框到页面上剩下的同名元素，张冠李戴。
                 vanished_after = not self._mark_alive(frame, mark)
+                # 行锚点在按下鼠标时故意没算（会拖慢预计数）。这一刻标记还在，
+                # 补上它：不补的话，凡是走了缓存的步骤都会丢掉「按 WO-2 那一行定位」。
+                try:
+                    counted.extend(self._row_anchors(frame, snap, counted, mark))
+                except Exception:
+                    pass
                 self._clear_marks(frame)
         if counted is None:
-            counted = self._count(frame, build_specs(snap), mark=mark)
+            counted = self._count(frame, build_specs(snap), mark=mark, snap=snap)
         primary, ordered = rank(counted)
         unverified = False
         if primary is None:
@@ -1806,6 +2116,16 @@ class RecordingSession(object):
             # 按 desc 把旧 index 带过来，别让复核把降级定位的信息洗掉。
             kept_index = {c['desc']: c.get('index') for c in (target.get('candidates') or [])}
             counted = self._count(frame, build_specs(target['snap']))
+            # 行锚点是录制时用「目标元素上的临时标记」试出来的，复核时标记早就没了，重建不出来。
+            # 直接把录制时那几条搬过来重数：还能唯一命中就留着，不能就丢弃（说明这一行变了）。
+            for item in [c for c in (target.get('candidates') or [])
+                         if c['kind'] in ('row_scoped', 'rf_row_scoped')]:
+                try:
+                    if build_locator(frame, item['spec']).count() == 1:
+                        counted.append({'kind': item['kind'], 'desc': item['desc'], 'count': 1,
+                                        'relation': 'self', 'spec': item['spec']})
+                except Exception:
+                    pass
             for item in counted:
                 kept = kept_index.get(item['desc'])
                 if kept is None:

@@ -8,7 +8,7 @@
 
 正因为口径是「此刻」，结果里必须带上实际看到的值，让用户自己判断有没有意义。
 """
-from app.services.recording.locators import best_effort, pick_for
+from app.services.recording.locators import best_effort, build_locator, pick_for
 
 PW_FRAMEWORK = 'playwright-ts'
 MAX_ACTUAL = 200
@@ -43,7 +43,7 @@ def _locator(frame, target):
         raise VerifyError('这个元素当前在页面上找不到（所有候选都匹配 0 个）')
     spec = chosen.get('spec') or {}
     try:
-        locator = getattr(frame, spec['method'])(*spec['args'], **spec['kwargs'])
+        locator = build_locator(frame, spec)
     except Exception as exc:
         raise VerifyError('无法按这条定位查找元素：%s' % exc)
     index = chosen.get('index')

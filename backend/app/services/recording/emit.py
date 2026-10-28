@@ -14,7 +14,8 @@ import re
 from pathlib import Path
 
 from app.services.recording import detect, guard, toolchain
-from app.services.recording.locators import best_effort, pick_for, pool_for
+from app.services.recording.locators import (best_effort, false_positive, inline_nth,
+                                            pick_for, pool_for)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,9 @@ LOCATOR_RULES = (
     '- 只写 target_path 指定的那一个文件。运行环境只给它开了写权限，'
     '写其他任何文件都会被拒绝，并导致本次生成失败；不要尝试创建辅助文件、临时文件或改配置。\n'
     '- 定位优先用 target.locator；不要自己编造选择器，需要更精确时只能从 target.candidates 里挑或组合。\n'
+    '- target.locator 里出现 [class*="..."] / [class~="..."]（或 xpath 里的 contains(@class, ...)）'
+    '是录制有意选的：那是 CSS Modules / BEM 类名去掉构建哈希后的名字部分，同一份代码重新打包也不变，'
+    '而且不依赖元素在第几个位置。照原样写，不要把它改写成标签路径，也不要再加 .nth()。\n'
     '- intent.type 为 url_contains / page_text_contains / sleep 时没有 target：'
     'url_contains 断言整条地址，page_text_contains 断言整个页面的文字，不要为它们编造元素定位。\n'
     '- step.type 为 reload 表示「刷新当前标签页」：这一步没有 target 也没有 url。\n'
@@ -42,10 +46,13 @@ LOCATOR_RULES = (
     'step.value 是 accept 或 dismiss，step.dialog.message 是弹窗文字（只用于写注释，不要拿去断言）。'
     '弹窗这一步本身不产生新动作，只是把「上一步会引起弹窗、以及怎么处理」记下来。\n'
     '- target.match_count > 1 表示这条定位在页面上匹配了多个元素，属于「不唯一但仍可用」：\n'
-    '  · 给了 target.nth，就取第 nth 个（下标从 0 开始）：\n'
-    '    playwright-ts 写 locator.nth(n)；\n'
-    '    robot-selenium 写 xpath=(<target.locator 去掉 xpath= 前缀后的表达式>)[n+1]，不要改写表达式本身；\n'
-    '  · 没给 nth，就取第一个，并在该行上方加一行注释：匹配 N 个元素，取第 1 个，请确认。\n'
+    '  · target.nth_applied 为 true：序号已经写进 target.locator 里了（形如 xpath=(...)[3]），\n'
+    '    原样使用。不要再写 .nth()，也不要再包一层 (...)[n]——那会变成「第 3 个里的第 3 个」，\n'
+    '    一个都匹配不到。target.nth 只用来写注释，不要拼进定位。\n'
+    '  · 没有 nth_applied、给了 target.nth（下标从 0 开始）：playwright-ts 写 locator.nth(n)。\n'
+    '  · 没有 nth_applied、locator 又是 css= 前缀：css 选择器没法带序号，按 locator 原样写，\n'
+    '    并在该行上方加一行 TODO，说明「本应取第 n+1 个，需要改成 xpath，或让页面提供稳定属性」。\n'
+    '  · 既没有 nth_applied 也没有 nth，就取第一个，并在该行上方加一行注释：匹配 N 个元素，取第 1 个，请确认。\n'
     '  · 给了 target.matches 时，把这几个匹配分别是什么写进同一行注释里，例如：\n'
     '    // 页面上有 3 个「删除」：设备A 在线 / 设备B 离线 / 设备C 在线，这里取第 2 个\n'
     '    matches.each 就是被匹配到的元素内容（不唯一时才有，取值优先用 each，不要自己编）。\n'
@@ -232,6 +239,10 @@ def _steps_for_prompt(steps, framework):
                 'nth': info['nth'] if info else None,
                 'candidates': _candidates_for_prompt(target, framework),
             }
+            # 序号已经算进 locator 里了（RF 的 xpath=(...)[n]）：必须明说，
+            # 否则写手会照着 nth 再拼一次，变成「第 n 个里的第 n 个」，直接定位不到。
+            if info and info.get('nth_applied'):
+                item['target']['nth_applied'] = True
             # 用户在界面上看过框、亲手挑的那个，要让它出现在提示词里，
             # 否则模型只看到「取第 2 个」，却不知道这 2 个分别是什么，也就写不出有意义的注释。
             matched = _match_texts(target)
@@ -273,10 +284,22 @@ def _match_texts(target):
     return {'of': matches.get('count') or len(items), 'each': each}
 
 
+def _fit_nth(locator, index, framework):
+    """把「取第几个」落到定位里：RF 直接内联，Playwright 留给写手写 .nth(n)。
+
+    Playwright 侧是方法调用，写成 locator.nth(1) 不容易错，而且 desc 还要拿去做
+    界面预览，不该混进执行细节；RF 侧是字符串拼接，必须在这里一次算准。
+    """
+    if framework != RF_FRAMEWORK:
+        return locator, False
+    return inline_nth(locator, index)
+
+
 def _locator_info(target, framework):
     """选定位：有唯一的就用唯一的；没有就降级到「命中最少」的那条 + 录制时的序号。
 
-    返回 {'locator', 'matches', 'nth', 'mode'}；连一条能命中的候选都没有时返回 None。
+    返回 {'locator', 'matches', 'nth', 'mode'}，RF 下序号可能已经内联进 locator
+    （此时带 nth_applied）。连一条能命中的候选都没有时返回 None。
     """
     counted = target.get('candidates') or []
     # 用户看过框、亲手挑过的，优先于任何自动选择：他选的是这条候选的第 index 个，
@@ -286,8 +309,12 @@ def _locator_info(target, framework):
         allowed = {c['kind'] for c in pool_for(framework, counted)}
         hit = next((c for c in counted if c['desc'] == picked.get('desc')), None)
         if hit is not None and hit['kind'] in allowed and (hit.get('count') or 0) > 1:
-            return {'locator': _fmt(hit, framework), 'matches': hit['count'],
-                    'nth': picked.get('index'), 'mode': 'chosen'}
+            index = picked.get('index')
+            locator, applied = _fit_nth(_fmt(hit, framework), index, framework)
+            info = {'locator': locator, 'matches': hit['count'], 'nth': index, 'mode': 'chosen'}
+            if applied:
+                info['nth_applied'] = True
+            return info
     chosen = pick_for(framework, counted)
     if chosen is not None:
         return {'locator': _fmt(chosen, framework), 'matches': chosen['count'], 'nth': None, 'mode': 'unique'}
@@ -300,21 +327,46 @@ def _locator_info(target, framework):
             if pool:
                 return {'locator': _fmt(pool[0], framework), 'matches': 0, 'nth': None, 'mode': 'stale'}
         return None
-    return {
-        'locator': _fmt(best, framework),
+    index = best.get('index')
+    locator, applied = _fit_nth(_fmt(best, framework), index, framework)
+    info = {
+        'locator': locator,
         'matches': best['count'],
-        'nth': best.get('index'),
+        'nth': index,
         'mode': 'ambiguous',
     }
+    if applied:
+        info['nth_applied'] = True
+    return info
 
 
 def _candidates_for_prompt(target, framework):
-    """给 agent 的候选清单：只留有命中的、最多 5 条，避免提示词被撑爆。"""
+    """给 agent 的候选清单：只留有命中、确实落在目标上的，最多 5 条，避免提示词被撑爆。
+
+    「命中」以前只要求 count > 0，于是 getByText 数到提示语里那两个字也会进清单。
+    现在录制时带了 relation，指向别的元素的候选直接剔掉——把它交给写手，等于递过去一个必错的选项。
+    """
     out = []
     for candidate in pool_for(framework, target.get('candidates') or []):
         if candidate.get('count', -1) <= 0:
             continue
-        out.append({'locator': _fmt(candidate, framework), 'count': candidate['count'], 'nth': candidate.get('index')})
+        if false_positive(candidate):
+            continue
+        index = candidate.get('index')
+        locator = _fmt(candidate, framework)
+        applied = False
+        if candidate['count'] > 1:
+            # RF 下多匹配的候选也把序号内联进去：写手从清单里挑备选用时，
+            # 拿到的同样是「直接能写」的定位，不用再自己拼 (...)[n]。
+            locator, applied = _fit_nth(locator, index, framework)
+        item = {'locator': locator, 'count': candidate['count'], 'nth': index}
+        if applied:
+            item['nth_applied'] = True
+        relation = candidate.get('relation')
+        if relation and relation != 'self':
+            # 命中的是目标的祖先/后代：能点，但不如精确命中的那条可靠，让写手知道这个差别。
+            item['hit'] = relation
+        out.append(item)
         if len(out) >= MAX_CANDIDATES_IN_PROMPT:
             break
     return out
@@ -622,7 +674,9 @@ def _prepare(workspace, steps, framework, target_path):
         raise EmitError('暂不支持的框架：%s' % framework)
     if not steps:
         raise EmitError('没有可生成的步骤')
-    # 定位不唯一不再拦整体生成：降级成「最窄候选 + 录制时的序号」，交给 agent 写 nth。
+    # 定位不唯一不再拦整体生成：降级成「最窄候选 + 录制时的序号」。
+    # 序号对 RF 已经内联进 xpath，对 Playwright 由写手写成 .nth(n)——两边都不再是
+    # 「让模型自己拼字符串」，剩下的风险只在 css 候选上（见 LOCATOR_RULES）。
     # 只有连一条候选都命不中（元素已经不在页面上）才拒绝——那种情况写不出任何定位。
     blocked, degraded = [], []
     for step in steps:

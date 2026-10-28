@@ -70,14 +70,27 @@ SNAP_JS = r"""
   };
   const cssPath = (node) => {
     const parts = [];
+    let scope = document;
+    try {
+      const root = node.getRootNode ? node.getRootNode() : null;
+      if (root && root.querySelectorAll) scope = root;
+    } catch (e) { /* 同 recorder.js */ }
     let cur = node;
-    while (cur && cur.nodeType === 1 && parts.length < 6) {
+    while (cur && cur.nodeType === 1 && parts.length < 12) {
       let part = cur.tagName.toLowerCase();
-      if (cur === document.documentElement) { parts.unshift(part); break; }
-      const sibs = cur.parentElement
-        ? Array.from(cur.parentElement.children).filter(c => c.tagName === cur.tagName) : [];
-      if (sibs.length > 1) part += ':nth-of-type(' + (sibs.indexOf(cur) + 1) + ')';
+      const isRoot = cur === document.documentElement || !cur.parentElement;
+      if (!isRoot) {
+        const sibs = Array.from(cur.parentElement.children).filter(c => c.tagName === cur.tagName);
+        if (sibs.length > 1) part += ':nth-of-type(' + (sibs.indexOf(cur) + 1) + ')';
+      }
       parts.unshift(part);
+      const path = parts.join(' > ');
+      if (parts.length >= 2 || isRoot) {
+        let hits = -1;
+        try { hits = scope.querySelectorAll(path).length; } catch (e) { hits = -1; }
+        if (hits === 1) return path;
+      }
+      if (isRoot) break;
       cur = cur.parentElement;
     }
     return parts.join(' > ');
@@ -99,6 +112,7 @@ SNAP_JS = r"""
     text: text,
     id: el.id || null,
     attr_name: el.getAttribute('name'),
+    class_raw: (el.getAttribute('class') || '').trim().slice(0, 240) || null,
     css: cssPath(el),
   };
 }

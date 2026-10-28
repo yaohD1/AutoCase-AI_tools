@@ -1,0 +1,125 @@
+{
+ "model": "doubao-seed-2-0-lite-260428",
+ "cases": [
+  {
+   "expr": "page.locator('div.mt-2\\\\.5.h-\\\\[30px\\\\] div.ml-auto.flex.items-center.gap-3 > svg')",
+   "syntax": "fail",
+   "count": null,
+   "hit": null,
+   "error": "count 失败: Locator.count: Unexpected token \".5\" while parsing css selector \"div.mt-2\\\\.5.h-\\\\[30px\\\\] div.ml-auto.flex.items-center",
+   "case": "T1/A1",
+   "desc": "聊天输入区右下角的发送按钮（圆形图标按钮，点了会把输入框内容发出去）",
+   "variant": "A1",
+   "true_css": "div > div:nth-of-type(3) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(2) > svg",
+   "tokens": 5210
+  },
+  {
+   "expr": "page.locator('div.ml-auto.flex.items-center.gap-3 > svg')",
+   "syntax": "ok",
+   "count": 1,
+   "hit": "yes",
+   "error": null,
+   "case": "T1/A2",
+   "desc": "聊天输入区右下角的发送按钮（圆形图标按钮，点了会把输入框内容发出去）",
+   "variant": "A2",
+   "true_css": "div > div:nth-of-type(3) > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(2) > svg",
+   "tokens": 4860
+  },
+  {
+   "expr": "page.getByPlaceholder('输入内容并发送（或按 Enter），即可生成回答')",
+   "syntax": "ok",
+   "count": 1,
+   "hit": "yes",
+   "error": null,
+   "case": "T2/A1",
+   "desc": "聊天输入框（多行文本域，placeholder 是「输入内容并发送（或按 Enter），即可生成回答」）",
+   "variant": "A1",
+   "true_css": "div > div:nth-of-type(2) > div > div:nth-of-type(3) > div:nth-of-type(1) > textarea",
+   "tokens": 7347
+  },
+  {
+   "expr": "page.getByPlaceholder('输入内容并发送（或按 Enter），即可生成回答')",
+   "syntax": "ok",
+   "count": 1,
+   "hit": "yes",
+   "error": null,
+   "case": "T2/A2",
+   "desc": "聊天输入框（多行文本域，placeholder 是「输入内容并发送（或按 Enter），即可生成回答」）",
+   "variant": "A2",
+   "true_css": "div > div:nth-of-type(2) > div > div:nth-of-type(3) > div:nth-of-type(1) > textarea",
+   "tokens": 7366
+  },
+  {
+   "expr": "page.getByRole('link', { name: '问AI' })",
+   "syntax": "ok",
+   "count": 1,
+   "hit": "yes",
+   "error": null,
+   "case": "T3/A1",
+   "desc": "左侧导航栏里的「问AI」菜单项",
+   "variant": "A1",
+   "true_css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(3) > div:nth-of-type(1) > a",
+   "tokens": 8234
+  },
+  {
+   "expr": "page.getByRole('link', { name: '问AI' })",
+   "syntax": "ok",
+   "count": 1,
+   "hit": "yes",
+   "error": null,
+   "case": "T3/A2",
+   "desc": "左侧导航栏里的「问AI」菜单项",
+   "variant": "A2",
+   "true_css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(3) > div:nth-of-type(1) > a",
+   "tokens": 8181
+  },
+  {
+   "expr": "page.getByRole('link', { name: 'test998' })",
+   "syntax": "ok",
+   "count": 1,
+   "hit": "yes",
+   "error": null,
+   "case": "T4/A1",
+   "desc": "左上角显示当前用户「test998」的入口",
+   "variant": "A1",
+   "true_css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > a",
+   "tokens": 5943
+  },
+  {
+   "expr": "page.getByRole('link', { name: 'test998' })",
+   "syntax": "ok",
+   "count": 1,
+   "hit": "yes",
+   "error": null,
+   "case": "T4/A2",
+   "desc": "左上角显示当前用户「test998」的入口",
+   "variant": "A2",
+   "true_css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > a",
+   "tokens": 5936
+  },
+  {
+   "expr": "page.getByPlaceholder('搜索')",
+   "syntax": "ok",
+   "count": 1,
+   "hit": "yes",
+   "error": null,
+   "case": "T5/A1",
+   "desc": "左侧导航栏顶部的搜索输入框（placeholder 是「搜索」）",
+   "variant": "A1",
+   "true_css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > span > input",
+   "tokens": 2489
+  },
+  {
+   "expr": "page.getByPlaceholder('搜索')",
+   "syntax": "ok",
+   "count": 1,
+   "hit": "yes",
+   "error": null,
+   "case": "T5/A2",
+   "desc": "左侧导航栏顶部的搜索输入框（placeholder 是「搜索」）",
+   "variant": "A2",
+   "true_css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > span > input",
+   "tokens": 2428
+  }
+ ]
+}

@@ -2,7 +2,9 @@ import json
 import unittest
 
 from app.services.recording import intent, ir
-from app.services.recording.locators import build_specs, rank, stale_check, status_of
+from app.services.recording.locators import (
+    PW_KINDS, build_specs, rank, render_pw, stale_check, status_of,
+)
 from app.services.recording.session import HUD_RECENT_STEPS, RecordingError, RecordingSession
 
 
@@ -68,6 +70,58 @@ class LocatorRankingTest(unittest.TestCase):
         self.assertEqual(stale_check("locator('html > body > button:nth-of-type(3)')", primary), 'stale')
         self.assertEqual(stale_check(primary['desc'], primary), 'fragile')
         self.assertEqual(stale_check(primary['desc'], None), 'ambiguous')
+
+
+class LocatorDescMatchesSpecTest(unittest.TestCase):
+    """desc 就是最终写进脚本的那一行：必须和数 count 时用的参数完全一致。
+
+    历史事故：label 用 exact=True 数出「唯一」，desc 却写成 getByLabel('密码')，
+    写手照抄后子串匹配命中 input + 表单项容器，运行时 strict mode violation。
+    """
+
+    SNAP = {
+        'tag': 'input', 'type': 'password', 'role': 'textbox', 'name': '密码',
+        'label': '密码', 'placeholder': '请输入密码', 'text': '密码',
+        'css': '#pwd', 'testid': 'pwd', 'id': None, 'aria_label': None, 'attr_name': None,
+    }
+
+    def _descs(self):
+        return {s['kind']: s['desc'] for s in build_specs(self.SNAP) if s['kind'] in PW_KINDS}
+
+    def test_desc_is_rendered_from_the_same_arguments(self):
+        descs = self._descs()
+        self.assertEqual(descs['testid'], "getByTestId('pwd')")
+        self.assertEqual(descs['role'], "getByRole('textbox', { name: '密码', exact: true })")
+        self.assertEqual(descs['label'], "getByLabel('密码', { exact: true })")
+        self.assertEqual(descs['placeholder'], "getByPlaceholder('请输入密码', { exact: true })")
+        self.assertEqual(descs['css'], "locator('#pwd')")
+        # text 候选只对承载文本的标签生成，input 不在其中，单独验一条。
+        text_snap = dict(self.SNAP, tag='span', text='联网搜索')
+        self.assertEqual([s['desc'] for s in build_specs(text_snap) if s['kind'] == 'text'],
+                         ["getByText('联网搜索', { exact: true })"])
+
+    def test_desc_never_drops_an_argument(self):
+        """任何参数只出现在计数、不出现在 desc 里，都会让「录制的唯一」变成「脚本的不唯一」。"""
+        for spec in build_specs(self.SNAP):
+            if spec['kind'] not in PW_KINDS:
+                continue
+            values = list(spec['args']) + list(spec['kwargs'].values())
+            for value in values:
+                expected = 'true' if value is True else 'false' if value is False else str(value)
+                self.assertIn(expected, spec['desc'],
+                              '%s 的 desc 丢了参数 %r：%s' % (spec['kind'], value, spec['desc']))
+
+    def test_multiline_text_stays_escaped(self):
+        """desc 会原样写进 TS 文件，换行必须是转义序列，否则字符串字面量会断成两行。"""
+        desc = render_pw('get_by_text', ['dyh\n管理员\ntest998'], {'exact': True})
+        self.assertNotIn('\n', desc)
+        self.assertIn('\\n', desc)
+
+    def test_no_python_style_keyword_arguments_left(self):
+        """desc 必须是能直接粘贴的 JS：之前 role 的 name=... 要靠写手翻译，exact 就是在翻译时丢的。"""
+        for desc in self._descs().values():
+            self.assertNotIn('name=', desc)
+            self.assertIn('(', desc)
 
 
 class IRTest(unittest.TestCase):

@@ -425,6 +425,22 @@ class EmitTest(unittest.TestCase):
         self.assertIn('"match_count": 2', runner.prompts[0])
         self.assertTrue((self.ws / TARGET).is_file())
 
+    def test_rf_row_scoped_locator_reaches_the_prompt(self):
+        """行锚定的 RF 定位是一条自足的 xpath，写手原样用，不该再被 nth 改写。"""
+        step = _rf_step(no=9, text='删除 WO-2 这一行')
+        locator = ("xpath=//tr[contains(normalize-space(.), 'WO-2')]"
+                   "//button[normalize-space(.)='删除']")
+        row = {'kind': 'rf_row_scoped', 'desc': 'rf row:' + locator, 'count': 1,
+               'relation': 'self',
+               'spec': {'kind': 'rf_row_scoped', 'method': 'locator',
+                        'args': [locator], 'kwargs': {}, 'desc': 'rf row:' + locator}}
+        step['target']['candidates'] = [row]
+        step['target']['primary'] = row
+        runner = FakeRunner(write(TARGET, ROBOT()))
+        self._gen(runner, [(True, 'ok')], steps=[_rf_step(), step])
+        self.assertIn(locator, runner.prompts[0])
+        self.assertIn('"nth": null', runner.prompts[0])
+
     def test_target_that_matches_nothing_still_blocks(self):
         """连一条候选都命不中（元素已不在页面上）才拒绝——那种情况写不出任何定位。"""
         gone = _rf_step()

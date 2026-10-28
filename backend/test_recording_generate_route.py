@@ -12,12 +12,13 @@ Path(os.environ['AUTOMATION_WORKSPACE_ROOT'], 'proj').mkdir(parents=True, exist_
 
 from app import create_app  # noqa: E402
 from app.services.opencode_runner import OpenCodeRunner  # noqa: E402
-from app.services.recording import emit, progress  # noqa: E402
+from app.services.recording import emit, progress, replay  # noqa: E402
 from app.services.recording.session import RecordingSession  # noqa: E402
 
 MODEL = 'volcengine-plan/deepseek-v4-flash'
 GEN = '/api/automation/recording/generate'
 PLAN_API = '/api/automation/recording/plan'
+REPLAY = '/api/automation/recording/replay'
 # 任务书是写入的唯一入口；路由测试只关心「有没有带、对不对得上」，内容由 emit 的测试覆盖。
 PLAN = {'steps': [], 'target_path': 'a.robot'}
 
@@ -203,6 +204,62 @@ class GenerateRouteTest(unittest.TestCase):
         r = self._plan()
         self.assertEqual(r.status_code, 409)
         self.assertIn('已有生成任务', r.get_json()['error'])
+
+
+class ReplayRouteTest(unittest.TestCase):
+    """回放跑的是内存里的录制 IR，不是生成的脚本：录制一停就该能跑，和有没有生成无关。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = create_app()
+        cls.app.config['TESTING'] = True
+        cls.client = cls.app.test_client()
+
+    def setUp(self):
+        RecordingSession._current = None
+
+    def _stopped_session(self, status='stopped', steps=None):
+        session = RecordingSession.__new__(RecordingSession)
+        session.status = status
+        session.ir = lambda: list(steps or [])
+        RecordingSession._current = session
+        return session
+
+    def test_replay_runs_without_any_generation(self):
+        self._stopped_session(steps=[{'no': 1, 'type': 'goto', 'url': 'http://example.test'}])
+        fake = {'ok': True, 'done': 1, 'total': 1, 'steps': [], 'error': None, 'failed_no': None}
+        with mock.patch.object(replay, 'replay_checked', return_value=fake) as called:
+            r = self.client.post(REPLAY, json={'framework': 'playwright-ts'})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()['ok'])
+        called.assert_called_once()
+        # 传进去的就是录制 IR 本身，没有任何「读过生成产物」的痕迹。
+        self.assertEqual(called.call_args[0][0][0]['type'], 'goto')
+
+    def test_replay_needs_recording_to_be_stopped(self):
+        self._stopped_session(status='recording', steps=[{'no': 1, 'type': 'goto'}])
+        r = self.client.post(REPLAY, json={})
+        self.assertEqual(r.status_code, 409)
+
+    def test_replay_runs_while_paused(self):
+        """暂停时步骤集不再变化，回放该和停止后一样可用——「先验一段再接着录」。"""
+        session = self._stopped_session(status='recording', steps=[{'no': 1, 'type': 'goto'}])
+        session._paused = True
+        fake = {'ok': True, 'done': 1, 'total': 1, 'steps': [], 'error': None, 'failed_no': None}
+        with mock.patch.object(replay, 'replay_checked', return_value=fake) as called:
+            r = self.client.post(REPLAY, json={'framework': 'playwright-ts'})
+        self.assertEqual(r.status_code, 200)
+        called.assert_called_once()
+
+    def test_paused_property_defaults_to_false(self):
+        """测试里会用 __new__ 直接造会话，属性不能因为缺 _paused 就炸。"""
+        session = RecordingSession.__new__(RecordingSession)
+        self.assertFalse(session.paused)
+
+    def test_replay_needs_at_least_one_step(self):
+        self._stopped_session(steps=[])
+        r = self.client.post(REPLAY, json={})
+        self.assertEqual(r.status_code, 400)
 
 
 if __name__ == '__main__':

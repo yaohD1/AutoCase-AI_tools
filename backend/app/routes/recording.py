@@ -13,7 +13,7 @@ from app.services.automation_generator import AutomationScriptGenerator
 from app.services.opencode_runner import OpenCodeRunner
 from app.models import db
 from app.models.recording_generation import RecordingGeneration
-from app.services.recording import detect, emit, records, replay
+from app.services.recording import detect, embedding, emit, records, replay
 from app.services.recording import intent, progress, verify
 from app.services.recording.ask_pool import AskUnavailable
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
@@ -71,6 +71,17 @@ def start_recording():
         return _error('base_url 必须是 http 或 https 地址', 400)
     headless = bool(current_app.config.get('RECORDING_HEADLESS', os.environ.get('RECORDING_HEADLESS') == '1'))
     layout = (current_app.config.get('RECORDING_LAYOUT') or 'embed').strip().lower()
+    notice = None
+    if layout == 'embed':
+        # 站点写了 X-Frame-Options / CSP frame-ancestors 时，iframe 只会得到一张
+        # 「拒绝了我们的连接请求」错误页，而且用户还能在错误页上点出步骤来。
+        # 与其让他对着错误页调试，不如直接换成独立窗口布局。
+        blocked = embedding.frame_block_reason(
+            base_url, shell_origin=current_app.config.get('RECORDING_PANEL_URL'))
+        if blocked:
+            layout = 'split'
+            notice = ('被测系统禁止被 iframe 嵌入（%s），已改用独立窗口：'
+                      '被测页面在浏览器主窗口，编排面板在另一个窗口。' % blocked)
     try:
         session = RecordingSession.start_new(
             base_url,
@@ -89,7 +100,11 @@ def start_recording():
         return _error('无法启动录制：%s' % exc, 500)
     # 新录制 = 新的生成任务：上一条的「已写入 / 失败」不该出现在这一条里。
     progress.PROGRESS.reset()
-    return jsonify(session.snapshot()), 201
+    data = session.snapshot()
+    if notice:
+        # 布局被自动换掉必须让用户知道，否则他会奇怪为什么弹出两个窗口。
+        data['notice'] = notice
+    return jsonify(data), 201
 
 
 def _frontend_url(params):
@@ -142,6 +157,55 @@ def relayout_panel():
     return jsonify({'laid_out': bool(result.get('laid_out'))}), 200
 
 
+@recording_bp.route('/automation/recording/panel/sheet', methods=['POST'])
+def focus_panel_sheet():
+    """任务书浮层开 / 关时调整面板窗口：开着铺宽读文档，关掉摆回并排。
+
+    窗口调不动不算错误（嵌入模式、系统拒绝、用户已经关了窗口）：
+    前端只是拿不到更宽的地方，浮层仍然在窗口里正常显示。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        result = session.focus_sheet(bool(body.get('open', True)))
+    except RecordingError as exc:
+        return _error(str(exc), 409)
+    return jsonify({'focused': bool(result.get('focused'))}), 200
+
+
+@recording_bp.route('/automation/recording/goto-doc', methods=['POST'])
+def goto_step_doc():
+    """回到某一步录制时所在的页面，让用户重新框选定位。
+
+    页面跑掉之后（点了按钮跳走、列表整个换掉）现场框不出来，
+    但这个动作发生在哪一页是记着的，用那个地址重开就行。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        result = session.goto_step_doc(body.get('no'))
+    except RecordingError as exc:
+        return _error(str(exc), 409)
+    return jsonify(result), 200
+
+
+@recording_bp.route('/automation/recording/goto-back', methods=['POST'])
+def goto_back():
+    """从「回去看」的页面回到离开时那一页。"""
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    try:
+        result = session.goto_back()
+    except RecordingError as exc:
+        return _error(str(exc), 409)
+    return jsonify(result), 200
+
+
 @recording_bp.route('/automation/recording/current', methods=['GET'])
 def current_recording():
     session = RecordingSession.current()
@@ -161,7 +225,10 @@ def recording_events():
         after = -1
     events = session.events_after(after)
     cursor = events[-1]['seq'] if events else after
-    return jsonify({'events': events, 'cursor': cursor, 'status': session.status}), 200
+    # pick / paused 一起带上：这两个状态能在页面里就地切换（拾取模式下按 Esc 退出），
+    # 光靠「有没有新步骤」的游标发现不了，界面会一直停在旧状态上。
+    return jsonify({'events': events, 'cursor': cursor, 'status': session.status,
+                    'pick': session.pick, 'paused': session.paused}), 200
 
 
 @recording_bp.route('/automation/recording/pick', methods=['POST'])
@@ -509,8 +576,14 @@ def replay_recording():
     session = RecordingSession.current()
     if session is None:
         return _error('没有录制', 404)
-    if session.status not in ('stopped', 'idle_timeout', 'closed'):
-        return _error('请先停止录制再回放校验', 409)
+    # 回放读的是内存里的录制 IR，只要步骤集是稳定的就能跑：
+    # 停止（含超时、关浏览器）之后，或者用户主动暂停时。暂停时浏览器仍开着，
+    # 但不再收新步骤，正是「先验一段再接着录」的时候；录制中则不放开，
+    # 否则步骤一边录一边变，回放结果和界面上的步骤对不上。
+    replayable = session.status in ('stopped', 'idle_timeout', 'closed') or (
+        session.status == 'recording' and session.paused)
+    if not replayable:
+        return _error('先暂停或停止录制再回放校验', 409)
     body = request.get_json(silent=True) or {}
     framework = (body.get('framework') or '').strip() or replay.PW_FRAMEWORK
     if framework not in (replay.PW_FRAMEWORK, replay.RF_FRAMEWORK):

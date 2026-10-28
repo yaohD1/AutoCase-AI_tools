@@ -10,7 +10,7 @@ import time
 
 from playwright.sync_api import expect, sync_playwright
 
-from app.services.recording.locators import best_effort, pick_for
+from app.services.recording.locators import best_effort, build_locator, pick_for
 
 ASSERT_TIMEOUT_MS = 5000
 # 刷新轮询里单次判断的窗口：只等渲染，不等结果。结果要靠下一轮刷新。
@@ -79,7 +79,7 @@ def _locator(page, target, framework=PW_FRAMEWORK):
     if not chosen:
         raise ReplayError('目标没有可用的定位')
     spec = chosen['spec']
-    locator = getattr(root, spec['method'])(*spec['args'], **spec['kwargs'])
+    locator = build_locator(root, spec)
     index = chosen.get('index')
     if index is not None and chosen.get('count', 1) > 1:
         locator = locator.nth(index)
@@ -294,7 +294,9 @@ def _run(steps, framework, headless, on_step):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         try:
-            context = browser.new_context()
+            # 和录制用同一套证书策略：内网系统多为自签名证书，校验一开就
+            # net::ERR_CERT_AUTHORITY_INVALID，回放连页面都进不去，会被误报成定位失效。
+            context = browser.new_context(ignore_https_errors=True)
             context.new_page()
             i = 0
             # 下一步要是弹窗步骤，处理方式必须在当前步执行之前交给浏览器，所以在这里拿着。

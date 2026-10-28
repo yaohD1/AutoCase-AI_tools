@@ -1,0 +1,98 @@
+[
+ {
+  "tag": "button",
+  "role": "",
+  "cls": "ant-tabs-nav-more",
+  "id": "rc-tabs-0-more",
+  "testid": "",
+  "aria": "",
+  "ph": "",
+  "text": "",
+  "box": [
+   920,
+   292,
+   46,
+   38
+  ]
+ },
+ {
+  "tag": "svg",
+  "role": "",
+  "cls": "",
+  "id": "",
+  "testid": "",
+  "aria": "",
+  "ph": "",
+  "text": "",
+  "box": [
+   936,
+   304,
+   14,
+   14
+  ]
+ },
+ {
+  "tag": "a",
+  "role": "",
+  "cls": "m-0 font-medium",
+  "id": "",
+  "testid": "",
+  "aria": "",
+  "ph": "",
+  "text": "服务协议",
+  "box": [
+   1059,
+   554,
+   56,
+   22
+  ]
+ },
+ {
+  "tag": "a",
+  "role": "",
+  "cls": "m-0 font-medium",
+  "id": "",
+  "testid": "",
+  "aria": "",
+  "ph": "",
+  "text": "隐私政策",
+  "box": [
+   1129,
+   554,
+   56,
+   22
+  ]
+ },
+ {
+  "tag": "button",
+  "role": "",
+  "cls": " cursor-[inherit] relative group animate-fadeIn translate-x-",
+  "id": "",
+  "testid": "",
+  "aria": "Open assistant",
+  "ph": "",
+  "text": "",
+  "box": [
+   1384,
+   698,
+   96,
+   96
+  ]
+ },
+ {
+  "tag": "svg",
+  "role": "",
+  "cls": "w-24 h-24 text-white",
+  "id": "",
+  "testid": "",
+  "aria": "",
+  "ph": "",
+  "text": "",
+  "box": [
+   1384,
+   698,
+   96,
+   96
+  ]
+ }
+]

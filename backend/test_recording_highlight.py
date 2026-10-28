@@ -162,14 +162,22 @@ class MatchSummaryTest(_Base):
         self.assertEqual({item['visible'] for item in matches['items']}, {True})
 
     def test_matches_are_kept_even_when_primary_is_unique(self):
-        """getByRole 命中 3 个 → 主定位退到 css（count=1）标成结构定位，但摘要必须还在。"""
+        """getByRole 命中 3 个 → 现在用「行 + 行内按钮」锚定，不再退到 css 绝对路径。
+
+        以前这里只能选 css（div:nth-of-type(2) > ...），列表一增一删就错位；
+        行锚点把「第 2 行的删除」变成「设备A 那一行的删除」，多匹配摘要也还得留着。
+        """
         session = self._start()
         self._click_nth(session, 0)
         step = self._wait_click_step(session)
         target = step['target']
-        self.assertEqual(target['status'], 'fragile', '这个页面应当退到 css 绝对路径')
-        self.assertIsNotNone(target.get('matches'), '结构定位的步骤同样要记下多个匹配')
-        self.assertEqual(target['matches']['desc'], "getByRole('button', name='删除')")
+        primary = target.get('primary') or {}
+        self.assertEqual(primary.get('kind'), 'row_scoped',
+                         '列表行内元素应当按行锚定，而不是退回 css 绝对路径')
+        self.assertIn('设备A', primary.get('desc') or '')
+        self.assertIsNotNone(target.get('matches'), '行锚定的步骤同样要记下多个匹配')
+        self.assertEqual(target['matches']['desc'],
+                         "getByRole('button', { name: '删除', exact: true })")
 
     def test_single_element_records_nothing(self):
         session = self._start('/single')

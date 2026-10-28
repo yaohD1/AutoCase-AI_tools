@@ -32,7 +32,12 @@
           这一步在页面上匹配到 {{ locConfirm.count }} 个元素，已经按同样的顺序编号框出。
           <b>现在选，页面还是录制时的样子</b>；过后再选就得靠你自己核对了。
         </template>
-        <template v-else>当前页面上框不出这一步的元素了，只能按录制时的快照选。</template>
+        <template v-else>当前页面上已经找不到这一步的元素了（点完页面跳走了）。</template>
+      </p>
+      <!-- 页面跑掉时唯一的补救：用录制时记下的地址把那一页重新打开。
+           浏览器后退在这里靠不住——实测会被登录跳转的历史条目带偏。 -->
+      <p v-if="locConfirm.gone && !locConfirm.returnUrl" class="loc-gone">
+        可以回到那一步的页面重新框选，也可以直接按下面的快照选。
       </p>
       <div v-if="locConfirm.items.length" class="loc-list">
         <button
@@ -52,6 +57,22 @@
       <div class="loc-foot">
         <span v-if="locQueue.length" class="loc-queue">还有 {{ locQueue.length }} 步待确认</span>
         <div class="loc-actions">
+          <el-button
+            v-if="locConfirm.returnUrl"
+            size="small"
+            :loading="locConfirm.returning"
+            @click="returnFromStepPage"
+          >
+            回到刚才的页面
+          </el-button>
+          <el-button
+            v-else-if="locConfirm.gone"
+            size="small"
+            :loading="locConfirm.reopening"
+            @click="reopenStepPage"
+          >
+            回到这一步的页面
+          </el-button>
           <el-button text size="small" @click="deferLocConfirm">稍后再选</el-button>
           <el-button
             v-if="locConfirm.items.length"
@@ -251,7 +272,7 @@
               :plain="picking"
               :icon="Aim"
               :disabled="!canInspect"
-              :title="canInspect ? '在浏览器里点元素，只登记为可引用的元素，不记为步骤' : '浏览器已关闭，无法再拾取元素'"
+              :title="canInspect ? '在浏览器里点元素，只登记为可引用的元素，不记为步骤（页面里按 Esc 也能退出）' : '浏览器已关闭，无法再拾取元素'"
               @click="togglePick(!picking)"
             >
               {{ picking ? '退出拾取' : '拾取元素' }}
@@ -294,7 +315,9 @@
 
         <div v-if="picking" class="pick-hint">
           拾取模式已开启：在浏览器里点击元素，它会被记为可引用的元素，不会记为操作步骤。
+          鼠标划过时页面会框出「这一下会拾到谁」。
           要拾取菜单、下拉、折叠面板里的元素，<b>按住 Alt 再点</b>——这一下会真的展开，不会被拦掉。
+          按 <b>Esc</b> 或点上面的「退出拾取」结束。
         </div>
         <el-alert v-if="session && session.error" :title="session.error" type="error" :closable="false" class="session-error" />
 
@@ -308,7 +331,7 @@
             v-for="step in steps"
             :key="step.no"
             :data-step-no="step.no"
-            :class="['step', { 'is-blocked': effectiveStatus(step) === 'ambiguous', 'is-flash': flashingNo === step.no }]"
+            :class="['step', { 'is-blocked': ['ambiguous', 'suspect'].includes(effectiveStatus(step)), 'is-flash': flashingNo === step.no }]"
           >
             <div class="step-no" :title="canEdit ? '按住拖动可排序' : ''">{{ step.no }}</div>
             <div class="step-body">
@@ -411,6 +434,11 @@
                   </el-tag>
                   <span v-if="step.target.chosen && step.target.chosen.index_invalid" class="chosen-warn"
                         title="你选的序号，在停止录制时的页面上已经不存在了：生成出来会点不到，需要重新选">序号已失效</span>
+                  <!-- 图标按钮这类控件：你点的是里层的图形，但脚本点的是元素的中心，
+                       中心被挡住时 Playwright 会拒绝点击。录制时已自动改用能点到的父容器。 -->
+                  <span v-if="step.target.snap && step.target.snap.lifted" class="lifted-hint"
+                        :title="`这块区域的中心被别的元素压住了，脚本点它会报 intercepts pointer events；已把定位上提到能点到的父容器（原来是 <${step.target.snap.lifted}>）。生成写进去的就是上提后的这一条。`"
+                  >已上提</span>
                   <!-- 人眼确认：把这条定位匹配到的元素全部框出来。比任何文字都可靠，
                        尤其是「两个都叫确定」这种文本和行文本都一样的场景。 -->
                   <el-button
@@ -703,15 +731,24 @@
           </div>
           <div :class="['check', { ok: !blockers.length, warn: blockers.length > 0 }]">
             <span class="check-dot"></span>
-            {{ blockers.length
-              ? `第 ${blockers.join('、')} 步定位待确认，将按「最窄候选 + 录制时的序号」生成`
-              : (pageGoneCount ? '当前页面上的步骤都有唯一定位' : '所有步骤都有唯一定位') }}
+            <span class="check-text">
+              {{ blockers.length
+                ? `第 ${blockers.join('、')} 步定位待确认，将按「最窄候选 + 录制时的序号」生成`
+                : (pageGoneCount ? '当前页面上的步骤都有唯一定位' : '所有步骤都有唯一定位') }}
+            </span>
+            <!-- 页面跑掉的步骤当场框不出来，停在这里还能一条条回去看 -->
+            <el-button v-if="reviewCount" text size="small" class="check-action" @click="startLocReview">
+              {{ reviewCount }} 步待确认 · 逐条看
+            </el-button>
           </div>
           <div v-if="pageGoneCount" class="check warn">
             <span class="check-dot"></span>{{ pageGoneCount }} 个步骤的目标页面已翻走，按录制时定位生成，请回放确认
           </div>
           <div v-if="fragileCount" class="check warn">
             <span class="check-dot"></span>{{ fragileCount }} 个步骤使用结构定位，已标黄，生成后请留意
+          </div>
+          <div v-if="suspectCount" class="check warn">
+            <span class="check-dot"></span>{{ suspectCount }} 个步骤的「唯一」定位其实指向了别的元素，生成不会采用，请先重新框选
           </div>
           <div :class="['check', { ok: !!config.workspace && !!config.model }]">
             <span class="check-dot"></span>
@@ -720,8 +757,57 @@
         </div>
         <!-- 没停录制时把 4 行检查压成一行，别占掉半屏 -->
         <div v-else class="gen-compact">
-          停止录制后可生成 · 已录 <b>{{ steps.length }}</b> 步
+          {{ paused ? '暂停中' : '录制中' }} · 已录 <b>{{ steps.length }}</b> 步 · 停止后可生成
           <span v-if="blockers.length" class="gen-compact-bad">· {{ blockers.length }} 处定位待确认</span>
+        </div>
+
+        <!-- 回放校验：跑的是内存里的录制 IR，不是生成的脚本，所以暂停或停止后就能跑，
+             不需要先经过「生成」。按钮放在这里，不要再塞回生成结果卡片里。 -->
+        <div v-if="canReplay && steps.length" class="replay-block">
+          <div class="replay-row">
+            <el-button size="small" :loading="replaying" @click="runReplay">回放校验</el-button>
+            <span class="field-hint">
+              {{ paused
+                ? '暂停中也能跑：另开一个无头浏览器从第 1 步重演，不动你当前这个窗口'
+                : '在浏览器里把录制重跑一遍，只验定位还命中不命中，不需要先生成' }}
+            </span>
+          </div>
+          <div v-if="replayStale" class="replay-stale">
+            {{ replayExtra ? `回放之后又录了 ${replayExtra} 步` : '步骤有改动' }}，这次结论只覆盖回放时的 {{ replayResult.total }} 步
+          </div>
+          <div v-if="replayResult" class="gen-replay">
+            <button type="button" class="gen-replay-head" @click="replayOpen = !replayOpen">
+              <span :class="['gen-replay-dot', replayResult.ok ? 'ok' : 'bad']"></span>
+              <span :class="['gen-replay-title', { bad: !replayResult.ok }]">{{ replayTitle }}</span>
+              <span v-if="replayResult.steps.length" class="gen-replay-toggle">
+                {{ replayOpen ? '收起明细' : '展开明细' }}
+              </span>
+            </button>
+            <div v-if="!replayResult.ok && replayResult.error" class="gen-replay-error">{{ replayResult.error }}</div>
+            <div v-if="config.framework === 'robot-selenium'" class="gen-replay-note">
+              Robot 生成的脚本需要 Selenium 环境运行，这里只校验定位是否仍然有效。
+            </div>
+            <ul v-if="replayOpen" class="gen-replay-steps">
+              <li v-for="item in replayResult.steps" :key="item.no" :class="{ bad: !item.ok }">
+                <span class="gen-replay-no">{{ item.no }}</span>
+                <span class="gen-replay-type">{{ stepKindLabel(item.type) }}</span>
+                <span class="gen-replay-alias" :title="item.alias || item.label || item.url || ''">
+                  {{ item.alias || item.label || item.url || '—' }}
+                </span>
+                <code v-if="item.used" class="gen-replay-loc" :title="item.used.syntax">
+                  {{ item.used.syntax }}
+                </code>
+                <span v-else class="gen-replay-loc is-empty">—</span>
+                <span v-if="item.used && item.used.nth" class="gen-replay-nth">
+                  匹配 {{ item.used.matches }} 取第 {{ item.used.nth }}
+                </span>
+                <span v-if="item.poll" class="gen-replay-poll">
+                  轮询 {{ item.poll.elapsed }}s / 刷新 {{ item.poll.attempts - 1 }} 次
+                </span>
+                <span v-if="!item.ok && item.error" class="gen-replay-why">{{ item.error }}</span>
+              </li>
+            </ul>
+          </div>
         </div>
 
         <!-- 生成中：进度条取代按钮。状态来自服务端，主界面和录制面板看到的是同一份，
@@ -740,7 +826,7 @@
         <!-- 写入的唯一入口在任务书里（「按此执行」）。这里只负责出任务书，
              避免又出现一条绕过规划、直接从零写的路。 -->
         <el-button
-          v-else-if="!planState"
+          v-else-if="!planState && !shownPlanError"
           class="generate-btn"
           type="primary"
           :disabled="!canPlan"
@@ -748,10 +834,28 @@
         >
           生成任务书
         </el-button>
-        <div v-else class="gen-plan-ready">
-          <span class="check-dot ok"></span>
-          任务书已就绪 · {{ planSteps.length }} 步<template v-if="planReusable.length"> · 复用 {{ planReusable.length }} 项</template>
-          <span class="gen-plan-ready-hint">确认后到任务书里点「按此执行」</span>
+        <!-- 任务书只有这一个入口：卡片是 flex:none，永远贴在面板底部，不用滚。
+             正文在浮层里读（见下方 Teleport），这里只交代「写到哪、几步」。 -->
+        <div v-else class="plan-ready">
+          <span :class="['check-dot', shownPlanError ? '' : 'ok']"></span>
+          <div class="plan-ready-main">
+            <div class="plan-ready-title">
+              <!-- 重新规划失败时旧版还在：说「没生成出来」会误导，得说清用的是哪一版 -->
+              <template v-if="shownPlanError && planData">重新规划失败，仍是上一版</template>
+              <template v-else-if="shownPlanError">任务书没生成出来</template>
+              <template v-else>
+                任务书已就绪 · {{ planSteps.length }} 步<template v-if="planReusable.length"> · 复用 {{ planReusable.length }} 项</template>
+              </template>
+            </div>
+            <div class="plan-ready-sub">
+              <template v-if="shownPlanError">{{ shownPlanError.message }}</template>
+              <template v-else-if="planTarget">写入 <code>{{ planTarget }}</code></template>
+              <template v-else>写入位置还没定，打开任务书确认</template>
+            </div>
+          </div>
+          <el-button size="small" :type="shownPlanError && !planData ? 'default' : 'primary'" @click="openPlanSheet">
+            {{ shownPlanError && !planData ? '看错误' : '打开任务书' }}
+          </el-button>
         </div>
         <div v-if="!generating && !planState && !canPlan && generateBlockReason" class="gen-block-reason">
           <span class="gen-block-dot"></span>{{ generateBlockReason }}
@@ -796,212 +900,192 @@
             <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: shownResult.generation_id } })">
               查看生成记录
             </el-button>
-            <el-button size="small" :loading="replaying" @click="runReplay">回放校验</el-button>
             <span class="field-hint">预览文件内容、提交到 Git 或撤销这次写入</span>
           </div>
+        </div>
+      </el-card>
 
-          <!-- 回放校验：在浏览器里把录制重跑一遍，验证定位是否仍然命中。
-               校验的是录制本身，不是生成的脚本语法，所以两个框架都能跑。 -->
-          <div v-if="replayResult" class="gen-replay">
-            <button type="button" class="gen-replay-head" @click="replayOpen = !replayOpen">
-              <span :class="['gen-replay-dot', replayResult.ok ? 'ok' : 'bad']"></span>
-              <span :class="['gen-replay-title', { bad: !replayResult.ok }]">{{ replayTitle }}</span>
-              <span v-if="replayResult.steps.length" class="gen-replay-toggle">
-                {{ replayOpen ? '收起明细' : '展开明细' }}
+      <!-- 任务书正文：长文档（表格 + 风险 + 意见）塞不进 420–600 宽的编排面板，
+           入口在生成卡里，这里只负责铺开读。浮层打开时后端会把面板窗口铺宽——
+           panel=1 时本页就是那个窄窗口，窗口内的 96vw 再大也大不过窗口。 -->
+      <Teleport to="body">
+        <div v-if="planSheetOpen" class="plan-sheet-mask" @mousedown.self="closePlanSheet">
+          <section class="plan-sheet" role="dialog" aria-modal="true" aria-labelledby="plan-sheet-title">
+            <header class="plan-sheet-head">
+              <span id="plan-sheet-title" class="card-title">任务书</span>
+              <span v-if="planData" class="plan-head-meta">
+                {{ planSteps.length }} 步<template v-if="planReusable.length"> · 复用 {{ planReusable.length }} 项</template>
               </span>
-            </button>
-            <div v-if="!replayResult.ok && replayResult.error" class="gen-replay-error">{{ replayResult.error }}</div>
-            <div v-if="config.framework === 'robot-selenium'" class="gen-replay-note">
-              Robot 生成的脚本需要 Selenium 环境运行，这里只校验定位是否仍然有效。
-            </div>
-            <ul v-if="replayOpen" class="gen-replay-steps">
-              <li v-for="item in replayResult.steps" :key="item.no" :class="{ bad: !item.ok }">
-                <span class="gen-replay-no">{{ item.no }}</span>
-                <span class="gen-replay-type">{{ stepKindLabel(item.type) }}</span>
-                <span class="gen-replay-alias" :title="item.alias || item.label || item.url || ''">
-                  {{ item.alias || item.label || item.url || '—' }}
-                </span>
-                <code v-if="item.used" class="gen-replay-loc" :title="item.used.syntax">
-                  {{ item.used.syntax }}
-                </code>
-                <span v-else class="gen-replay-loc is-empty">—</span>
-                <span v-if="item.used && item.used.nth" class="gen-replay-nth">
-                  匹配 {{ item.used.matches }} 取第 {{ item.used.nth }}
-                </span>
-                <span v-if="item.poll" class="gen-replay-poll">
-                  轮询 {{ item.poll.elapsed }}s / 刷新 {{ item.poll.attempts - 1 }} 次
-                </span>
-                <span v-if="!item.ok && item.error" class="gen-replay-why">{{ item.error }}</span>
-              </li>
-            </ul>
-          </div>
-        </div>
-      </el-card>
+              <span class="plan-sheet-tip">选中正文任意一段，可以只针对它提意见</span>
+              <button type="button" class="plan-sheet-close" title="关闭（Esc）" @click="closePlanSheet">✕</button>
+            </header>
 
-      <!-- 任务书：规划和写入之间的唯一闸门。
-           用户可以选中任意片段写意见，意见会随「按此执行」交给写手；
-           想改整体方向就点「重新规划」，把意见一起带给规划 agent。 -->
-      <el-card v-if="isStopped && (planData || shownPlanError)" ref="planCard" class="panel-card plan-card">
-        <template #header>
-          <div class="section-header">
-            <span class="card-title">任务书</span>
-            <span v-if="planData" class="plan-head-meta">
-              {{ planSteps.length }} 步<template v-if="planReusable.length"> · 复用 {{ planReusable.length }} 项</template>
-            </span>
-          </div>
-        </template>
-
-        <div v-if="shownPlanError" class="gen-error">
-          <div class="gen-error-title">{{ shownPlanError.message }}</div>
-          <ul v-if="shownPlanError.details && shownPlanError.details.length" class="gen-error-list">
-            <li v-for="(item, idx) in shownPlanError.details" :key="idx">{{ detailText(item) }}</li>
-          </ul>
-          <div class="plan-actions">
-            <el-button size="small" type="primary" :loading="planRunning" @click="runPlan(true)">重试规划</el-button>
-          </div>
-        </div>
-
-        <template v-if="planData">
-          <div v-if="planStale" class="plan-stale">
-            录制步骤已经变了，这份任务书对不上。请重新规划后再执行。
-          </div>
-
-          <div ref="planBody" class="plan-body" @mouseup="onPlanSelect" @mousedown="clearSelTip">
-            <div class="plan-block">
-              <div class="plan-block-title">项目风格</div>
-              <div class="plan-kv"><span>runner</span><b>{{ planStyle.runner || '—' }}</b></div>
-              <div class="plan-kv"><span>断言</span><b>{{ planStyle.assertion || '—' }}</b></div>
-              <div v-if="planStyle.import_sample" class="plan-kv">
-                <span>import</span><code>{{ planStyle.import_sample }}</code>
+            <!-- 错误和正文不互斥：重新规划失败时上一版任务书还在，
+                 这时候把旧版藏起来等于让人两手空空地重新点「生成」。 -->
+            <div v-if="shownPlanError" :class="['plan-sheet-error', { 'is-solo': !planData }]">
+              <div class="gen-error">
+                <div class="gen-error-title">{{ shownPlanError.message }}</div>
+                <ul v-if="shownPlanError.details && shownPlanError.details.length" class="gen-error-list">
+                  <li v-for="(item, idx) in shownPlanError.details" :key="idx">{{ detailText(item) }}</li>
+                </ul>
               </div>
-              <div v-if="planStyle.notes" class="plan-style-note">{{ planStyle.notes }}</div>
+              <div class="plan-actions">
+                <el-button size="small" type="primary" :loading="planRunning" @click="runPlan(true)">重试规划</el-button>
+                <el-button v-if="!planData" size="small" text @click="closePlanSheet">关掉</el-button>
+              </div>
             </div>
 
-            <div class="plan-block">
-              <div class="plan-block-title">
-                写入位置
-                <span v-if="planTargetChosen" class="plan-path-badge">AI 按项目约定选的</span>
-              </div>
-              <div v-if="!planTargetEditing" class="plan-target">
-                <code>{{ planTarget || '—' }}</code>
-                <el-button
-                  class="plan-target-edit-btn"
-                  text
-                  size="small"
-                  :icon="EditPen"
-                  title="改写入位置"
-                  @click="startEditPlanTarget"
-                />
-              </div>
-              <div v-else class="plan-target-edit">
-                <el-input
-                  v-model="planTargetDraft"
-                  size="small"
-                  placeholder="工作区内相对路径，例如 tests/login.spec.ts"
-                  @keyup.enter="savePlanTarget"
-                />
-                <el-button size="small" type="primary" @click="savePlanTarget">确定</el-button>
-                <el-button size="small" text @click="cancelEditPlanTarget">取消</el-button>
-              </div>
-              <div v-if="planTargetError" class="plan-target-error">{{ planTargetError }}</div>
-              <div v-if="planResult.reason" class="plan-suggest-reason">{{ planResult.reason }}</div>
-              <div v-if="planTargetChanged" class="plan-target-changed">
-                位置是你改的。任务书里的相对 import 是按规划给的位置算的，可能已经不对；
-                不确定就点「重新规划」，让 AI 按新位置重算一遍。
-              </div>
-              <div v-if="planSuggestion && !planTargetChosen" class="plan-suggest">
-                <div class="plan-suggest-title">
-                  规划建议改到 <code>{{ planSuggestion }}</code>
+            <div v-if="planData" class="plan-sheet-body">
+              <div ref="planBody" class="plan-sheet-main" @mouseup="onPlanSelect" @mousedown="clearSelTip">
+                <div v-if="planStale" class="plan-stale">
+                  录制步骤已经变了，这份任务书对不上。请重新规划后再执行。
                 </div>
-                <el-button size="small" type="warning" plain @click="adoptSuggestion">采用这个路径</el-button>
+
+                <div class="plan-block">
+                  <div class="plan-block-title">项目风格</div>
+                  <div class="plan-kv"><span>runner</span><b>{{ planStyle.runner || '—' }}</b></div>
+                  <div class="plan-kv"><span>断言</span><b>{{ planStyle.assertion || '—' }}</b></div>
+                  <div v-if="planStyle.import_sample" class="plan-kv">
+                    <span>import</span><code>{{ planStyle.import_sample }}</code>
+                  </div>
+                  <div v-if="planStyle.notes" class="plan-style-note">{{ planStyle.notes }}</div>
+                </div>
+
+                <div class="plan-block">
+                  <div class="plan-block-title">可复用的封装</div>
+                  <div v-if="!planReusable.length" class="field-hint">
+                    项目里没有找到能覆盖这些步骤的现成封装，这次全部手写。
+                  </div>
+                  <ul v-else class="plan-reuse">
+                    <li v-for="(item, idx) in planReusable" :key="idx">
+                      <code>{{ item.symbol || item.file || item }}</code>
+                      <span v-if="item.file && item.symbol" class="plan-reuse-file">{{ item.file }}</span>
+                      <span v-if="item.usage" class="plan-reuse-use">{{ item.usage }}</span>
+                    </li>
+                  </ul>
+                </div>
+
+                <div class="plan-block">
+                  <div class="plan-block-title">逐步做法（{{ planSteps.length }} 步）</div>
+                  <table class="plan-steps">
+                    <tr v-for="step in planSteps" :key="step.no">
+                      <td class="plan-step-no">{{ step.no }}</td>
+                      <td :class="['plan-step-action', { reuse: step.action === 'reuse' }]">
+                        {{ step.action === 'reuse' ? '复用' : '手写' }}
+                      </td>
+                      <td class="plan-step-note">{{ step.note || step.target || '—' }}</td>
+                    </tr>
+                  </table>
+                </div>
+
+                <div v-if="planRisks.length" class="plan-block">
+                  <div class="plan-block-title">风险</div>
+                  <ul class="plan-risks">
+                    <li v-for="(item, idx) in planRisks" :key="idx">{{ item }}</li>
+                  </ul>
+                </div>
+
+                <div v-if="planNeeds.length" class="plan-block">
+                  <div class="plan-block-title">还想改这些文件（这次没有权限，只记录）</div>
+                  <ul class="plan-risks">
+                    <li v-for="(item, idx) in planNeeds" :key="idx">
+                      {{ item.path }}<span v-if="item.reason"> — {{ item.reason }}</span>
+                    </li>
+                  </ul>
+                </div>
               </div>
-              <div class="field-hint">
-                这是本次唯一允许写入的文件。点「按此执行」才算授权，不点什么都不写。
-              </div>
-            </div>
 
-            <div class="plan-block">
-              <div class="plan-block-title">可复用的封装</div>
-              <div v-if="!planReusable.length" class="field-hint">
-                项目里没有找到能覆盖这些步骤的现成封装，这次全部手写。
-              </div>
-              <ul v-else class="plan-reuse">
-                <li v-for="(item, idx) in planReusable" :key="idx">
-                  <code>{{ item.symbol || item.file || item }}</code>
-                  <span v-if="item.file && item.symbol" class="plan-reuse-file">{{ item.file }}</span>
-                  <span v-if="item.usage" class="plan-reuse-use">{{ item.usage }}</span>
-                </li>
-              </ul>
-            </div>
+              <aside class="plan-sheet-side">
+                <div class="plan-side-scroll">
+                  <div class="plan-block">
+                    <div class="plan-block-title">
+                      写入位置
+                      <span v-if="planTargetChosen" class="plan-path-badge">AI 按项目约定选的</span>
+                    </div>
+                    <div v-if="!planTargetEditing" class="plan-target">
+                      <code>{{ planTarget || '—' }}</code>
+                      <el-button
+                        class="plan-target-edit-btn"
+                        text
+                        size="small"
+                        :icon="EditPen"
+                        title="改写入位置"
+                        @click="startEditPlanTarget"
+                      />
+                    </div>
+                    <div v-else class="plan-target-edit">
+                      <el-input
+                        v-model="planTargetDraft"
+                        size="small"
+                        placeholder="工作区内相对路径，例如 tests/login.spec.ts"
+                        @keyup.enter="savePlanTarget"
+                      />
+                      <div class="plan-target-edit-btns">
+                        <el-button size="small" type="primary" @click="savePlanTarget">确定</el-button>
+                        <el-button size="small" text @click="cancelEditPlanTarget">取消</el-button>
+                      </div>
+                    </div>
+                    <div v-if="planTargetError" class="plan-target-error">{{ planTargetError }}</div>
+                    <div v-if="planResult.reason" class="plan-suggest-reason">{{ planResult.reason }}</div>
+                    <div v-if="planTargetChanged" class="plan-target-changed">
+                      位置是你改的。任务书里的相对 import 是按规划给的位置算的，可能已经不对；
+                      不确定就点「重新规划」，让 AI 按新位置重算一遍。
+                    </div>
+                    <div v-if="planSuggestion && !planTargetChosen" class="plan-suggest">
+                      <div class="plan-suggest-title">
+                        规划建议改到 <code>{{ planSuggestion }}</code>
+                      </div>
+                      <el-button size="small" type="warning" plain @click="adoptSuggestion">采用这个路径</el-button>
+                    </div>
+                    <div class="field-hint">
+                      这是本次唯一允许写入的文件。点「按此执行」才算授权，不点什么都不写。
+                    </div>
+                  </div>
 
-            <div class="plan-block">
-              <div class="plan-block-title">逐步做法（{{ planSteps.length }} 步）</div>
-              <table class="plan-steps">
-                <tr v-for="step in planSteps" :key="step.no">
-                  <td class="plan-step-no">{{ step.no }}</td>
-                  <td :class="['plan-step-action', { reuse: step.action === 'reuse' }]">
-                    {{ step.action === 'reuse' ? '复用' : '手写' }}
-                  </td>
-                  <td class="plan-step-note">{{ step.note || step.target || '—' }}</td>
-                </tr>
-              </table>
-            </div>
+                  <div class="plan-notes">
+                    <div class="plan-block-title">
+                      你的意见
+                      <span v-if="planNotes.length" class="plan-notes-count">{{ planNotes.length }} 条</span>
+                    </div>
+                    <div v-if="!planNotes.length" class="field-hint">
+                      没有意见就直接执行；有意见会在写入时一并交给 AI。
+                    </div>
+                    <div v-for="note in planNotes" :key="note.id" class="plan-note">
+                      <div v-if="note.quote" class="plan-quote">「{{ note.quote }}」</div>
+                      <div class="plan-note-body">{{ note.comment }}</div>
+                      <button type="button" class="plan-note-del" @click="removeNote(note.id)">删除</button>
+                    </div>
+                    <el-button size="small" text @click="openNote('')">补充整体意见</el-button>
+                  </div>
+                </div>
 
-            <div v-if="planRisks.length" class="plan-block">
-              <div class="plan-block-title">风险</div>
-              <ul class="plan-risks">
-                <li v-for="(item, idx) in planRisks" :key="idx">{{ item }}</li>
-              </ul>
+                <div class="plan-side-foot">
+                  <div class="plan-actions">
+                    <el-button size="small" :loading="planRunning" :disabled="generating" @click="runPlan(true)">
+                      重新规划
+                    </el-button>
+                    <el-button
+                      size="small"
+                      type="primary"
+                      :loading="writing"
+                      :disabled="!canExecute"
+                      @click="executePlan(false)"
+                    >
+                      按此执行
+                    </el-button>
+                  </div>
+                  <div v-if="!canExecute && executeBlockReason" class="gen-block-reason">
+                    <span class="gen-block-dot"></span>{{ executeBlockReason }}
+                  </div>
+                  <div v-else-if="!writing" class="field-hint">
+                    执行只写目标文件；校验失败会保留文件并把错误告诉你。
+                  </div>
+                </div>
+              </aside>
             </div>
-
-            <div v-if="planNeeds.length" class="plan-block">
-              <div class="plan-block-title">还想改这些文件（这次没有权限，只记录）</div>
-              <ul class="plan-risks">
-                <li v-for="(item, idx) in planNeeds" :key="idx">
-                  {{ item.path }}<span v-if="item.reason"> — {{ item.reason }}</span>
-                </li>
-              </ul>
-            </div>
-          </div>
-
-          <div class="plan-notes">
-            <div class="plan-block-title">
-              你的意见
-              <span class="plan-notes-hint">在任务书里选中一段文字，就能只针对它提要求</span>
-            </div>
-            <div v-if="!planNotes.length" class="field-hint">
-              没有意见就直接执行；有意见会在写入时一并交给 AI。
-            </div>
-            <div v-for="note in planNotes" :key="note.id" class="plan-note">
-              <div v-if="note.quote" class="plan-quote">「{{ note.quote }}」</div>
-              <div class="plan-note-body">{{ note.comment }}</div>
-              <button type="button" class="plan-note-del" @click="removeNote(note.id)">删除</button>
-            </div>
-            <el-button size="small" text @click="openNote('')">补充整体意见</el-button>
-          </div>
-
-          <div class="plan-actions">
-            <el-button size="small" :loading="planRunning" :disabled="generating" @click="runPlan(true)">
-              重新规划
-            </el-button>
-            <el-button
-              size="small"
-              type="primary"
-              :loading="writing"
-              :disabled="!canExecute"
-              @click="executePlan(false)"
-            >
-              按此执行
-            </el-button>
-          </div>
-          <div v-if="!canExecute && executeBlockReason" class="gen-block-reason">
-            <span class="gen-block-dot"></span>{{ executeBlockReason }}
-          </div>
-          <div v-else-if="!writing" class="field-hint">
-            执行只写目标文件；校验失败会保留文件并把错误告诉你。
-          </div>
-        </template>
-      </el-card>
+          </section>
+        </div>
+      </Teleport>
     </div>
     </div>
 
@@ -1089,8 +1173,15 @@ const STATE_LABELS = {
 }
 const STORAGE_KEY = 'autocase.recording.config'
 // 与后端 locators.py 保持一致：Playwright 与 RF 两组的优先级，以及结构定位（需标黄）。
-const PW_ORDER = ['testid', 'role', 'label', 'placeholder', 'role_bare', 'text', 'css']
-const RF_ORDER = ['rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_xpath', 'rf_css']
+const PW_ORDER = ['testid', 'role', 'row_scoped', 'label', 'placeholder', 'role_bare', 'text',
+  'class_part', 'css']
+// rf_row_scoped 排在 rf_xpath 之后：它本身是用文本 xpath 组出来的，
+// 只有「文本在页面上不唯一」时才比裸文本强，不能压过一条本来就唯一的语义定位。
+// rf_id_loose 是「带数字、分不清是业务键还是自增序号」的 id，让位给 testid / 干净 id /
+// name / aria / label，但排在文本 xpath 之前——id 是元素身份，比文本匹配更接近元素本身。
+// rf_class_part 是 class 里剥掉构建哈希的名字（_itemMenu_）：比文本弱，但比 css 结构路径强。
+const RF_ORDER = ['rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_id_loose',
+  'rf_xpath', 'rf_row_scoped', 'rf_class_part', 'rf_css']
 const FRAGILE_KINDS = ['css', 'rf_css']
 
 const config = reactive(loadConfig())
@@ -1245,12 +1336,15 @@ const planState = ref(null)      // { result, sig, at }
 const planPending = ref(false)   // 规划请求在飞（服务端进度起来之前补位）
 const planError = ref(null)
 const planNotes = ref([])        // 用户选中任务书片段写的意见
-const planCard = ref(null)
+// 任务书是长文档（表格 + 风险 + 意见），面板只有 420–600 宽、正文还被限高到 200px，
+// 塞在里面只能来回滚。所以正文搬到浮层：面板里留一行状态，宽屏里读、右侧拍板。
+const planSheetOpen = ref(false)
 const planBody = ref(null)
 const noteDialog = reactive({ visible: false, quote: '', comment: '' })
 const selTip = reactive({ visible: false, x: 0, y: 0, text: '' })
 let noteSeq = 0
-// 回放校验：结果只在本次生成后有意义，重新生成时清空
+// 回放校验：跑的是内存里的录制 IR，和有没有生成产物无关。
+// 停止后随时可跑；暂停时步骤集也不会再变，一样可以跑。
 const replaying = ref(false)
 const replayResult = ref(null)
 const replayOpen = ref(false)
@@ -1376,8 +1470,24 @@ const blockers = computed(() => steps.value
   .filter(s => s.target && ['ambiguous', 'invalid'].includes(effectiveStatus(s)))
   .map(s => s.no))
 const fragileCount = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'fragile').length)
+// 看着唯一、其实指向了别的元素：这类步骤生成时拿不到定位，必须让用户先看见再处理。
+const suspectCount = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'suspect').length)
 // 录制时在登录页、停止时已经跳到聊天页的步骤：没法在当前页面复核，但不该报成不唯一。
 const pageGoneCount = computed(() => steps.value.filter(s => s.target && s.target.page_gone).length)
+
+// 录完之后还能逐条过一遍的步骤：当场没来得及选的、页面跑掉没框出来的。
+// 判据和录制中那套一致，只是额外把 page_gone / unverified 也算进来——
+// 这两种恰恰是「页面跑掉了」，正是要能回去看的。
+function reviewable(step) {
+  const target = step.target
+  if (!target) return false
+  // 亲手确认过的不用再看
+  if (target.chosen && target.chosen.desc) return false
+  // 点完自己就没了的（下拉项、菜单项）：那一页回去也没有这个元素
+  if (target.vanished_after) return false
+  return needsLocConfirm(step) || !!target.page_gone || !!target.unverified
+}
+const reviewCount = computed(() => steps.value.filter(reviewable).length)
 
 // ---- 生成进度（服务端状态，两个窗口共用）----
 const emit = computed(() => session.value?.emit || {})
@@ -1541,6 +1651,13 @@ const askHint = computed(() => {
 })
 
 function applySession(data) {
+  // 换了一个录制会话：事件游标必须从头开始，否则新会话的 seq 都小于旧游标，
+  // 增量接口永远返回空，弹窗就再也不弹了。
+  const sid = data && data.id
+  if (sid !== eventSessionId) {
+    eventSessionId = sid || null
+    eventCursor = -1
+  }
   // 新步骤落地的那一轮就检查定位：录得快时，等回到列表再点准星，页面早不是当时的样子了。
   const fresh = freshSteps(data.steps)
   session.value = data
@@ -1648,9 +1765,14 @@ async function closePeek() {
 // 规则：当前框架下没有唯一候选（真·不唯一），或者页面上有多个同名元素、
 // 只是靠结构路径碰巧唯一的（结构定位），两者都要当场选——后者正是「事后回列表
 // 已经框错了」的主要来源。页面已翻走 / 元素已消失的步骤不弹，那时选了也是瞎选。
-const locConfirm = ref(null)     // { no, label, desc, count, items, picked, note, loading }
+const locConfirm = ref(null)     // { no, label, desc, count, items, picked, note, loading, gone, returnUrl }
 const locQueue = ref([])         // 等待确认的步骤号，录得快时会排队
 const locPicking = ref(false)
+const GOTO_STEP_REASONS = {
+  no_url: '这一步没有记下页面地址，翻不回去',
+  no_frame: '找不到可操作的页面，浏览器可能已经关了',
+  goto_failed: '那一页打不开了'
+}
 // 上一轮已知的步骤号：null 表示还没拿到首帧快照（刚打开面板时不能把历史步骤都当成新的）
 let seenStepNos = null
 
@@ -1670,6 +1792,8 @@ function needsLocConfirm(step) {
   if (target.chosen && target.chosen.desc) return false
   // 真·不唯一：当前框架下没有任何唯一候选，生成只能按录制时的序号取。
   if (effectiveStatus(step) === 'ambiguous') return true
+  // 看着唯一、其实指向了别的元素：写进脚本必点错，比不唯一更需要当场重选。
+  if (effectiveStatus(step) === 'suspect') return true
   // 页面上有多个同名元素、只是靠结构路径（css）碰巧唯一的，也弹：
   // 生成出来是一长串 div > div:nth-of-type()，而人其实想选的是「列表里的这一行」。
   // 这正是事后回列表看不清、页面又已经变了的场景。
@@ -1688,6 +1812,18 @@ function trackLocConfirm(fresh, data) {
   const hits = fresh.filter(needsLocConfirm).map(s => s.no)
   if (!hits.length) return
   locQueue.value = [...locQueue.value, ...hits.filter(no => no !== locConfirm.value?.no)]
+  if (!locConfirm.value) openNextLocConfirm()
+}
+
+// 停止后逐条过一遍：录制中漏掉的（页面跑掉了、当场点了「稍后再选」）在这里补齐。
+// 每条都能「回到那一步的页面」重新框——这正是录制中来不及做的动作。
+function startLocReview() {
+  const hits = steps.value.filter(reviewable).map(s => s.no)
+  if (!hits.length) {
+    ElMessage.info('没有需要确认的步骤')
+    return
+  }
+  locQueue.value = hits.filter(no => no !== locConfirm.value?.no)
   if (!locConfirm.value) openNextLocConfirm()
 }
 
@@ -1711,10 +1847,20 @@ async function openNextLocConfirm() {
     items: withIndex(snap?.items),
     active: null,
     picked: null,
-    note: ''
+    note: '',
+    // 页面跑掉不是死路：这一步录制时的地址记着，能把那一页重新打开再选。
+    gone: false,
+    returnUrl: '',
+    reopening: false,
+    returning: false
   }
   // 行内准星和这张卡共用页面上的同一层框，先收掉，免得框和列表说的是两回事。
   if (peek.value.no) await closePeek()
+  await refreshLocConfirm(no)
+}
+
+/** 让浏览器重新框一次这一步的目标。页面跑了就标 gone，界面据此给出「回去看」。 */
+async function refreshLocConfirm(no) {
   try {
     const { data } = await api.highlightRecordingStep(no, null, config.framework)
     if (!locConfirm.value || locConfirm.value.no !== no) return
@@ -1725,18 +1871,69 @@ async function openNextLocConfirm() {
         desc: data.desc,
         count: data.count,
         items: withIndex(data.items),
-        active: data.active
+        active: data.active,
+        gone: false
       }
     } else {
       locConfirm.value = {
         ...locConfirm.value,
         loading: false,
+        // not_found / frame_lost 才是「页面跑掉了」，重开那一页能救；
+        // no_candidate 这类是定位本身没候选，回去也白回。
+        gone: data.reason === 'not_found' || data.reason === 'frame_lost',
         note: `${peekErrorText(data)}；只能按录制时的快照选`
       }
     }
   } catch (error) {
     if (!locConfirm.value || locConfirm.value.no !== no) return
     locConfirm.value = { ...locConfirm.value, loading: false, note: errorText(error) }
+  }
+}
+
+// 用录制时记下的地址把那一页重新打开（不走浏览器后退，那个在 SPA 上会退飞）。
+async function reopenStepPage() {
+  const current = locConfirm.value
+  if (!current || current.reopening) return
+  current.reopening = true
+  try {
+    const { data } = await api.gotoRecordingStepDoc(current.no)
+    if (!locConfirm.value || locConfirm.value.no !== current.no) return
+    if (!data.ok) {
+      ElMessage.warning(GOTO_STEP_REASONS[data.reason] || '翻不回那一步的页面')
+      return
+    }
+    locConfirm.value = { ...locConfirm.value, returnUrl: data.return_url || '', note: '' }
+    // 回来了再框一次，这次元素应该在页面上。
+    await refreshLocConfirm(current.no)
+    if (!locConfirm.value?.count) {
+      locConfirm.value = {
+        ...locConfirm.value,
+        note: '页面回来了，但这一步的元素已经不在了（数据变了或列表刷新过）'
+      }
+    }
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    if (locConfirm.value) locConfirm.value.reopening = false
+  }
+}
+
+async function returnFromStepPage() {
+  const current = locConfirm.value
+  if (!current || current.returning) return
+  current.returning = true
+  try {
+    const { data } = await api.gotoRecordingBack()
+    if (!locConfirm.value || locConfirm.value.no !== current.no) return
+    locConfirm.value = {
+      ...locConfirm.value,
+      returnUrl: '',
+      note: data.ok ? '已回到刚才的页面' : '回不去了，那一页可能已经关掉'
+    }
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    if (locConfirm.value) locConfirm.value.returning = false
   }
 }
 
@@ -1772,8 +1969,18 @@ function deferLocConfirm() {
   closeLocConfirm()
 }
 
-function closeLocConfirm() {
+async function closeLocConfirm() {
+  const current = locConfirm.value
   locConfirm.value = null
+  // 关卡片时人还站在「回去看」的那一页：先把浏览器送回离开的地方再开下一条，
+  // 否则下一条会在跳转途中去框选，一个都框不到。
+  if (current && current.returnUrl) {
+    try {
+      await api.gotoRecordingBack()
+    } catch {
+      // 回不去不影响确认，别把这条卡住
+    }
+  }
   if (locQueue.value.length) {
     // 上一条的「就这个」可能刚点完，留一拍再切下一条，避免卡片内容闪一下。
     window.setTimeout(openNextLocConfirm, 220)
@@ -1820,12 +2027,67 @@ function syncPolling() {
   const status = session.value?.status
   if (!status) {
     stopPolling()
+    stopEventStream()
     return
   }
   // starting 也要轮询：并排面板窗口是在录制启动过程中打开的，抓不到主页面那次状态跳变。
   const live = status === 'recording' || status === 'starting'
+  // 录制中换成事件流：只拉几十字节的增量游标，有新事件才去取完整快照。
+  // 原来是 1 秒拉一次完整快照，弹窗要等最多 1 秒才出现——那时页面早跳走了。
+  // 完整轮询留着兜底（状态跳变、另一个窗口的操作），但不指望它赶时间。
+  if (live) startEventStream()
+  // 停止后浏览器还开着：拾取、暂停照样能在页面里就地切换（拾取模式下按 Esc 退出）。
+  // 事件流降速到 1 秒继续跟着，不然面板要等 2 秒的完整轮询才发现状态变了。
+  else if (isStopped.value && browserOpen.value) startEventStream(1000)
+  else stopEventStream()
   // 生成中回到 1 秒：阶段要跟得上进度条的推进，2 秒一跳会显得卡顿。
   startPolling(live || emitRunning.value ? 1000 : 2000)
+}
+
+// ---- 事件流：让「新步骤」尽快到达界面 ----
+// 后端一直有这个游标接口（/recording/events），只是前端从来没用过。
+let eventCursor = -1
+let eventSessionId = null
+let eventTimer = null
+let eventMs = 0
+let eventBusy = false
+
+function startEventStream(ms = 200) {
+  if (eventTimer && eventMs === ms) return
+  stopEventStream()
+  eventMs = ms
+  eventTimer = setInterval(pollRecordingEvents, ms)
+}
+
+function stopEventStream() {
+  if (eventTimer) clearInterval(eventTimer)
+  eventTimer = null
+  eventMs = 0
+}
+
+async function pollRecordingEvents() {
+  // 上一跳还没回来就跳过这一拍，别在慢请求上堆队列。
+  if (!pollEnabled || eventBusy) return
+  eventBusy = true
+  try {
+    const { data } = await api.getRecordingEvents(eventCursor)
+    const cursor = typeof data.cursor === 'number' ? data.cursor : eventCursor
+    let reload = false
+    if (cursor !== eventCursor) {
+      eventCursor = cursor
+      reload = true
+    }
+    // 拾取 / 暂停可以在页面里就地切换（拾取模式下按 Esc 退出），游标不会动。
+    // 只比「有没有新步骤」的话，界面会一直停在旧状态：按钮还写着「退出拾取」，人却发现没反应。
+    if (typeof data.pick === 'boolean' && data.pick !== session.value?.pick) reload = true
+    if (typeof data.paused === 'boolean' && data.paused !== session.value?.paused) reload = true
+    if (reload) await loadCurrent()
+  } catch {
+    // 会话没了或接口挂了：退回普通轮询，别每秒五次打 404。
+    stopEventStream()
+  } finally {
+    eventBusy = false
+  }
 }
 
 watch(() => session.value?.status, () => syncPolling())
@@ -1845,6 +2107,7 @@ async function startRecording() {
   planNotes.value = []
   planError.value = null
   planPending.value = false
+  closePlanSheet()
   try {
     const { data } = await api.startRecording(url, {
       model: config.model,
@@ -1858,6 +2121,10 @@ async function startRecording() {
     })
     draft.value = null
     applySession(data)
+    // 被测系统拒绝被 iframe 嵌入时后端会自动换成独立窗口，不说明白用户会以为弹错了窗。
+    if (data.notice) {
+      ElMessage({ message: data.notice, type: 'warning', duration: 10000, showClose: true })
+    }
   } catch (error) {
     ElMessage.error(errorText(error))
     await loadCurrent()
@@ -2419,11 +2686,20 @@ function stepDescription(step) {
   }
 }
 
-// 与后端 locators.pick_for 一致：按当前框架挑出第一个唯一的候选。
+// 与后端 locators.hits_target 一致：relation 说明这条候选命中的是不是用户点的那个元素。
+// 没有 relation 的是改造前录的数据，保持放行——新校验不能把原本能用的步骤判死。
+function hitsTarget(candidate) {
+  const relation = candidate.relation
+  if (!relation) return true
+  if (relation === 'other' || relation === 'gone') return false
+  return candidate.index == null || candidate.index >= 0
+}
+
+// 与后端 locators.pick_for 一致：按当前框架挑出第一个唯一、且确实命中目标的候选。
 function pickFor(framework, candidates = []) {
   const order = framework === 'robot-selenium' ? RF_ORDER : PW_ORDER
   for (const kind of order) {
-    const hit = candidates.find(c => c.kind === kind && c.count === 1)
+    const hit = candidates.find(c => c.kind === kind && c.count === 1 && hitsTarget(c))
     if (hit) return hit
   }
   return null
@@ -2449,14 +2725,22 @@ function effectiveStatus(step) {
     return step.target.chosen.index_invalid ? 'invalid' : 'chosen'
   }
   const chosen = pickFor(config.framework, step.target.candidates || [])
-  if (!chosen) return 'ambiguous'
+  if (!chosen) {
+    // 有唯一候选、但每条都指向了别的元素：后端会退回其中一条并标 suspect。
+    // 这里跟着标，否则界面说「不唯一」而生成侧其实取不到任何定位，两边对不上。
+    const order = config.framework === 'robot-selenium' ? RF_ORDER : PW_ORDER
+    const unique = (step.target.candidates || []).some(c => order.includes(c.kind) && c.count === 1)
+    return unique ? 'suspect' : 'ambiguous'
+  }
   if (FRAGILE_KINDS.includes(chosen.kind)) return 'fragile'
   if (step.target.status === 'stale') return 'stale'
   return 'unique'
 }
 
-function withNth(desc, index) {
-  if (index == null) return desc
+function withNth(desc, index, count) {
+  // index 的语义是「多个匹配里取第几个」。count == 1 时它没有意义，
+  // 硬拼会渲染成 .nth(0)——而 row_scoped 这类本身就唯一的定位更没有序号可言。
+  if (index == null || (count != null && count <= 1)) return desc
   // RF 的定位本身就是 xpath 字符串，再拼 .nth() 是错的，用中文明说取第几个。
   if (config.framework === 'robot-selenium') return `${desc}  →  第 ${index + 1} 个`
   return `${desc}.nth(${index})`
@@ -2465,9 +2749,9 @@ function withNth(desc, index) {
 function locatorText(target) {
   // 用户亲手选过的，显示他确认的那条：生成时也优先走它（见 emit._locator_info）。
   const picked = target.chosen
-  if (picked && picked.desc) return withNth(picked.desc, picked.index)
+  if (picked && picked.desc) return withNth(picked.desc, picked.index, picked.count)
   const chosen = pickFor(config.framework, target.candidates || [])
-  if (chosen) return withNth(chosen.desc, chosen.index)
+  if (chosen) return withNth(chosen.desc, chosen.index, chosen.count)
   // 没核实过的步骤按快照里语义最强的那条显示，和生成时用的是同一条。
   const first = (target.candidates || [])[0]
   if (target.unverified && first) return first.desc
@@ -2477,7 +2761,8 @@ function locatorText(target) {
 function statusLabel(status) {
   return ({
     unique: '唯一', fragile: '结构定位', ambiguous: '不唯一', unverified: '未核实',
-    page_gone: '页面已翻页', stale: '页面已变化', chosen: '已选定', invalid: '序号失效'
+    page_gone: '页面已翻页', stale: '页面已变化', chosen: '已选定', invalid: '序号失效',
+    suspect: '定位存疑'
   })[status] || status
 }
 
@@ -2489,8 +2774,20 @@ function statusHintBase(step) {
   if (status === 'unique' && chosen?.kind === 'role_bare') {
     return '按 role 定位：页面上只有这一个同类元素。新增同类控件后会退化为「匹配 N 个取第 k 个」'
   }
+  if (status === 'unique' && ['row_scoped', 'rf_row_scoped'].includes(chosen?.kind)) {
+    return '按行锚定：先用这一行的业务字段锁定是哪一行，再在行内找目标。'
+      + '列表增删、换个排序都不会指错行——比「第 N 行的按钮」稳，也是人工维护这类页面时的写法'
+  }
+  if (status === 'unique' && chosen?.kind === 'rf_id_loose') {
+    return '按 id 定位：这个 id 里带数字。它可能是业务单号（一直有效），也可能是页面渲染时自增的序号'
+      + '（重新加载就变了）。回放前请确认一次；如果这条元素还能按 name / aria / 文本定位，优先用那些'
+  }
   if (status === 'page_gone') {
     return '录制时这条定位是有效的；停止录制时页面已经跳到别的地址，没法在当前页面复核。生成会用录制时的定位，建议回放确认。'
+  }
+  if (status === 'unique' && ['class_part', 'rf_class_part'].includes(chosen?.kind)) {
+    return '按 class 名定位：取的是 CSS Modules / BEM 类名里去掉构建哈希的那半截，'
+      + '改版重新打包也还在，且不依赖元素在第几个位置。它不是语义属性，页面改了类名仍会失效'
   }
   if (status === 'unique') return '语义定位，页面上唯一命中'
   if (status === 'fragile') return '结构定位：依赖页面层级，改版后可能失效'
@@ -2505,6 +2802,10 @@ function statusHintBase(step) {
       : '这一步操作后元素就从页面上消失了（下拉/浮层收起、局部重渲染或跳转都算），没来得及数一次；定位按录制快照取，生成不受影响，回放时确认'
   }
   if (status === 'stale') return '重新校验时还找得到，但已经不是你录制时点的那个元素'
+  if (status === 'suspect') {
+    return '这几条「唯一」的定位，命中的元素都不是你点的那个（是页面上另一处同名/同结构的元素）。'
+      + '把它写进脚本会点错地方，所以生成时不会采用——请点右侧准星重新框选，或手工改成正确的那条'
+  }
   if (status === 'chosen') {
     const picked = step.target?.chosen || {}
     const hit = (step.target?.candidates || []).find(c => c.desc === picked.desc)
@@ -2528,10 +2829,11 @@ function statusHint(step) {
 }
 
 function statusTone(status) {
-  // ambiguous 现在会降级生成（不再阻断），所以用警告色而不是红色
+  // ambiguous 现在会降级生成（不再阻断），所以用警告色而不是红色；
+  // suspect 是「看着唯一、其实指错了人」，写进脚本必错，用红色。
   return ({
     unique: 'success', fragile: 'warning', ambiguous: 'warning', unverified: 'warning',
-    page_gone: 'warning', stale: 'info', chosen: 'success', invalid: 'danger'
+    page_gone: 'warning', stale: 'info', chosen: 'success', invalid: 'danger', suspect: 'danger'
   })[status] || 'info'
 }
 
@@ -2551,6 +2853,53 @@ async function detectWorkspace() {
     detecting.value = false
   }
 }
+
+// ---- 任务书浮层 ----
+// 遮罩只是其中一半：panel=1 时本页就是那个 600 多宽的独立窗口，窗口内的 96vw
+// 再大也大不过窗口，所以同时让后端把面板窗口铺宽，关掉再摆回并排。
+// 窗口调不动（嵌入模式 / 系统拒绝 / 浏览器已关）不影响浮层本身，那是纯增强。
+let sheetBodyOverflow = ''
+
+function openPlanSheet() {
+  if (planSheetOpen.value) return
+  if (!planData.value && !shownPlanError.value) return
+  planSheetOpen.value = true
+  sheetBodyOverflow = document.body.style.overflow
+  document.body.style.overflow = 'hidden'
+  focusSheetWindow(true)
+}
+
+function closePlanSheet() {
+  if (!planSheetOpen.value) return
+  planSheetOpen.value = false
+  document.body.style.overflow = sheetBodyOverflow || ''
+  sheetBodyOverflow = ''
+  clearSelTip()
+  focusSheetWindow(false)
+}
+
+function focusSheetWindow(open) {
+  // 失败不提示：用户此刻在看任务书，窗口能不能挪宽不是他要操心的事。
+  api.focusRecordingSheet(open).catch(() => {})
+}
+
+function onSheetKeydown(event) {
+  if (event.key !== 'Escape' || !planSheetOpen.value) return
+  // 意见弹窗开着就先让它关：Esc 逐层退回，别一下把整份任务书也关掉。
+  if (noteDialog.visible) return
+  event.stopPropagation()
+  closePlanSheet()
+}
+
+watch(planSheetOpen, (open) => {
+  if (open) window.addEventListener('keydown', onSheetKeydown, true)
+  else window.removeEventListener('keydown', onSheetKeydown, true)
+})
+
+// 录制重新开始 = 这一版任务书作废，浮层不能留在屏幕上让人对着旧步骤确认。
+watch(isStopped, (stopped) => {
+  if (!stopped) closePlanSheet()
+})
 
 // ---- 任务书：选中片段写意见 ----
 // 不用自定义富文本：任务书本身是普通 DOM，浏览器选区就够用。
@@ -2684,7 +3033,9 @@ async function runPlan(replan) {
       ElMessage.success('任务书已生成，确认后再执行')
     }
     await nextTick()
-    planCard.value?.$el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    // 生成完直接把任务书翻开：这里没有「先看摘要再点开」的必要，
+    // 用户点的是「生成任务书」，产物就该立刻在眼前。
+    openPlanSheet()
   } catch (error) {
     const status = error.response && error.response.status
     const details = (error.response && error.response.data && error.response.data.details) || []
@@ -2740,8 +3091,7 @@ async function executePlan(overwrite) {
   startPolling(1000)
   genError.value = null
   genResult.value = null
-  replayResult.value = null
-  replayOpen.value = false
+  // 回放结果不在这里清：它验的是录制本身，生成不改录制，结论仍然成立。
   try {
     const { data } = await api.generateRecording({
       model: config.model,
@@ -2758,6 +3108,8 @@ async function executePlan(overwrite) {
     })
     genResult.value = data
     planNotes.value = []
+    // 写完了：任务书这一版的任务也结束了，别让它继续盖在结果上（结果卡片在面板里）。
+    closePlanSheet()
     if (data.outside && data.outside.length) {
       ElMessage.warning(`已写入 ${data.path}，但有 ${data.outside.length} 个目标以外的文件被改动`)
     } else {
@@ -2802,9 +3154,14 @@ async function executePlan(overwrite) {
   }
 }
 
-// 回放校验用的框架必须和生成结果一致：生成时选 RF，回放就得用 rf_* 候选，
+// 回放用的候选必须和「要生成的那个框架」一致：生成时选 RF，回放就得用 rf_* 候选，
 // 否则「校验通过」只能证明 Playwright 那套定位没坏，说明不了生成的脚本。
-const replayFramework = computed(() => shownResult.value?.framework || config.framework)
+// 这里不再读生成结果：回放验的是录制本身，没有产物也该能跑。
+const replayFramework = computed(() => config.framework)
+
+// 暂停时也能跑：暂停期间不再收新步骤，IR 是稳定的，正是「先验一段再接着录」的时机。
+// 录制中（没暂停）不放开——步骤一边录一边变，结论和界面上的步骤对不上。
+const canReplay = computed(() => isStopped.value || (isRecording.value && paused.value))
 
 const replayTitle = computed(() => {
   const result = replayResult.value
@@ -2814,12 +3171,25 @@ const replayTitle = computed(() => {
   return '回放校验未执行'
 })
 
+// 回放之后步骤又变了（接着录、删步骤、改顺序）：结论只覆盖当时跑的那几步，
+// 别让它看起来仍然代表整段录制。用步骤号快照判断，比数字数可靠。
+const replayNos = ref('')
+const replayStale = computed(() => (
+  !!replayResult.value && replayNos.value !== steps.value.map((s) => s.no).join(',')
+))
+const replayExtra = computed(() => {
+  const total = (replayResult.value && replayResult.value.total) || 0
+  return steps.value.length > total ? steps.value.length - total : 0
+})
+
 // 回放要起浏览器把录制重跑一遍，步骤多时十几秒，必须给进度反馈。
 async function runReplay() {
   if (replaying.value) return
   replaying.value = true
   replayResult.value = null
   replayOpen.value = false
+  // 记下「跑的到底是哪几步」，回来后一比对就知道期间有没有又录了新的。
+  replayNos.value = steps.value.map((s) => s.no).join(',')
   try {
     const { data } = await api.replayRecording({ framework: replayFramework.value })
     replayResult.value = data
@@ -2897,11 +3267,18 @@ onActivated(() => {
 onDeactivated(() => {
   pollEnabled = false
   stopPolling()
+  stopEventStream()
+  // 页面被缓存时浮层要收起来：body 上的滚动锁是全局的，留着会把整站锁死。
+  closePlanSheet()
 })
 onUnmounted(() => {
   stopPolling()
+  stopEventStream()
   clearInterval(tickTimer)
   window.removeEventListener('resize', clampPanelWidth)
+  window.removeEventListener('keydown', onSheetKeydown, true)
+  // 浮层开着就切走页面：body 的 overflow 是全局的，不还回去整站都滚不动。
+  if (planSheetOpen.value) document.body.style.overflow = sheetBodyOverflow || ''
   clearTimeout(flashTimer)
   if (sortable) {
     sortable.destroy()
@@ -3102,6 +3479,12 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .recording-body .panel-card { margin-bottom:0; }
 .gen-result-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px; }
 .gen-result-actions .field-hint { margin-top:0; }
+/* 回放校验：和生成无关，停止录制后就摆在这里，别让它看起来像生成的附属动作。 */
+.replay-block { margin-top:12px; padding-top:12px; border-top:1px dashed #e6ebf2; }
+.replay-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.replay-row .field-hint { margin-top:0; }
+/* 回放后又接着录了：结论变旧，别让它继续冒充整段录制的结果 */
+.replay-stale { margin:6px 0 0; font-size:12px; color:#b45309; }
 
 /* 状态 */
 .state-pill { display:inline-flex; align-items:center; height:24px; padding:0 10px; border-radius:999px; font-size:12px; font-weight:700; background:#f2f4f7; color:#6e6e73; }
@@ -3211,6 +3594,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .peek-btn { height:22px; width:22px; padding:0; margin-left:-2px; color:#8e8e93; }
 .peek-btn:hover { color:#0071e3; background:#eaf3ff; }
 .chosen-warn { color:#b45309; font-size:11.5px; font-weight:600; }
+/* 中心被遮挡后自动上提过目标：不是错误，但用户该知道定位换了元素，否则看脚本会对不上。 */
+.lifted-hint { color:#6b7280; font-size:11.5px; font-weight:600; border-bottom:1px dashed #c3c9d4; cursor:help; }
 .peek-panel {
   margin-top:8px; padding:9px 10px; border-radius:9px;
   background:#f7f9fc; border:1px solid #e6ebf2;
@@ -3274,6 +3659,12 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .loc-origin { flex:none; font-size:10.5px; color:#8a8f99; background:#f2f4f7; border-radius:4px; padding:1px 5px; }
 .loc-hidden { flex:none; font-size:10.5px; color:#9aa0a6; }
 .loc-note { margin:0; font-size:11.5px; line-height:1.5; color:#1e7a46; }
+/* 页面跑掉了：不是错误，是「有补救办法」，用提示色而不是错误红 */
+.loc-gone {
+  margin:0; padding:6px 8px; border-radius:7px;
+  background:#fff9ea; border:1px solid #f1ddb0; color:#7a5a12;
+  font-size:11.5px; line-height:1.6;
+}
 .loc-foot { display:flex; align-items:center; gap:6px; }
 .loc-queue { margin-right:auto; font-size:11.5px; color:#b45309; }
 .loc-actions { margin-left:auto; display:flex; align-items:center; gap:6px; }
@@ -3411,6 +3802,9 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .gen-compact b { color:#0071e3; font-weight:700; }
 .gen-compact-bad { color:#d4380d; }
 .check { display:flex; align-items:flex-start; gap:10px; font-size:13px; color:#6e6e73; line-height:1.5; }
+.check-text { flex:1; min-width:0; }
+/* 行内补救入口：不抢主行动的注意力，但要在这一行里够得着 */
+.check-action { flex:none; margin:-4px -6px -4px 0; color:#0071e3; font-size:12px; }
 .check-dot { flex-shrink:0; width:9px; height:9px; margin-top:6px; border-radius:50%; background:#d0d5dd; }
 .check.ok { color:#1e7a46; }
 .check.ok .check-dot { background:#34c759; }
@@ -3477,16 +3871,80 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .gen-replay-why { flex-basis:100%; padding-left:27px; color:#c0271d; font-size:11.5px; line-height:1.5; }
 
 /* ---- 任务书 ---- */
-.gen-plan-ready {
-  display:flex; align-items:center; gap:6px; flex-wrap:wrap;
-  padding:9px 11px; border-radius:9px; background:#f2faf5;
-  color:#1f2530; font-size:12.5px; font-weight:600;
-}
-.gen-plan-ready-hint { color:#8a94a6; font-size:11.5px; font-weight:400; margin-left:2px; }
 .plan-head-meta { margin-left:auto; color:#8a94a6; font-size:11.5px; font-weight:400; }
-.plan-body { max-height:320px; overflow-y:auto; padding-right:2px; }
-.recording-body .plan-card { flex:none; }
-.is-panel .plan-body { max-height:200px; }
+/* 任务书入口：生成卡里只留一行状态。正文在浮层里读，长表格不该挤进 420px 的侧栏。 */
+.plan-ready { display:flex; align-items:center; gap:10px; }
+.plan-ready-main { flex:1; min-width:0; }
+.plan-ready-title { color:#1f2530; font-size:12.5px; font-weight:600; }
+.plan-ready-sub {
+  margin-top:3px; color:#7a8494; font-size:11.5px; line-height:1.5;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+
+/* 任务书浮层：左边通读、右边拍板。
+   遮罩 z-index 取 1900——高于页面里所有自绘元素（导航 100、定位提示 60），
+   低于 Element 的弹层（2000 起），意见弹窗和 toast 才能正常盖在它上面。 */
+.plan-sheet-mask {
+  position:fixed; inset:0; z-index:1900; display:flex; align-items:center; justify-content:center;
+  padding:22px; background:rgba(16,24,40,.44);
+}
+.plan-sheet {
+  display:flex; flex-direction:column; width:min(1120px,96vw); height:min(900px,92vh);
+  overflow:hidden; background:#fff; border-radius:16px;
+  box-shadow:0 24px 64px rgba(16,24,40,.26);
+}
+.plan-sheet-head {
+  flex:none; display:flex; align-items:center; gap:10px; padding:12px 16px;
+  border-bottom:1px solid #eef0f3; background:linear-gradient(180deg,#fcfdff,#f7f9fc);
+}
+.plan-sheet-tip { margin-left:auto; color:#9aa4b2; font-size:11.5px; }
+.plan-sheet-close {
+  flex:none; width:28px; height:28px; padding:0; border:0; border-radius:8px;
+  background:transparent; color:#8a94a6; font-size:13px; line-height:1; cursor:pointer;
+}
+.plan-sheet-close:hover { background:#eef1f5; color:#1d1d1f; }
+.plan-sheet-body { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) 330px; }
+.plan-sheet-main { min-height:0; overflow-y:auto; padding:16px 24px 24px; }
+/* 大屏上把正文的行距和表格松一格：还是同一份内容，读起来不再是窄栏里的压缩版 */
+.plan-sheet-main .plan-block { padding:14px 0; }
+.plan-sheet-main .plan-steps { font-size:12.5px; }
+.plan-sheet-main .plan-steps td { padding:7px 6px; }
+.plan-sheet-main .plan-step-no { width:26px; }
+.plan-sheet-main .plan-step-action { width:46px; }
+.plan-sheet-error { flex:none; overflow-y:auto; padding:18px 24px; border-bottom:1px solid #f6d5d1; background:#fff8f7; }
+/* 没有旧任务书可看时，错误就是全部内容：占满并居中，别让它孤零零挂在顶上 */
+.plan-sheet-error.is-solo {
+  flex:1; min-height:0; display:flex; flex-direction:column; justify-content:center;
+  padding:32px 40px; border-bottom:0; background:#fff;
+}
+.plan-sheet-error.is-solo .gen-error { max-width:720px; margin:0 auto; width:100%; }
+/* 右栏固定：读两步就能点执行，不用滚到第 12 步末尾才看见按钮 */
+.plan-sheet-side {
+  min-height:0; display:flex; flex-direction:column;
+  border-left:1px solid #eef0f3; background:#fbfcfe;
+}
+.plan-side-scroll { flex:1; min-height:0; overflow-y:auto; padding:14px 16px; }
+.plan-side-foot { flex:none; padding:12px 16px; border-top:1px solid #eef0f3; background:#fff; }
+.plan-side-foot .plan-actions { margin-top:0; }
+.plan-side-foot .plan-actions :deep(.el-button + .el-button) { margin-left:0; }
+.plan-side-foot .plan-actions :deep(.el-button) { flex:1; }
+.plan-side-foot .field-hint, .plan-side-foot .gen-block-reason { margin-top:8px; }
+/* 330px 放不下「输入框 + 确定 + 取消」一排，让它断成两行 */
+.plan-sheet-side .plan-target-edit { flex-wrap:wrap; }
+.plan-sheet-side .plan-target-edit :deep(.el-input) { flex:1 1 100%; }
+.plan-target-edit-btns { display:flex; gap:6px; }
+.plan-notes-count { margin-left:auto; color:#9aa4b2; font-size:11px; font-weight:400; }
+
+/* 窗口本身不够宽时（嵌入模式、或被并排挤窄）就单列：正文在上，右栏缩成底部操作区。
+   按钮仍然常驻，这点不能在窄屏上退化。 */
+@media (max-width: 900px) {
+  .plan-sheet-mask { padding:10px; }
+  .plan-sheet { width:96vw; height:96vh; border-radius:12px; }
+  .plan-sheet-body { grid-template-columns:1fr; grid-template-rows:minmax(0,1fr) auto; }
+  .plan-sheet-side { border-left:0; border-top:1px solid #eef0f3; max-height:40vh; }
+  .plan-sheet-tip { display:none; }
+  .plan-sheet-head { padding:10px 12px; }
+}
 .plan-block { padding:10px 0; border-top:1px dashed #eef0f3; }
 .plan-block:first-child { border-top:0; padding-top:0; }
 .plan-block-title {
@@ -3497,7 +3955,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .plan-kv > span { flex:none; width:44px; color:#8a94a6; }
 .plan-kv > b { color:#3d4657; font-weight:500; word-break:break-word; }
 .plan-style-note { margin-top:5px; color:#7a8494; font-size:11.5px; line-height:1.65; }
-.plan-body code, .plan-target code, .plan-reuse code, .plan-suggest code {
+.plan-sheet code, .plan-ready code, .plan-target code, .plan-reuse code, .plan-suggest code {
   background:#f4f6f8; color:#3d4657; padding:1px 5px; border-radius:4px;
   font-size:11px; word-break:break-all;
 }

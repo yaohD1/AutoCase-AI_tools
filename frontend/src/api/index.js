@@ -166,11 +166,26 @@ batchDeleteTestcases(ids) {
   getRecordingCurrent() {
     return api.get('/automation/recording/current')
   },
+  getRecordingEvents(after = -1) {
+    // 增量游标：录制中用它当「有新步骤」的信号，比每次拉完整快照轻得多。
+    return api.get('/automation/recording/events', { params: { after } })
+  },
   startRecording(baseUrl, extra = {}) {
     return api.post('/automation/recording/start', { base_url: baseUrl, ...extra })
   },
   relayoutRecordingPanel() {
     return api.post('/automation/recording/panel/relayout')
+  },
+  focusRecordingSheet(open) {
+    // 任务书浮层：让后端把面板窗口铺宽 / 收回并排。调不动也不影响浮层显示。
+    return api.post('/automation/recording/panel/sheet', { open: !!open })
+  },
+  gotoRecordingStepDoc(no) {
+    // 回到这一步录制时所在的页面：页面跑掉之后重新框选定位用。
+    return api.post('/automation/recording/goto-doc', { no })
+  },
+  gotoRecordingBack() {
+    return api.post('/automation/recording/goto-back')
   },
   updateRecordingStep(no, payload) {
     return api.patch(`/automation/recording/steps/${no}`, payload)

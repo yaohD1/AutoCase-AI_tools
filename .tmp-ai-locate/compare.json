@@ -1,0 +1,328 @@
+{
+ "model": "doubao-seed-2-0-lite-260428",
+ "targets": [
+  {
+   "id": "H1",
+   "desc": "左侧会话列表里，「日常问候开场」这一条会话右侧出现的操作图标（更多/菜单）",
+   "snap": {
+    "tag": "svg",
+    "role": null,
+    "name": null,
+    "text": null,
+    "aria_label": null,
+    "placeholder": null,
+    "testid": null,
+    "id": null,
+    "cls": "_itemMenuIcon_fxrlp_45",
+    "css": "div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(1) > span > svg",
+    "box": [
+     183,
+     377,
+     21,
+     21
+    ]
+   },
+   "chain": [
+    {
+     "tag": "span",
+     "cls": "_itemMenu_fxrlp_33",
+     "text": ""
+    },
+    {
+     "tag": "div",
+     "cls": "_item_fxrlp_1",
+     "text": "日常问候开场"
+    },
+    {
+     "tag": "div",
+     "cls": "_sidebarListContentScroll_ce5l0_84 ",
+     "text": "日常问候开场 New Chat 问候语 你好问候 greeted 问候助手介绍 "
+    },
+    {
+     "tag": "div",
+     "cls": "_sidebarListContent_ce5l0_73",
+     "text": "日常问候开场 New Chat 问候语 你好问候 greeted 问候助手介绍 "
+    }
+   ],
+   "system": {
+    "specs": [
+     {
+      "kind": "css",
+      "desc": "locator('div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(1) > span > svg')",
+      "count": 1,
+      "relation": "self"
+     },
+     {
+      "kind": "rf_css",
+      "desc": "rf css:div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(1) > span > svg",
+      "count": 1,
+      "relation": "self"
+     }
+    ],
+    "picked": {
+     "kind": "css",
+     "desc": "locator('div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(1) > span > svg')"
+    },
+    "best": {
+     "kind": "css",
+     "desc": "locator('div:nth-of-type(2) > div:nth-of-type(2) > div > div:nth-of-type(1) > span > svg')",
+     "count": 1
+    }
+   },
+   "ai": {
+    "expr": "page.locator('div:has-text(\"日常问候开场\")').locator('svg[class*=\"itemMenuIcon\"]')",
+    "verify": {
+     "expr": "page.locator('div:has-text(\"日常问候开场\")').locator('svg[class*=\"itemMenuIcon\"]')",
+     "syntax": "ok",
+     "count": 11,
+     "hit": "no",
+     "error": null,
+     "hits_marked_at": []
+    },
+    "error": null,
+    "tokens": 3201
+   }
+  },
+  {
+   "id": "H2",
+   "desc": "左侧「会话分组」标题右边的新增按钮（加号图标）",
+   "snap": {
+    "tag": "div",
+    "role": null,
+    "name": null,
+    "text": null,
+    "aria_label": null,
+    "placeholder": null,
+    "testid": null,
+    "id": null,
+    "cls": "_sidebarListHeaderAdd_ce5l0_53 ",
+    "css": "div:nth-of-type(1) > div:nth-of-type(3) > div:nth-of-type(3) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2)",
+    "box": [
+     182,
+     280,
+     13,
+     22
+    ]
+   },
+   "chain": [
+    {
+     "tag": "div",
+     "cls": "_sidebarListHeader_ce5l0_23 ",
+     "text": "会话分组"
+    },
+    {
+     "tag": "div",
+     "cls": "_sidebarListSection_ce5l0_9",
+     "text": "会话分组 1"
+    },
+    {
+     "tag": "div",
+     "cls": "_sidebarList_ce5l0_1",
+     "text": "会话分组 1 未分组 日常问候开场 New Chat 问候语 你好问候 gree"
+    },
+    {
+     "tag": "div",
+     "cls": "_sidebarNavigationContainer_1rfyg_77",
+     "text": "问AI 知识库 知识图谱 写作空间 智能体 会话分组 1 未分组 日常问候开场 "
+    }
+   ],
+   "system": {
+    "specs": [
+     {
+      "kind": "css",
+      "desc": "locator('div:nth-of-type(1) > div:nth-of-type(3) > div:nth-of-type(3) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2)')",
+      "count": 1,
+      "relation": "self"
+     },
+     {
+      "kind": "rf_css",
+      "desc": "rf css:div:nth-of-type(1) > div:nth-of-type(3) > div:nth-of-type(3) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2)",
+      "count": 1,
+      "relation": "self"
+     }
+    ],
+    "picked": {
+     "kind": "css",
+     "desc": "locator('div:nth-of-type(1) > div:nth-of-type(3) > div:nth-of-type(3) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2)')"
+    },
+    "best": {
+     "kind": "css",
+     "desc": "locator('div:nth-of-type(1) > div:nth-of-type(3) > div:nth-of-type(3) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2)')",
+     "count": 1
+    }
+   },
+   "ai": {
+    "expr": "page.locator('div:has-text(\"会话分组\")').getByRole('button')",
+    "verify": {
+     "expr": "page.locator('div:has-text(\"会话分组\")').getByRole('button')",
+     "syntax": "ok",
+     "count": 9,
+     "hit": "no",
+     "error": null,
+     "hits_marked_at": []
+    },
+    "error": null,
+    "tokens": 6029
+   }
+  },
+  {
+   "id": "H3",
+   "desc": "左上角用户头像右侧的侧边栏折叠/展开箭头",
+   "snap": {
+    "tag": "div",
+    "role": null,
+    "name": null,
+    "text": null,
+    "aria_label": null,
+    "placeholder": null,
+    "testid": null,
+    "id": null,
+    "cls": "_sidebarHeaderExpandable_1rfyg_48",
+    "css": "div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div",
+    "box": [
+     195,
+     20,
+     14,
+     14
+    ]
+   },
+   "chain": [
+    {
+     "tag": "div",
+     "cls": "_sidebarHeaderActions_1rfyg_42",
+     "text": ""
+    },
+    {
+     "tag": "div",
+     "cls": "_sidebarHeader_1rfyg_24",
+     "text": "test998"
+    },
+    {
+     "tag": "div",
+     "cls": "_sidebarWrapper_1rfyg_2",
+     "text": "test998 问AI 知识库 知识图谱 写作空间 智能体 会话分组 1 未分组"
+    },
+    {
+     "tag": "div",
+     "cls": "w-full h-full flex overflow-hidden",
+     "text": "test998 问AI 知识库 知识图谱 写作空间 智能体 会话分组 1 未分组"
+    }
+   ],
+   "system": {
+    "specs": [
+     {
+      "kind": "css",
+      "desc": "locator('div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div')",
+      "count": 5,
+      "relation": "self"
+     },
+     {
+      "kind": "rf_css",
+      "desc": "rf css:div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div",
+      "count": 5,
+      "relation": "self"
+     }
+    ],
+    "picked": null,
+    "best": {
+     "kind": "css",
+     "desc": "locator('div > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(2) > div')",
+     "count": 5
+    }
+   },
+   "ai": {
+    "expr": "page.locator('div[class*=\"_sidebarHeaderExpandable\"]')",
+    "verify": {
+     "expr": "page.locator('div[class*=\"_sidebarHeaderExpandable\"]')",
+     "syntax": "ok",
+     "count": 1,
+     "hit": "yes",
+     "error": null
+    },
+    "error": null,
+    "tokens": 6257
+   }
+  },
+  {
+   "id": "H4",
+   "desc": "左侧导航「知识库」菜单项左边的图标",
+   "snap": {
+    "tag": "div",
+    "role": null,
+    "name": null,
+    "text": null,
+    "aria_label": null,
+    "placeholder": null,
+    "testid": null,
+    "id": null,
+    "cls": "",
+    "css": "div:nth-of-type(3) > div:nth-of-type(2) > div > a:nth-of-type(1) > div > div:nth-of-type(1)",
+    "box": [
+     20,
+     137,
+     16,
+     16
+    ]
+   },
+   "chain": [
+    {
+     "tag": "div",
+     "cls": "_item_fxrlp_1",
+     "text": "知识库"
+    },
+    {
+     "tag": "a",
+     "cls": "",
+     "text": "知识库"
+    },
+    {
+     "tag": "div",
+     "cls": "_mainSidebarContent_rt4b9_6",
+     "text": "知识库 知识图谱 写作空间 智能体"
+    },
+    {
+     "tag": "div",
+     "cls": "_mainSidebar_rt4b9_1",
+     "text": "知识库 知识图谱 写作空间 智能体"
+    }
+   ],
+   "system": {
+    "specs": [
+     {
+      "kind": "css",
+      "desc": "locator('div:nth-of-type(3) > div:nth-of-type(2) > div > a:nth-of-type(1) > div > div:nth-of-type(1)')",
+      "count": 1,
+      "relation": "self"
+     },
+     {
+      "kind": "rf_css",
+      "desc": "rf css:div:nth-of-type(3) > div:nth-of-type(2) > div > a:nth-of-type(1) > div > div:nth-of-type(1)",
+      "count": 1,
+      "relation": "self"
+     }
+    ],
+    "picked": {
+     "kind": "css",
+     "desc": "locator('div:nth-of-type(3) > div:nth-of-type(2) > div > a:nth-of-type(1) > div > div:nth-of-type(1)')"
+    },
+    "best": {
+     "kind": "css",
+     "desc": "locator('div:nth-of-type(3) > div:nth-of-type(2) > div > a:nth-of-type(1) > div > div:nth-of-type(1)')",
+     "count": 1
+    }
+   },
+   "ai": {
+    "expr": "page.getByRole('link', { name: '知识库' }).locator('> div > div').first",
+    "verify": {
+     "expr": "page.getByRole('link', { name: '知识库' }).locator('> div > div').first",
+     "syntax": "ok",
+     "count": 1,
+     "hit": "no",
+     "error": null
+    },
+    "error": null,
+    "tokens": 3597
+   }
+  }
+ ]
+}
