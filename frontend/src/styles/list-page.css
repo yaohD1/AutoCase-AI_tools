@@ -1,0 +1,236 @@
+/* ==================== 列表页骨架 ====================
+   用例列表（/cases）与模块列表（/modules）共用。这两页原本是同一份代码的两次拷贝，
+   一起改才能保证行高、表头、筛选行不会左右漂移。
+   页面根元素挂 class="list-page" 即可（这个 class 同时也是按钮规范的入口）。
+
+   和「静物」配置区一致的三条：
+     · 表头不做灰底块，只用一条细线和小一号的灰字
+     · 状态用小方片（.chip），不用药丸
+     · 操作是文字，不是一列描边按钮 —— 一页十行就是二十个按钮，太吵
+
+   高度交给内容：表格 10 行 + 表头 + 分页刚好一屏出头，硬锁 100dvh 反而会
+   在 900 高的屏上多出 16px 滚动条。行数多时页面自然滚。 */
+
+.list-page {
+  max-width: 1320px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- 页头 ---------- */
+.list-head {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 18px;
+}
+.list-head-main { min-width: 0; }
+.list-title {
+  margin: 5px 0 0;
+  font-size: 21px;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -.02em;
+  color: var(--ink);
+}
+.list-sub {
+  margin: 7px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.list-sub b { color: var(--ink-2); font-weight: 600; }
+.list-head-actions { flex: none; display: flex; align-items: center; gap: 8px; }
+
+/* 待审数量：不用 el-badge 的小红点，改成按钮里的一个计数片 */
+.list-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 筛选行 ---------- */
+.list-filters {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 12px;
+}
+/* 关键：不参与收缩。原来是 flex 默认 shrink:1，六个控件挤在一行时
+   选择器被压到 34px，占位文字只剩「选..」 */
+.list-filters .el-select { flex: none; }
+.list-filters .el-select__wrapper {
+  min-height: 32px;
+  border-radius: var(--radius-ctl);
+  font-size: 13px;
+  box-shadow: 0 0 0 1px var(--line-soft) inset;
+  transition: box-shadow .16s ease;
+}
+.list-filters .el-select__wrapper:hover { box-shadow: 0 0 0 1px rgba(0, 0, 0, .16) inset; }
+.list-filters .el-select__wrapper.is-focused { box-shadow: 0 0 0 1.5px rgba(0, 113, 227, .45) inset; }
+.sel-project { width: 176px; }
+.sel-sprint { width: 156px; }
+.sel-image { width: 216px; }
+
+/* 筛选结果：写在右边，不占按钮位 */
+.list-filter-note {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.list-filter-note b { color: var(--ink-2); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* ---------- 表格外壳 ---------- */
+.list-shell {
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+
+  /* Element 表格自带的一堆颜色，在这里一次改掉，页面里就不用再逐个覆盖 */
+  --el-table-border-color: var(--line-faint);
+  --el-table-header-bg-color: #fff;
+  --el-table-row-hover-bg-color: #f6f8fa;
+  --el-table-text-color: var(--ink-2);
+  --el-table-header-text-color: var(--muted);
+  --el-table-fixed-box-shadow: -10px 0 14px -10px rgba(16, 24, 40, .18);
+}
+
+/* .flat-table：已经有自己卡片的页面（比如首页的知识库）只想借用表格的外观，
+   不需要 .list-shell 那圈边框。 */
+.flat-table {
+  --el-table-border-color: var(--line-faint);
+  --el-table-header-bg-color: #fff;
+  --el-table-row-hover-bg-color: #f6f8fa;
+  --el-table-text-color: var(--ink-2);
+  --el-table-header-text-color: var(--muted);
+}
+
+/* ---------- 表头：小字 + 一条细线，没有灰底块 ---------- */
+:is(.list-page, .flat-table) .el-table th.el-table__cell {
+  height: 40px;
+  padding: 0;
+  background: #fff;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: .02em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line-soft);
+}
+:is(.list-page, .flat-table) .el-table th.el-table__cell.is-leaf { border-bottom: 1px solid var(--line-soft); }
+
+/* ---------- 行 ---------- */
+:is(.list-page, .flat-table) .el-table td.el-table__cell {
+  height: 52px;
+  padding: 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line-faint);
+}
+:is(.list-page, .flat-table) .el-table .cell {
+  padding: 0 14px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+:is(.list-page, .flat-table) .el-table tr:last-child td.el-table__cell { border-bottom: 0; }
+/* 表格底部自带一条 1px 伪元素线，和外壳边框叠在一起会变成 2px */
+:is(.list-page, .flat-table) .el-table::before { display: none; }
+
+/* 主列（用例标题 / 模块名称）稍重一点，一眼能抓住行 */
+.list-cell-strong { color: var(--ink); font-weight: 500; }
+.list-cell-muted { color: var(--faint); }
+
+/* ---------- 选中后出现的批量条 ---------- */
+.list-bulk {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 38px;
+  padding: 0 16px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid #dce9fa;
+  font-size: 12.5px;
+  color: #0b62c4;
+}
+.list-bulk-count { font-weight: 600; font-variant-numeric: tabular-nums; }
+.list-bulk-spacer { margin-left: auto; }
+.list-bulk .list-act { color: #0b62c4; }
+.list-bulk .list-act:hover { color: #004f9e; text-decoration: underline; }
+
+/* ---------- 行内文字操作 ---------- */
+.list-act {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .14s ease;
+}
+.list-act + .list-act { margin-left: 14px; }
+.list-act:hover { color: var(--accent); }
+.list-act.is-danger:hover { color: var(--danger); }
+
+/* ---------- 分页 ---------- */
+.list-pager {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 9px 16px;
+  border-top: 1px solid var(--line-soft);
+}
+.list-pager .el-pagination {
+  --el-pagination-font-size: 12.5px;
+  --el-pagination-button-bg-color: transparent;
+  --el-pagination-hover-color: var(--accent);
+  font-weight: 400;
+}
+.list-pager .el-pagination button,
+.list-pager .el-pager li {
+  height: 26px;
+  min-width: 26px;
+  line-height: 26px;
+  border-radius: 6px;
+  font-weight: 400;
+}
+.list-pager .el-pager li.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.list-pager .el-select__wrapper {
+  min-height: 26px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 12.5px;
+}
+
+/* ---------- 杂项 ---------- */
+:is(.list-page, .flat-table) .el-checkbox__inner { border-radius: 3px; }
+:is(.list-page, .flat-table) .el-loading-mask { background: rgba(255, 255, 255, .68); }
+:is(.list-page, .flat-table) .el-table__empty-text { color: var(--faint); font-size: 13px; }
+
+/* 窄屏：筛选行允许换行，列宽收一点 */
+@media (max-width: 1180px) {
+  .list-filters { flex-wrap: wrap; }
+  .list-filter-note { display: none; }
+  .sel-image { width: 176px; }
+}

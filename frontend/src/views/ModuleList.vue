@@ -1,60 +1,81 @@
 <template>
-  <div class="case-page">
-    <el-card>
-      <template #header>
-        <div class="card-header">
-          <span>模块列表</span>
-          <div class="header-actions">
-            <el-button type="warning" @click="openPendingReview">
-              待审模块
-              <el-badge :value="pendingCount" :hidden="pendingCount === 0" />
-            </el-button>
-            <el-select v-model="selectedProject" placeholder="选择项目" class="project-select" @change="onProjectChange">
-              <el-option
-                v-for="project in projects"
-                :key="project.id"
-                :label="project.name"
-                :value="project.id"
-              />
-            </el-select>
-            <el-select v-model="selectedSprint" placeholder="选择迭代" class="sprint-select" @change="loadModules">
-              <el-option
-                v-for="sprint in sprints"
-                :key="sprint.id"
-                :label="sprint.name"
-                :value="sprint.id"
-              />
-            </el-select>
-            <el-select v-model="selectedImage" placeholder="原型图筛选" class="image-select" @change="loadModules" clearable>
-              <el-option
-                v-for="img in imageOptions"
-                :key="img.image_id"
-                :label="`${img.name}（${formatTime(img.time)}）`"
-                :value="img.image_id"
-              />
-            </el-select>
-            <el-button type="primary" @click="openGenerateDialog" :disabled="selection.length === 0">
-              生成用例
-            </el-button>
-            <el-button type="danger" @click="batchDeleteModules" :disabled="selection.length === 0">
-              批量删除
-            </el-button>
-          </div>
-        </div>
-      </template>
-
-      <div class="batch-bar" v-if="selection.length > 0">
-        <span>已选 {{ selection.length }} 项</span>
+  <div class="list-page">
+    <div class="list-head">
+      <div class="list-head-main">
+        <div class="eyebrow">测试资产 · MODULES</div>
+        <h1 class="list-title">模块</h1>
+        <p class="list-sub">
+          共 <b>{{ total }}</b> 个模块<template v-if="pendingCount">，其中 <b>{{ pendingCount }}</b> 个待审</template>
+        </p>
       </div>
-      <el-table :data="paginatedModules" style="width: 100%" v-loading="loading" @selection-change="onSelectionChange">
-        <el-table-column type="selection" width="50" />
-        <el-table-column prop="module" label="模块名称" min-width="150" />
-        <el-table-column prop="function_description" label="功能描述" min-width="250" show-overflow-tooltip />
-        <el-table-column prop="ui_elements" label="UI元素" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="created_at" label="创建时间" width="160" />
+      <div class="list-head-actions">
+        <el-button @click="openPendingReview">
+          待审模块
+          <span v-if="pendingCount" class="list-count">{{ pendingCount }}</span>
+        </el-button>
+        <el-button type="primary" :disabled="selection.length === 0" @click="openGenerateDialog">
+          生成用例
+        </el-button>
+      </div>
+    </div>
+
+    <div class="list-filters">
+      <el-select v-model="selectedProject" placeholder="选择项目" class="sel-project" @change="onProjectChange">
+        <el-option
+          v-for="project in projects"
+          :key="project.id"
+          :label="project.name"
+          :value="project.id"
+        />
+      </el-select>
+      <el-select v-model="selectedSprint" placeholder="选择迭代" class="sel-sprint" @change="loadModules">
+        <el-option
+          v-for="sprint in sprints"
+          :key="sprint.id"
+          :label="sprint.name"
+          :value="sprint.id"
+        />
+      </el-select>
+      <el-select v-model="selectedImage" placeholder="原型图筛选" class="sel-image" clearable @change="loadModules">
+        <el-option
+          v-for="img in imageOptions"
+          :key="img.image_id"
+          :label="`${img.name}（${formatTime(img.time)}）`"
+          :value="img.image_id"
+        />
+      </el-select>
+      <span class="list-filter-note">当前页 <b>{{ paginatedModules.length }}</b> 个 / 共 <b>{{ total }}</b> 个</span>
+    </div>
+
+    <div class="list-shell">
+      <div v-if="selection.length" class="list-bulk">
+        <span class="list-bulk-count">已选 {{ selection.length }} 个模块</span>
+        <span class="list-bulk-spacer"></span>
+        <button type="button" class="list-act" @click="clearSelection">取消选择</button>
+        <button type="button" class="list-act is-danger" @click="batchDeleteModules">删除所选</button>
+      </div>
+
+      <el-table ref="tableRef" :data="paginatedModules" style="width: 100%" v-loading="loading" @selection-change="onSelectionChange">
+        <el-table-column type="selection" width="48" />
+        <el-table-column prop="module" label="模块名称" min-width="180">
+          <template #default="{ row }">
+            <span class="list-cell-strong">{{ row.module }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="function_description" label="功能描述" min-width="260" show-overflow-tooltip />
+        <el-table-column prop="ui_elements" label="UI 元素" min-width="200" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="list-cell-muted">{{ row.ui_elements }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="created_at" label="创建时间" width="116">
+          <template #default="{ row }">
+            <span class="list-cell-muted">{{ formatTime(row.created_at) }}</span>
+          </template>
+        </el-table-column>
       </el-table>
 
-      <div class="pagination">
+      <div class="list-pager">
         <el-pagination
           v-model:current-page="currentPage"
           v-model:page-size="pageSize"
@@ -63,200 +84,145 @@
           layout="total, sizes, prev, pager, next"
         />
       </div>
-    </el-card>
+    </div>
 
+    <!-- 模块审核：导航在右栏顶部，footer 只留「通过 / 不通过」 -->
     <el-dialog
       v-model="showReview"
-      title="模块审核"
-      width="1400px"
-      top="2vh"
+      class="dlg"
+      width="min(1120px, 94vw)"
+      top="4vh"
       :close-on-click-modal="false"
     >
-      <div v-if="pendingModulesForReview.length > 0" class="review-layout">
-        <div class="review-image-panel">
-          <div class="review-image-viewer"
-               @wheel="handleReviewZoom"
-               @mousedown="startReviewDrag"
-               @mousemove="onReviewDrag"
-               @mouseup="endReviewDrag"
-               @mouseleave="endReviewDrag">
+      <template #header>
+        <div class="el-dialog__title">模块审核</div>
+        <div class="dlg-sub">确认模块边界、UI 元素与交互流程；通过后才能用来生成用例</div>
+      </template>
+
+      <div v-if="pendingModulesForReview.length > 0 && reviewModule" class="dlg-split">
+        <div class="dlg-viewer">
+          <div
+            class="dlg-stage"
+            @wheel="handleReviewZoom"
+            @mousedown="startReviewDrag"
+            @mousemove="onReviewDrag"
+            @mouseup="endReviewDrag"
+            @mouseleave="endReviewDrag"
+          >
             <img
               v-if="reviewModule.image_filename"
               :src="`/api/images/${reviewModule.image_filename}`"
               :style="{
                 transform: `scale(${reviewImageScale}) translate(${reviewDragOffset.x}px, ${reviewDragOffset.y}px)`,
-                cursor: reviewIsDragging ? 'grabbing' : reviewImageScale > 1 ? 'grab' : 'default',
-                maxWidth: '100%',
-                maxHeight: '100%',
-                objectFit: 'contain',
-                transition: 'transform 0.2s ease',
-                userSelect: 'none'
+                cursor: reviewIsDragging ? 'grabbing' : reviewImageScale > 1 ? 'grab' : 'default'
               }"
               draggable="false"
             />
-            <div v-else class="no-image">暂无原型图</div>
+            <div v-else class="dlg-stage-empty">暂无原型图</div>
           </div>
-          <div class="review-zoom-controls" v-if="reviewModule.image_filename">
-            <el-button circle size="small" @click="reviewZoomOut">-</el-button>
-            <span>{{ Math.round(reviewImageScale * 100) }}%</span>
-            <el-button circle size="small" @click="reviewZoomIn">+</el-button>
-            <el-button size="small" @click="reviewImageScale = 1; reviewDragOffset = { x: 0, y: 0 }">重置</el-button>
+          <div v-if="reviewModule.image_filename" class="dlg-zoom">
+            <button type="button" class="zoom-btn" title="缩小" @click="reviewZoomOut">−</button>
+            <span class="dlg-zoom-val">{{ Math.round(reviewImageScale * 100) }}%</span>
+            <button type="button" class="zoom-btn" title="放大" @click="reviewZoomIn">＋</button>
+            <button type="button" class="zoom-reset" @click="reviewImageScale = 1; reviewDragOffset = { x: 0, y: 0 }">重置</button>
           </div>
         </div>
-        <div class="review-form-panel">
-          <div class="review-progress">
-            <span class="review-progress-text">模块 {{ currentReviewIndex + 1 }} / {{ pendingModulesForReview.length }}</span>
-            <el-button size="small" :disabled="currentReviewIndex <= 0" @click="moveToPrev">上一个</el-button>
-            <el-button size="small" :disabled="currentReviewIndex >= pendingModulesForReview.length - 1" @click="moveToNext">下一个</el-button>
+
+        <div class="dlg-panel">
+          <div class="dlg-bar">
+            <span class="dlg-bar-text">第 <b>{{ currentReviewIndex + 1 }}</b> / {{ pendingModulesForReview.length }} 个待审</span>
+            <div class="dlg-bar-nav">
+              <button type="button" class="dlg-nav" :disabled="currentReviewIndex <= 0" @click="moveToPrev">上一个</button>
+              <button type="button" class="dlg-nav" :disabled="currentReviewIndex >= pendingModulesForReview.length - 1" @click="moveToNext">下一个</button>
+            </div>
           </div>
-          <el-form v-if="reviewModule" label-width="120px" class="module-form">
-            <el-form-item label="模块名称">
-              <el-input v-model="reviewModule.module" />
-            </el-form-item>
-            <el-form-item label="UI元素">
-              <el-input v-model="reviewModule.ui_elements" placeholder="用逗号分隔，如：按钮、输入框、下拉菜单" />
-            </el-form-item>
-            <el-form-item label="功能描述">
-              <el-input v-model="reviewModule.function_description" type="textarea" :rows="4" />
-            </el-form-item>
-            <el-form-item label="交互流程">
-              <el-input v-model="reviewModule.interaction_flow" type="textarea" :rows="3" />
-            </el-form-item>
-            <el-form-item label="测试关注点">
-              <el-input v-model="reviewModule.test_focus" type="textarea" :rows="3" placeholder="用逗号分隔" />
-            </el-form-item>
-          </el-form>
+          <div class="dlg-scroll">
+            <ModuleFields v-model="reviewModule" />
+          </div>
         </div>
       </div>
-      <el-empty v-else description="没有待审模块" />
+      <div v-else class="dlg-empty">没有待审模块</div>
+
       <template #footer>
-        <div class="review-footer">
-          <span class="progress-info">
-            <el-button size="small" :disabled="currentReviewIndex <= 0" @click="moveToPrev">上一个</el-button>
-            审批进度: {{ pendingModulesForReview.length > 0 ? currentReviewIndex + 1 : 0 }} / {{ pendingModulesForReview.length }}
-            <el-button size="small" :disabled="currentReviewIndex >= pendingModulesForReview.length - 1" @click="moveToNext">下一个</el-button>
-          </span>
-          <div class="review-actions">
+        <div class="dlg-foot">
+          <span class="dlg-foot-note">「不通过」会把模块标记为废弃，可以稍后重新生成</span>
+          <div class="dlg-foot-actions">
             <el-button @click="showReview = false">取消</el-button>
-            <el-button type="danger" @click="handleFail" :loading="failing">不通过</el-button>
-            <el-button type="success" @click="handlePass" :loading="passing">通过</el-button>
+            <el-button type="danger" plain :loading="failing" @click="handleFail">不通过</el-button>
+            <el-button type="primary" :loading="passing" @click="handlePass">通过</el-button>
           </div>
         </div>
       </template>
     </el-dialog>
 
+    <!-- 生成用例：逐模块确认参数，最后一并提交 -->
     <el-dialog
       v-model="showGenerate"
-      title="生成用例"
-      width="1400px"
-      top="2vh"
+      class="dlg"
+      width="min(1120px, 94vw)"
+      top="4vh"
       :close-on-click-modal="false"
     >
-      <div v-if="generatingModules.length > 0" class="review-layout">
-        <div class="review-image-panel">
-          <div class="review-image-viewer"
-               @wheel="handleGenZoom"
-               @mousedown="startGenDrag"
-               @mousemove="onGenDrag"
-               @mouseup="endGenDrag"
-               @mouseleave="endGenDrag">
+      <template #header>
+        <div class="el-dialog__title">生成用例</div>
+        <div class="dlg-sub">已选 {{ generatingModules.length }} 个模块 · 逐个确认参数后一起生成</div>
+      </template>
+
+      <div v-if="generatingModules.length > 0" class="dlg-split">
+        <div class="dlg-viewer">
+          <div
+            class="dlg-stage"
+            @wheel="handleGenZoom"
+            @mousedown="startGenDrag"
+            @mousemove="onGenDrag"
+            @mouseup="endGenDrag"
+            @mouseleave="endGenDrag"
+          >
             <img
-              v-if="generatingModules[genIndex].image_filename"
+              v-if="generatingModules[genIndex] && generatingModules[genIndex].image_filename"
               :src="`/api/images/${generatingModules[genIndex].image_filename}`"
               :style="{
                 transform: `scale(${genImageScale}) translate(${genDragOffset.x}px, ${genDragOffset.y}px)`,
-                cursor: genIsDragging ? 'grabbing' : genImageScale > 1 ? 'grab' : 'default',
-                maxWidth: '100%',
-                maxHeight: '100%',
-                objectFit: 'contain',
-                transition: 'transform 0.2s ease',
-                userSelect: 'none'
+                cursor: genIsDragging ? 'grabbing' : genImageScale > 1 ? 'grab' : 'default'
               }"
               draggable="false"
             />
-            <div v-else class="no-image">暂无原型图</div>
+            <div v-else class="dlg-stage-empty">暂无原型图</div>
           </div>
-          <div class="review-zoom-controls" v-if="generatingModules[genIndex].image_filename">
-            <el-button circle size="small" @click="genZoomOut">-</el-button>
-            <span>{{ Math.round(genImageScale * 100) }}%</span>
-            <el-button circle size="small" @click="genZoomIn">+</el-button>
-            <el-button size="small" @click="genImageScale = 1; genDragOffset = { x: 0, y: 0 }">重置</el-button>
+          <div v-if="generatingModules[genIndex] && generatingModules[genIndex].image_filename" class="dlg-zoom">
+            <button type="button" class="zoom-btn" title="缩小" @click="genZoomOut">−</button>
+            <span class="dlg-zoom-val">{{ Math.round(genImageScale * 100) }}%</span>
+            <button type="button" class="zoom-btn" title="放大" @click="genZoomIn">＋</button>
+            <button type="button" class="zoom-reset" @click="genImageScale = 1; genDragOffset = { x: 0, y: 0 }">重置</button>
           </div>
         </div>
-        <div class="review-form-panel">
-          <div class="review-progress">
-            <span class="review-progress-text">模块 {{ genIndex + 1 }} / {{ generatingModules.length }}</span>
-            <el-button size="small" :disabled="genIndex <= 0" @click="prevGenModule">上一个</el-button>
-            <el-button size="small" :disabled="genIndex >= generatingModules.length - 1" @click="nextGenModule">下一个</el-button>
+
+        <div class="dlg-panel">
+          <div class="dlg-bar">
+            <span class="dlg-bar-text">第 <b>{{ genIndex + 1 }}</b> / {{ generatingModules.length }} 个模块</span>
+            <div class="dlg-bar-nav">
+              <button type="button" class="dlg-nav" :disabled="genIndex <= 0" @click="prevGenModule">上一个</button>
+              <button type="button" class="dlg-nav" :disabled="genIndex >= generatingModules.length - 1" @click="nextGenModule">下一个</button>
+            </div>
           </div>
-          <el-form v-if="generatingModules[genIndex]" label-width="120px" class="module-form">
-            <el-form-item label="模块名称">
-              <el-input v-model="generatingModules[genIndex].module" />
-            </el-form-item>
-            <el-form-item label="UI元素">
-              <el-input v-model="generatingModules[genIndex].ui_elements" placeholder="用逗号分隔，如：按钮、输入框、下拉菜单" />
-            </el-form-item>
-            <el-form-item label="功能描述">
-              <el-input v-model="generatingModules[genIndex].function_description" type="textarea" :rows="4" />
-            </el-form-item>
-            <el-form-item label="交互流程">
-              <el-input v-model="generatingModules[genIndex].interaction_flow" type="textarea" :rows="3" />
-            </el-form-item>
-            <el-form-item label="测试关注点">
-              <el-input v-model="generatingModules[genIndex].test_focus" type="textarea" :rows="3" placeholder="用逗号分隔" />
-            </el-form-item>
-            <el-form-item label="用例类型">
-              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                <el-checkbox-group v-model="generatingModules[genIndex].case_types" :disabled="generatingModules[genIndex].smart_case_type">
-                  <el-checkbox label="functional">功能测试</el-checkbox>
-                  <el-checkbox label="ui">UI交互测试</el-checkbox>
-                  <el-checkbox label="boundary">边界值测试</el-checkbox>
-                  <el-checkbox label="exception">异常场景测试</el-checkbox>
-                </el-checkbox-group>
-                <el-switch
-                  v-model="generatingModules[genIndex].smart_case_type"
-                  active-text="智能"
-                  style="margin-left: 12px"
-                />
-              </div>
-            </el-form-item>
-            <el-form-item label="生成数量">
-              <el-input-number
-                v-model="generatingModules[genIndex].case_count"
-                :min="1"
-                :max="50"
-                :step="1"
-                :disabled="generatingModules[genIndex].smart_mode"
-              />
-              <el-switch
-                v-model="generatingModules[genIndex].smart_mode"
-                active-text="智能"
-                style="margin-left: 12px"
-              />
-            </el-form-item>
-            <el-form-item label="附带原图">
-              <el-switch
-                v-model="generatingModules[genIndex].use_vision"
-                :disabled="!moduleGenModelSupportsVision"
-              />
-              <span class="form-hint" style="margin-left:8px;color:#909399;font-size:12px">
-                {{ moduleGenModelSupportsVision ? '附带原图可提升用例质量' : '当前模型不支持图片分析' }}
-              </span>
-            </el-form-item>
-          </el-form>
+          <div class="dlg-scroll">
+            <ModuleFields
+              v-if="generatingModules[genIndex]"
+              v-model="generatingModules[genIndex]"
+              mode="generate"
+              :vision-supported="moduleGenModelSupportsVision"
+            />
+          </div>
         </div>
       </div>
-      <el-empty v-else description="没有选中模块" />
+      <div v-else class="dlg-empty">没有选中模块</div>
+
       <template #footer>
-        <div class="review-footer">
-          <span class="progress-info">
-            <el-button size="small" :disabled="genIndex <= 0" @click="prevGenModule">上一个</el-button>
-            模块 {{ genIndex + 1 }} / {{ generatingModules.length }}
-            <el-button size="small" :disabled="genIndex >= generatingModules.length - 1" @click="nextGenModule">下一个</el-button>
-          </span>
-          <div class="review-actions">
+        <div class="dlg-foot">
+          <span class="dlg-foot-note">生成期间请勿关闭页面，完成后到用例列表审批</span>
+          <div class="dlg-foot-actions">
             <el-button @click="showGenerate = false">取消</el-button>
-            <el-button type="primary" @click="confirmGenerate" :loading="generating">确认并生成用例</el-button>
+            <el-button type="primary" :loading="generating" @click="confirmGenerate">确认并生成用例</el-button>
           </div>
         </div>
       </template>
@@ -268,6 +234,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import ModuleFields from '../components/ModuleFields.vue'
 import api from '../api'
 
 const route = useRoute()
@@ -302,6 +269,10 @@ const reviewIsDragging = ref(false)
 let reviewDragStart = { x: 0, y: 0 }
 
 const selection = ref([])
+const tableRef = ref(null)
+function clearSelection() {
+  tableRef.value?.clearSelection()
+}
 const showGenerate = ref(false)
 const generatingModules = ref([])
 const genIndex = ref(0)
@@ -656,125 +627,6 @@ function formatTime(isoString) {
 </script>
 
 <style scoped>
-.case-page {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.header-actions {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.project-select, .sprint-select {
-  width: 180px;
-}
-
-.pagination {
-  margin-top: 20px;
-  text-align: right;
-}
-
-.batch-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  background: #f0f9ff;
-  border-radius: 4px;
-  font-size: 13px;
-  color: #409EFF;
-}
-
-.review-layout {
-  display: flex;
-  gap: 20px;
-  height: 70vh;
-}
-
-.review-image-panel {
-  width: 45%;
-  display: flex;
-  flex-direction: column;
-  background: #f5f7fa;
-  border-radius: 6px;
-  padding: 12px;
-}
-
-.review-image-viewer {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #fff;
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.review-form-panel {
-  flex: 1;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.review-progress {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-}
-
-.review-progress-text {
-  font-weight: 500;
-  color: #409EFF;
-  margin-right: auto;
-}
-
-.review-zoom-controls {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 8px;
-  font-size: 13px;
-  color: #606266;
-}
-
-.no-image {
-  color: #999;
-  font-size: 14px;
-}
-
-.module-form .el-form-item {
-  margin-bottom: 16px;
-}
-
-.review-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.progress-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #909399;
-  font-size: 14px;
-}
-
-.review-actions {
-  display: flex;
-  gap: 10px;
-}
+/* 页面骨架在 styles/list-page.css，弹窗外壳在 styles/dialog.css，
+   字段在 styles/forms.css —— 这里不再留页面私有样式。 */
 </style>

@@ -5,6 +5,7 @@ import ModuleList from '../views/ModuleList.vue'
 import Settings from '../views/Settings.vue'
 import Scripts from '../views/Scripts.vue'
 import AutomationGenerationDetail from '../views/AutomationGenerationDetail.vue'
+import AutomationRecords from '../views/AutomationRecords.vue'
 import Recording from '../views/Recording.vue'
 import RecordingRecords from '../views/RecordingRecords.vue'
 
@@ -33,6 +34,11 @@ const routes = [
     path: '/scripts',
     name: 'Scripts',
     component: Scripts
+  },
+  {
+    path: '/scripts/records',
+    name: 'AutomationRecords',
+    component: AutomationRecords
   },
   {
     path: '/scripts/generations/:id',

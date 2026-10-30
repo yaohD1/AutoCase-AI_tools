@@ -1,108 +1,128 @@
 <template>
-  <div class="records-page workspace-buttons">
-    <div class="page-header">
-      <div class="page-intro">
-        <div class="eyebrow">RECORDING · GENERATIONS</div>
-        <h1>生成记录</h1>
-        <p>录制生成写入的每一次都在这里：可以预览文件内容、提交到 Git，或撤销这次写入。</p>
+  <div class="list-page ui-buttons rec-page">
+    <!-- 页头：一句陈述句，右上角只有刷新；「返回录制」是导航，做成文字链接不占按钮位 -->
+    <div class="list-head">
+      <div class="list-head-main">
+        <div class="eyebrow">录制 · RECORDS</div>
+        <h1 class="list-title">生成记录</h1>
+        <p class="list-sub">
+          共 <b>{{ records.length }}</b> 条记录<template v-if="pendingCount">，其中 <b>{{ pendingCount }}</b> 条未提交</template>；
+          可以预览文件内容、提交到 Git，或撤销这次写入。
+        </p>
       </div>
-      <div class="page-actions">
+      <div class="list-head-actions">
         <el-button :icon="Refresh" :loading="loading" @click="reload">刷新</el-button>
-        <el-button type="primary" @click="$router.push('/recording')">返回录制</el-button>
+        <button type="button" class="head-link" @click="$router.push('/recording')">返回录制</button>
       </div>
     </div>
 
-    <el-card class="panel-card">
-      <div class="records-layout">
-        <div class="record-list">
-          <el-empty v-if="!records.length && !loading" description="还没有生成记录" :image-size="60" />
+    <div class="rec-shell">
+      <!-- 左：记录列表。一条记录一行，文件名 + 目录/时间，状态用方片 -->
+      <div class="rec-list">
+        <div class="rec-list-head">
+          <span>记录</span>
+          <span class="rec-list-count">{{ records.length }}</span>
+        </div>
+        <div class="rec-list-scroll">
           <button
             v-for="item in records"
             :key="item.id"
             type="button"
-            :class="['record-item', { active: selected && selected.id === item.id }]"
+            :class="['rec-item', { 'is-active': selected && selected.id === item.id }]"
+            :title="item.target_path"
             @click="openRecord(item.id)"
           >
-            <span class="record-path" :title="item.target_path">{{ item.target_path }}</span>
-            <span class="record-meta">
-              <el-tag size="small" :type="recordStatusTone(item.status)" effect="light">{{ recordStatusLabel(item.status) }}</el-tag>
-              <span class="record-time">{{ formatDate(item.created_at) }}</span>
-            </span>
+            <span class="rec-name">{{ baseName(item.target_path) }}</span>
+            <span :class="['chip', recordStatusTone(item.status)]">{{ recordStatusLabel(item.status) }}</span>
+            <span class="rec-path">{{ dirName(item.target_path) }}</span>
+            <span class="rec-time">{{ formatDate(item.created_at) }}</span>
           </button>
-        </div>
-
-        <div class="record-detail">
-          <el-empty v-if="!selected" description="选择一条记录查看预览" :image-size="60" />
-          <template v-else>
-            <div class="detail-head">
-              <div class="detail-head-main">
-                <div class="detail-title">{{ selected.target_path }}</div>
-                <div class="detail-meta">
-                  {{ frameworkName(selected.framework) }} · 模型 {{ selected.model || '—' }} · {{ formatDate(selected.created_at) }}
-                </div>
-              </div>
-              <el-tag :type="recordStatusTone(selected.status)" effect="light">{{ recordStatusLabel(selected.status) }}</el-tag>
-            </div>
-
-            <el-alert
-              v-if="selected.changed_since_generation && selected.status === 'generated'"
-              title="文件在生成后已被改动或删除，提交和撤销都会被拒绝。请先确认文件内容。"
-              type="warning"
-              :closable="false"
-              class="detail-alert"
-            />
-            <el-alert
-              v-if="selected.status === 'committed'"
-              :title="`已提交：${selected.commit_message || ''}（${(selected.commit_hash || '').slice(0, 8)}）`"
-              type="success"
-              :closable="false"
-              class="detail-alert"
-            />
-
-            <div v-if="(selected.steps || []).length" class="detail-section">
-              <div class="detail-label">录制的步骤（{{ selected.steps.length }}）</div>
-              <ol class="mini-steps">
-                <li v-for="step in selected.steps" :key="step.no">
-                  <span class="mini-kind">{{ stepKindLabel(step.type) }}</span>
-                  <span class="mini-text">{{ step.text || step.value || '' }}</span>
-                </li>
-              </ol>
-            </div>
-
-            <div class="detail-section">
-              <div class="detail-label">文件内容预览{{ selected.truncated ? '（已截断）' : '' }}</div>
-              <pre :class="['code-preview', { 'is-empty': !selected.file_exists }]">{{ selected.file_exists ? selected.content : '文件当前不存在（生成后可能已被删除或撤回）' }}</pre>
-            </div>
-
-            <div v-if="selected.reply" class="detail-section">
-              <div class="detail-label">生成 agent 的说明</div>
-              <div class="agent-reply">{{ selected.reply }}</div>
-            </div>
-
-            <div v-if="selected.status === 'generated'" class="detail-section commit-box">
-              <div class="detail-label">提交说明</div>
-              <el-input v-model="commitMessage" maxlength="500" show-word-limit />
-              <div class="commit-actions">
-                <el-button type="primary" :loading="committing" :disabled="selected.changed_since_generation" @click="commitSelected">
-                  提交到 Git
-                </el-button>
-              </div>
-            </div>
-
-            <div v-if="selected.status === 'generated' || selected.status === 'committed'" class="detail-actions">
-              <el-button type="danger" plain :loading="reverting" @click="revertSelected">
-                {{ selected.status === 'generated' ? '撤销写入' : '回滚这次提交' }}
-              </el-button>
-            </div>
-          </template>
+          <div v-if="!records.length && !loading" class="rec-empty">还没有生成记录</div>
         </div>
       </div>
-    </el-card>
+
+      <!-- 右：详情。头部固定，中间预览自己滚，提交盒钉在底部 -->
+      <div v-if="selected" class="rec-detail">
+        <div class="rec-detail-head">
+          <div class="rec-detail-main">
+            <div class="rec-title">{{ baseName(selected.target_path) }}</div>
+            <div class="rec-path is-full" :title="selected.target_path">{{ dirName(selected.target_path) }}</div>
+          </div>
+          <div class="rec-detail-actions">
+            <span :class="['chip', recordStatusTone(selected.status)]">{{ recordStatusLabel(selected.status) }}</span>
+            <button
+              v-if="selected.status === 'generated' || selected.status === 'committed'"
+              type="button"
+              class="list-act is-danger"
+              :disabled="reverting"
+              @click="revertSelected"
+            >{{ selected.status === 'generated' ? '撤销写入' : '回滚提交' }}</button>
+          </div>
+        </div>
+
+        <div class="rec-meta">
+          <span>{{ frameworkName(selected.framework) }}</span>
+          <span class="rec-sep">·</span>
+          <span>模型 {{ selected.model || '—' }}</span>
+          <span class="rec-sep">·</span>
+          <span>{{ formatDate(selected.created_at) }}</span>
+          <span v-if="(selected.steps || []).length" class="rec-sep">·</span>
+          <span v-if="(selected.steps || []).length">{{ selected.steps.length }} 个步骤</span>
+        </div>
+
+        <div class="rec-scroll">
+          <div v-if="selected.changed_since_generation && selected.status === 'generated'" class="rec-note is-warn">
+            文件在生成后已被改动或删除，提交和撤销都会被拒绝。请先核对文件内容。
+          </div>
+          <div v-if="selected.status === 'committed'" class="rec-note is-ok">
+            已提交 <span class="mono">{{ (selected.commit_hash || '').slice(0, 8) }}</span>
+            <template v-if="selected.commit_message">· {{ selected.commit_message }}</template>
+          </div>
+
+          <div v-if="(selected.steps || []).length" class="rec-block">
+            <div class="rec-label">录制的步骤</div>
+            <div class="rec-steps">
+              <div v-for="(step, index) in selected.steps" :key="step.no" class="rec-step">
+                <span class="rec-step-no">{{ index + 1 }}</span>
+                <span class="rec-step-kind">{{ stepKindLabel(step.type) }}</span>
+                <span class="rec-step-text">{{ step.text || step.value || '' }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="rec-block">
+            <div class="rec-label">
+              <span>文件内容{{ selected.truncated ? '（已截断）' : '' }}</span>
+              <button v-if="selected.file_exists" type="button" class="form-label-act" @click="copyContent">复制</button>
+            </div>
+            <pre :class="['rec-code', { 'is-empty': !selected.file_exists }]">{{ selected.file_exists ? selected.content : '文件当前不存在（生成后可能已被删除或撤回）' }}</pre>
+          </div>
+
+          <div v-if="selected.reply" class="rec-block">
+            <div class="rec-label">生成 Agent 的说明</div>
+            <div class="rec-reply">{{ selected.reply }}</div>
+          </div>
+        </div>
+
+        <!-- 提交盒：只有未提交时出现，永远是页面里唯一的蓝色主行动 -->
+        <div v-if="selected.status === 'generated'" class="rec-commit">
+          <div class="rec-commit-label">提交说明</div>
+          <div class="rec-commit-row">
+            <el-input v-model="commitMessage" class="form-input" maxlength="500" placeholder="这次生成的简短说明" />
+            <el-button type="primary" :loading="committing" :disabled="selected.changed_since_generation" @click="commitSelected">
+              提交到 Git
+            </el-button>
+          </div>
+        </div>
+      </div>
+
+      <div v-else class="rec-detail-empty">从左侧选择一条记录</div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
@@ -127,6 +147,8 @@ const reverting = ref(false)
 const route = useRoute()
 const wantedId = ref(typeof route.query.id === 'string' ? route.query.id : '')
 
+const pendingCount = computed(() => records.value.filter(item => item.status === 'generated').length)
+
 onMounted(load)
 
 async function load() {
@@ -145,7 +167,6 @@ async function load() {
   }
 }
 
-// 从录制页带着 generation_id 跳过来时，选中那一条。
 async function reload() {
   if (selected.value) wantedId.value = selected.value.id
   await load()
@@ -158,6 +179,15 @@ async function openRecord(id) {
     commitMessage.value = `录制生成：${data.title || data.target_path}`
   } catch (error) {
     ElMessage.error(errorText(error))
+  }
+}
+
+async function copyContent() {
+  try {
+    await navigator.clipboard.writeText(selected.value.content || '')
+    ElMessage.success('已复制文件内容')
+  } catch {
+    ElMessage.error('复制失败，请手动选择文本')
   }
 }
 
@@ -209,12 +239,29 @@ function recordStatusLabel(status) {
   return ({ generated: '未提交', committed: '已提交', reverted: '已撤销' })[status] || status
 }
 
+// 状态只借三档颜色：待处理黄、完成绿、撤销灰。没有新的语义色
 function recordStatusTone(status) {
-  return ({ generated: 'warning', committed: 'success', reverted: 'info' })[status] || 'info'
+  return ({ generated: 'is-warn', committed: 'is-ok', reverted: 'is-mute' })[status] || ''
+}
+
+// 同目录下文件名才是区分点，所以列表只显示文件名，目录退成第二行的小字
+function baseName(path) {
+  const text = String(path || '')
+  const cut = text.lastIndexOf('/')
+  return cut >= 0 ? text.slice(cut + 1) : text
+}
+
+function dirName(path) {
+  const text = String(path || '')
+  const cut = text.lastIndexOf('/')
+  return cut >= 0 ? `${text.slice(0, cut)}/` : '仓库根目录'
 }
 
 function formatDate(value) {
-  return value ? new Date(value).toLocaleString() : '-'
+  if (!value) return '—'
+  const d = new Date(value)
+  const pad = n => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 function errorText(error) {
@@ -224,56 +271,297 @@ function errorText(error) {
 </script>
 
 <style scoped>
-/* 与录制页同一套视觉：浅底、细边框、紧凑行 */
-.records-page { max-width:1440px; margin:0 auto; }
-.page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:16px; }
-.page-intro { min-width:0; }
-.eyebrow { color:#0071e3; font-size:10.5px; font-weight:700; letter-spacing:1.2px; margin-bottom:3px; text-transform:uppercase; }
-h1 { margin:0; color:#1d1d1f; font-size:22px; font-weight:700; letter-spacing:-.3px; }
-.page-header p { margin:4px 0 0; color:#6e6e73; font-size:13px; line-height:1.5; max-width:760px; }
-.page-actions { display:flex; align-items:center; gap:10px; flex:none; padding-top:2px; }
-
-.panel-card { border:1px solid #ebedf0; border-radius:14px; overflow:hidden; box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 30px rgba(16,24,40,.05); }
-.panel-card :deep(.el-card__body) { padding:12px; }
-
-.records-layout { display:grid; grid-template-columns:340px minmax(0,1fr); gap:12px; align-items:start; }
-
-/* 列表：一行一条，路径 + 状态 + 时间 */
-.record-list { display:flex; flex-direction:column; gap:2px; min-height:0; max-height:calc(100dvh - 320px); padding-right:8px; border-right:1px solid #f0f2f5; overflow-y:auto; overscroll-behavior:contain; }
-.record-item {
-  display:flex; flex-direction:column; gap:2px; width:100%; min-width:0; text-align:left; cursor:pointer;
-  padding:7px 9px; border:0; border-radius:8px; background:transparent; transition:background .15s ease;
+/* 一屏两栏：左记录（320）右详情。高度锁在视口内，列表和预览各自滚，
+   提交盒固定在右下角 —— 文件很长时也不用滚到底才能提交。 */
+.rec-page { height: calc(100dvh - 132px); }
+.head-link {
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .14s ease;
 }
-.record-item:hover { background:#f6f9ff; }
-.record-item.active { background:rgba(0,113,227,.08); }
-.record-path { font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:12px; color:#303133; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.record-item.active .record-path { color:#0057b8; font-weight:600; }
-.record-meta { display:flex; align-items:center; gap:6px; }
-.record-time { color:#a1a1a6; font-size:11px; }
+.head-link:hover { color: var(--accent); }
 
-/* 详情 */
-.record-detail { min-width:0; min-height:0; max-height:calc(100dvh - 320px); padding:2px 4px 4px 6px; overflow-y:auto; }
-.detail-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:10px; }
-.detail-head-main { min-width:0; }
-.detail-title { color:#1d1d1f; font-size:14px; font-weight:700; font-family:ui-monospace, Consolas, monospace; word-break:break-all; }
-.detail-meta { margin-top:2px; color:#909399; font-size:11.5px; }
-.detail-alert { margin-bottom:10px; }
-.detail-section { margin-top:12px; }
-.detail-label { font-size:11.5px; font-weight:700; color:#6e6e73; margin-bottom:6px; letter-spacing:.2px; }
-.mini-steps { margin:0; padding-left:16px; color:#303133; font-size:12px; line-height:1.7; max-height:180px; overflow-y:auto; }
-.mini-kind { display:inline-block; min-width:60px; color:#0071e3; font-weight:600; }
-.mini-text { word-break:break-word; }
-.code-preview.is-empty { background:#f7f9fc; color:#909399; border:1px dashed #e4e7ed; }
-.code-preview { margin:0; max-height:420px; overflow:auto; padding:12px; border-radius:8px; background:#0f172a; color:#e2e8f0; font-size:12px; line-height:1.6; font-family:ui-monospace, Consolas, monospace; white-space:pre; }
-.agent-reply { padding:9px 11px; border-radius:8px; background:#f7f9fc; color:#303133; font-size:12px; line-height:1.6; white-space:pre-wrap; }
-.commit-box { padding:11px; border:1px solid #ebedf0; border-radius:9px; }
-.commit-actions { margin-top:8px; display:flex; justify-content:flex-end; }
-.detail-actions { margin-top:12px; display:flex; justify-content:flex-end; }
+.rec-shell {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
 
-@media (max-width: 960px) {
-  .records-layout { grid-template-columns:1fr; }
-  .record-list, .record-detail { max-height:none; }
-  .record-list { border-right:0; border-bottom:1px solid #f0f2f5; padding:0 0 8px; max-height:280px; }
-  .record-detail { padding:8px 0 0; }
+/* ---------- 左：记录列表 ---------- */
+.rec-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line-soft);
+}
+
+.rec-list-head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  height: 38px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.rec-list-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.rec-list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px 6px 8px;
+}
+.rec-list-scroll::-webkit-scrollbar { width: 8px; }
+.rec-list-scroll::-webkit-scrollbar-thumb { background: #e6e9ef; border-radius: 4px; }
+
+.rec-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: 3px;
+  width: 100%;
+  padding: 8px 9px 7px 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0 8px 8px 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background .14s ease, border-color .14s ease;
+}
+.rec-item:hover { background: #fafbfc; }
+.rec-item.is-active { background: #f5f8fd; border-left-color: var(--accent); }
+
+.rec-name {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rec-item.is-active .rec-name { color: var(--ink); font-weight: 500; }
+.rec-item .chip { justify-self: end; }
+.rec-path {
+  min-width: 0;
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rec-time {
+  justify-self: end;
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rec-empty {
+  padding: 30px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* ---------- 右：详情 ---------- */
+.rec-detail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 14px 18px 12px 20px;
+}
+
+.rec-detail-head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.rec-detail-main { min-width: 0; }
+.rec-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rec-path.is-full {
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.rec-detail-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.rec-detail-actions .list-act:disabled { color: #cdd3db; cursor: default; }
+
+.rec-meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.rec-sep { color: #d8dde5; }
+
+.rec-scroll {
+  flex: 1;
+  min-height: 0;
+  margin-top: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 6px;
+}
+.rec-scroll::-webkit-scrollbar { width: 8px; }
+.rec-scroll::-webkit-scrollbar-thumb { background: #e6e9ef; border-radius: 4px; }
+
+/* 提示条：一块淡底 + 一条细边，不用 el-alert 那个带图标的灰盒子 */
+.rec-note {
+  margin-bottom: 12px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.rec-note.is-warn { background: var(--warn-soft); border: 1px solid #f2e3c9; color: var(--warn); }
+.rec-note.is-ok { background: var(--ok-soft); border: 1px solid #d9ecdf; color: var(--ok); }
+
+.rec-block { margin-bottom: 14px; }
+.rec-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.rec-steps { border-top: 1px solid var(--line-faint); }
+.rec-step {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line-faint);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.rec-step-no {
+  flex: none;
+  width: 14px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+.rec-step-kind {
+  flex: none;
+  width: 56px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.rec-step-text { min-width: 0; word-break: break-word; }
+
+.rec-code {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #dde5f0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  white-space: pre;
+}
+.rec-code.is-empty {
+  background: #fafbfc;
+  border: 1px solid var(--line-faint);
+  color: var(--faint);
+  white-space: pre-wrap;
+}
+
+.rec-reply {
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: #f7f8fa;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+
+/* 提交盒：钉在底栏，和上方内容用一条细线分开 */
+.rec-commit {
+  flex: none;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+.rec-commit-label {
+  margin-bottom: 1px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.rec-commit-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.rec-commit-row :deep(.form-input) { flex: 1; }
+.rec-commit-row :deep(.el-input__wrapper) { border-bottom-color: rgba(0, 0, 0, .09); }
+
+.rec-detail-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+/* 窄屏：上下排列，列表限高，详情自己滚 */
+@media (max-width: 1080px) {
+  .rec-page { height: auto; }
+  .rec-shell { grid-template-columns: minmax(0, 1fr); }
+  .rec-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--line-soft);
+    max-height: 240px;
+  }
+  .rec-detail { padding: 14px 16px 12px; }
+  .rec-scroll { overflow: visible; }
 }
 </style>

@@ -1,108 +1,100 @@
 <template>
   <div class="upload-page">
 
-    <div class="status-bar">
-      <div class="status-item">
-        <span class="status-num">{{ statusCount.pending }}</span>
-        <span class="status-label">待审批</span>
+    <!-- 页头：四个 KPI 原来是没有容器的一排 28px 裸数字，压在页面顶端比标题还响。
+         收成右侧一行小字，数字留着重（.stat-num），标签退到 11px 灰。 -->
+    <header class="upload-head">
+      <div class="upload-head-main">
+        <div class="eyebrow">{{ headCopy.eyebrow }}</div>
+        <h1 class="upload-title">{{ headCopy.title }}</h1>
+        <p class="upload-sub">{{ headCopy.desc }}</p>
       </div>
-      <div class="status-divider"></div>
-      <div class="status-item">
-        <span class="status-num">{{ statusCount.approved }}</span>
-        <span class="status-label">已通过</span>
+      <div class="upload-stats">
+        <div class="stat">
+          <span class="stat-num">{{ statusCount.pending }}</span>
+          <span class="stat-label">待审批</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num">{{ statusCount.approved }}</span>
+          <span class="stat-label">已通过</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num">{{ statusCount.total }}</span>
+          <span class="stat-label">AI 生成</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num">{{ approvalRate }}</span>
+          <span class="stat-label">通过率</span>
+        </div>
       </div>
-      <div class="status-divider"></div>
-      <div class="status-item">
-        <span class="status-num">{{ statusCount.total }}</span>
-        <span class="status-label">AI生成用例数</span>
-      </div>
-      <div class="status-divider"></div>
-      <div class="status-item">
-        <span class="status-num">{{ approvalRate }}</span>
-        <span class="status-label">通过率</span>
-      </div>
-    </div>
+    </header>
 
-    <div class="mode-tabs">
-      <div :class="['mode-tab', { active: uploadMode === 'image' }]" @click="switchMode('image')">
-        <el-icon><PictureFilled /></el-icon>
-        <span>原型图模式</span>
-      </div>
-      <div :class="['mode-tab', { active: uploadMode === 'doc' }]" @click="switchMode('doc')">
-        <el-icon><Document /></el-icon>
-        <span>文档模式</span>
-      </div>
-      <div :class="['mode-tab', { active: uploadMode === 'knowledge' }]" @click="switchMode('knowledge')">
-        <el-icon><Collection /></el-icon>
-        <span>知识库</span>
-      </div>
-      <div class="mode-tab" @click="goToAutomation">
-        <el-icon><Monitor /></el-icon>
-        <span>Agent探索</span>
-      </div>
-    </div>
+    <!-- 三个模式是同一层级的切换，用下划线 tab；「Agent 探索」是跳出去，靠在右边分开 -->
+    <nav class="mode-tabs">
+      <button type="button" :class="['mode-tab', { 'is-on': uploadMode === 'image' }]" @click="switchMode('image')">原型图</button>
+      <button type="button" :class="['mode-tab', { 'is-on': uploadMode === 'doc' }]" @click="switchMode('doc')">文档</button>
+      <button type="button" :class="['mode-tab', { 'is-on': uploadMode === 'knowledge' }]" @click="switchMode('knowledge')">知识库</button>
+      <span class="mode-spacer"></span>
+      <button type="button" class="mode-jump" @click="goToAutomation">Agent 探索<span class="jump-arrow">↗</span></button>
+    </nav>
 
-    <div class="tool-entry" role="button" tabindex="0" @click="$router.push('/recording')" @keydown.enter="$router.push('/recording')">
-      <div class="tool-entry-icon">
-        <el-icon :size="20"><Operation /></el-icon>
-      </div>
-      <div class="tool-entry-text">
-        <div class="tool-entry-title">自动化工具</div>
-        <div class="tool-entry-desc">在浏览器里录制操作，插入断言和等待，生成 Playwright 或 Robot Framework 脚本并写入项目</div>
-      </div>
-      <el-icon class="tool-entry-arrow"><ArrowRight /></el-icon>
-    </div>
+    <!-- 自动化工具：从「渐变图标大卡」降成浅底一行。
+         它仍然可点、仍然独占一行，但不再和上传卡片抢第一眼。 -->
+    <button type="button" class="tool-entry" @click="$router.push('/recording')">
+      <span class="tool-entry-icon"><el-icon :size="15"><Operation /></el-icon></span>
+      <span class="tool-entry-body">
+        <span class="tool-entry-title">自动化工具</span>
+        <span class="tool-entry-desc">在浏览器里录制操作，插入断言和等待，生成 Playwright 或 Robot Framework 脚本并写入项目</span>
+      </span>
+      <span class="tool-entry-arrow">→</span>
+    </button>
 
     <el-card v-if="uploadMode !== 'knowledge'" class="upload-card">
-      <template #header>
-        <div class="card-header">
-          <span>{{ uploadMode === 'image' ? '上传Figma设计图' : '上传接口文档' }}</span>
-        </div>
-      </template>
-
       <div class="card-body-layout">
         <div class="config-panel">
-          <div class="section-title">Config</div>
-          <el-form :model="form" label-width="100px" class="upload-form">
-            <el-form-item label="项目">
-              <div class="project-select-row">
-                <el-select v-model="form.projectId" placeholder="选择项目" style="flex: 1" @change="onProjectChange">
-                  <el-option
-                    v-for="project in projects"
-                    :key="project.id"
-                    :label="project.name"
-                    :value="project.id"
-                  />
-                </el-select>
-                <el-button text :icon="Plus" class="new-project-btn" @click="showCreateProject = true">
-                  新建项目
-</el-button>
+          <div class="section-title">配置</div>
+          <!-- 字段规范与录制页配置卡一致：标签 11.5px 灰在上、值在下、不画盒子，
+               只靠字段之间的一条细线分隔。控件本身透明，聚焦时才出一条蓝线。 -->
+          <div class="form-block">
+            <div class="form-field">
+              <div class="form-label">
+                <span>项目</span>
+                <button type="button" class="form-label-act" @click="showCreateProject = true">＋ 新建</button>
               </div>
-            </el-form-item>
-
-            <el-form-item label="迭代">
-              <div class="project-select-row">
-                <el-select v-model="form.sprintId" placeholder="选择迭代" style="flex: 1" @change="loadStatusCount">
-                  <el-option
-                    v-for="s in sprints"
-                    :key="s.id"
-                    :label="s.name"
-                    :value="s.id"
-                  />
-                </el-select>
-                <el-button text :icon="Plus" class="new-project-btn" @click="showCreateSprint = true">
-                  新建迭代
-                </el-button>
-              </div>
-</el-form-item>
-
-            <div class="linked-analysis-bar">
-              <el-switch v-model="form.linkedAnalysis" active-text="关联分析" />
-              <span class="form-hint" style="margin-left:8px">多图时合并分析，AI理解页面关联流程</span>
+              <el-select v-model="form.projectId" placeholder="选择项目" class="form-ctl" @change="onProjectChange">
+                <el-option
+                  v-for="project in projects"
+                  :key="project.id"
+                  :label="project.name"
+                  :value="project.id"
+                />
+              </el-select>
             </div>
 
-            <el-form-item label="原型分析模型">
-              <el-select v-model="form.analyzeConfigId" placeholder="选择分析模型" style="width: 100%">
+            <div class="form-field">
+              <div class="form-label">
+                <span>迭代</span>
+                <button type="button" class="form-label-act" @click="showCreateSprint = true">＋ 新建</button>
+              </div>
+              <el-select v-model="form.sprintId" placeholder="选择迭代" class="form-ctl" @change="loadStatusCount">
+                <el-option
+                  v-for="s in sprints"
+                  :key="s.id"
+                  :label="s.name"
+                  :value="s.id"
+                />
+              </el-select>
+            </div>
+
+            <div class="form-toggle">
+              <el-switch v-model="form.linkedAnalysis" />
+              <span class="form-toggle-text">关联分析</span>
+              <span class="form-toggle-hint">多图时合并分析，AI 理解页面关联流程</span>
+            </div>
+
+            <div class="form-field">
+              <div class="form-label"><span>原型分析模型</span></div>
+              <el-select v-model="form.analyzeConfigId" placeholder="选择分析模型" class="form-ctl">
                 <el-option
                   v-for="config in filteredAIConfigs"
                   :key="config.id"
@@ -110,46 +102,45 @@
                   :value="config.id"
                 />
               </el-select>
-            </el-form-item>
-            <div v-if="currentAnalyzeModel" class="model-preview-card">
-              <div class="model-preview-row">
-                <span class="model-preview-value model-preview-name">{{ currentAnalyzeModel.model || '-' }}</span>
-                <el-button v-if="!editingAnalyzeModel" link type="primary" size="small" :icon="Edit" @click="editingAnalyzeModel = true" />
-                <el-input
-                  v-if="editingAnalyzeModel"
-                  v-model="currentAnalyzeModel.model"
-                  size="small"
-                  style="width: 160px"
-                  @blur="editingAnalyzeModel = false; saveModelConfig(currentAnalyzeModel)"
-                />
-              </div>
-              <div class="model-preview-divider" />
-              <div class="model-preview-row">
-                <span class="model-preview-label">温度</span>
-                <el-input-number
-                  v-model="currentAnalyzeModel.temperature"
-                  :min="0" :max="2" :step="0.1"
-                  size="small" controls-position="right"
-                  style="width: 100px"
-                  @change="saveModelConfig(currentAnalyzeModel)"
-                />
-                <span class="model-preview-label" style="margin-left:16px">Token</span>
-                <el-input-number
-                  v-model="currentAnalyzeModel.max_tokens"
-                  :min="100" :max="32000" :step="200"
-                  size="small" controls-position="right"
-                  style="width: 120px"
-                  @change="saveModelConfig(currentAnalyzeModel)"
-                />
-              </div>
-              <div class="model-preview-row">
-                <span class="model-preview-label">API</span>
-                <span class="model-preview-value model-preview-url">{{ currentAnalyzeModel.api_base || '-' }}</span>
+              <!-- 选中模型后才出现的参数区：属于这个字段的附属信息，
+                   所以左对齐、缩进为零，用淡底而不是再套一个带边框的盒子 -->
+              <div v-if="currentAnalyzeModel" class="up-model">
+                <div class="up-model-head">
+                  <span class="up-model-name">{{ currentAnalyzeModel.model || '-' }}</span>
+                  <el-input
+                    v-if="editingAnalyzeModel"
+                    v-model="currentAnalyzeModel.model"
+                    size="small"
+                    class="up-model-input"
+                    @blur="editingAnalyzeModel = false; saveModelConfig(currentAnalyzeModel)"
+                  />
+                  <button v-else type="button" class="up-model-act" @click="editingAnalyzeModel = true">编辑</button>
+                </div>
+                <div class="up-model-meta">
+                  <span class="up-model-k">温度</span>
+                  <el-input-number
+                    v-model="currentAnalyzeModel.temperature"
+                    :min="0" :max="2" :step="0.1"
+                    size="small" controls-position="right"
+                    class="up-num" style="width: 78px"
+                    @change="saveModelConfig(currentAnalyzeModel)"
+                  />
+                  <span class="up-model-k">Token</span>
+                  <el-input-number
+                    v-model="currentAnalyzeModel.max_tokens"
+                    :min="100" :max="32000" :step="200"
+                    size="small" controls-position="right"
+                    class="up-num" style="width: 92px"
+                    @change="saveModelConfig(currentAnalyzeModel)"
+                  />
+                </div>
+                <div class="up-model-api">{{ currentAnalyzeModel.api_base || '-' }}</div>
               </div>
             </div>
 
-            <el-form-item label="用例生成模型">
-              <el-select v-model="form.genConfigId" placeholder="选择生成模型" style="width: 100%">
+            <div class="form-field">
+              <div class="form-label"><span>用例生成模型</span></div>
+              <el-select v-model="form.genConfigId" placeholder="选择生成模型" class="form-ctl">
                 <el-option
                   v-for="config in aiConfigs"
                   :key="config.id"
@@ -157,44 +148,40 @@
                   :value="config.id"
                 />
               </el-select>
-            </el-form-item>
-            <div v-if="currentGenModel" class="model-preview-card">
-              <div class="model-preview-row">
-                <span class="model-preview-value model-preview-name">{{ currentGenModel.model || '-' }}</span>
-                <el-button v-if="!editingGenModel" link type="primary" size="small" :icon="Edit" @click="editingGenModel = true" />
-                <el-input
-                  v-if="editingGenModel"
-                  v-model="currentGenModel.model"
-                  size="small"
-                  style="width: 160px"
-                  @blur="editingGenModel = false; saveModelConfig(currentGenModel)"
-                />
-              </div>
-              <div class="model-preview-divider" />
-              <div class="model-preview-row">
-                <span class="model-preview-label">温度</span>
-                <el-input-number
-                  v-model="currentGenModel.temperature"
-                  :min="0" :max="2" :step="0.1"
-                  size="small" controls-position="right"
-                  style="width: 100px"
-                  @change="saveModelConfig(currentGenModel)"
-                />
-                <span class="model-preview-label" style="margin-left:16px">Token</span>
-                <el-input-number
-                  v-model="currentGenModel.max_tokens"
-                  :min="100" :max="32000" :step="200"
-                  size="small" controls-position="right"
-                  style="width: 120px"
-                  @change="saveModelConfig(currentGenModel)"
-                />
-              </div>
-              <div class="model-preview-row">
-                <span class="model-preview-label">API</span>
-                <span class="model-preview-value model-preview-url">{{ currentGenModel.api_base || '-' }}</span>
+              <div v-if="currentGenModel" class="up-model">
+                <div class="up-model-head">
+                  <span class="up-model-name">{{ currentGenModel.model || '-' }}</span>
+                  <el-input
+                    v-if="editingGenModel"
+                    v-model="currentGenModel.model"
+                    size="small"
+                    class="up-model-input"
+                    @blur="editingGenModel = false; saveModelConfig(currentGenModel)"
+                  />
+                  <button v-else type="button" class="up-model-act" @click="editingGenModel = true">编辑</button>
+                </div>
+                <div class="up-model-meta">
+                  <span class="up-model-k">温度</span>
+                  <el-input-number
+                    v-model="currentGenModel.temperature"
+                    :min="0" :max="2" :step="0.1"
+                    size="small" controls-position="right"
+                    class="up-num" style="width: 78px"
+                    @change="saveModelConfig(currentGenModel)"
+                  />
+                  <span class="up-model-k">Token</span>
+                  <el-input-number
+                    v-model="currentGenModel.max_tokens"
+                    :min="100" :max="32000" :step="200"
+                    size="small" controls-position="right"
+                    class="up-num" style="width: 92px"
+                    @change="saveModelConfig(currentGenModel)"
+                  />
+                </div>
+                <div class="up-model-api">{{ currentGenModel.api_base || '-' }}</div>
               </div>
             </div>
-          </el-form>
+          </div>
         </div>
 
         <div class="upload-panel">
@@ -203,6 +190,7 @@
             drag
             action="#"
             :auto-upload="false"
+            :show-file-list="false"
             :on-change="handleFileChange"
             :on-remove="handleFileRemove"
             :file-list="fileList"
@@ -228,11 +216,11 @@
             <div
               v-for="(file, index) in fileList"
               :key="file.uid"
-              class="file-preview-item"
+              :class="['file-preview-item', { 'is-doc': !isImageFile(file) }]"
             >
               <img v-if="isImageFile(file)" :src="file.url" />
               <div v-else class="file-doc-preview">
-                <el-icon :size="28"><Document /></el-icon>
+                <el-icon :size="16"><Document /></el-icon>
                 <span>{{ file.name }}</span>
               </div>
               <span class="file-preview-badge" @click="removeFile(index)">&times;</span>
@@ -241,66 +229,74 @@
         </div>
       </div>
 
-      <div class="action-buttons">
-        <el-button @click="openDescDialog" :disabled="fileList.length === 0" class="btn-secondary">
-          填写功能介绍
-        </el-button>
+      <!-- 底栏：原来四个按钮并排、四种颜色（灰/蓝/白/米），谁是主行动看不出来。
+           现在只有一个蓝，另外三个降成文字；「查看列表」是被主行动带出来的出口，不该长成按钮。 -->
+      <div class="action-bar">
+        <div class="action-secondary">
+          <button type="button" class="text-act" :disabled="fileList.length === 0" @click="openDescDialog">填写功能介绍</button>
+          <span class="act-sep">·</span>
+          <button type="button" class="text-act" :disabled="!form.projectId" @click="goToCases">查看用例列表</button>
+          <span class="act-sep">·</span>
+          <button type="button" class="text-act" :disabled="!form.projectId" @click="goToModules">查看模块列表</button>
+        </div>
         <el-button type="primary" @click="generateCases" :loading="generating" :disabled="!canGenerate">
           生成测试用例
-        </el-button>
-        <el-button @click="goToCases" :disabled="!form.projectId" class="btn-secondary">
-          查看用例列表
-        </el-button>
-        <el-button type="warning" @click="goToModules" :disabled="!form.projectId">
-          查看模块列表
         </el-button>
       </div>
     </el-card>
 
     <el-card v-if="uploadMode === 'knowledge'" class="knowledge-card">
-      <template #header>
-        <div class="card-header">
-          <span>测试知识库</span>
-          <div class="header-actions">
-            <el-select v-model="knowledgeProjectId" placeholder="选择项目" class="project-select" @change="loadKnowledgeFiles">
-              <el-option
-                v-for="p in projects"
-                :key="p.id"
-                :label="p.name"
-                :value="p.id"
-              />
-            </el-select>
-            <el-upload
-              :show-file-list="false"
-              :before-upload="handleKnowledgeUpload"
-              :disabled="!knowledgeProjectId"
-              accept=".md,.txt,.docx,.doc"
-            >
-              <el-button type="primary" :disabled="!knowledgeProjectId" :loading="knowledgeUploading">
-                上传知识文件
-              </el-button>
-            </el-upload>
-          </div>
-        </div>
-      </template>
+      <div class="kb-toolbar">
+        <el-select v-model="knowledgeProjectId" placeholder="选择项目" class="sel-project" @change="loadKnowledgeFiles">
+          <el-option
+            v-for="p in projects"
+            :key="p.id"
+            :label="p.name"
+            :value="p.id"
+          />
+        </el-select>
+        <span v-if="knowledgeFiles.length" class="kb-count">{{ knowledgeFiles.length }} 个文件</span>
+        <span class="kb-spacer"></span>
+        <el-upload
+          :show-file-list="false"
+          :before-upload="handleKnowledgeUpload"
+          :disabled="!knowledgeProjectId"
+          accept=".md,.txt,.docx,.doc"
+        >
+          <el-button type="primary" :disabled="!knowledgeProjectId" :loading="knowledgeUploading">
+            上传知识文件
+          </el-button>
+        </el-upload>
+      </div>
 
-      <el-table :data="knowledgeFiles" v-loading="kbFilesLoading" style="width:100%">
-        <el-table-column prop="original_name" label="文件名" min-width="200" />
-        <el-table-column label="大小" width="120">
-          <template #default="{ row }">{{ formatSize(row.file_size) }}</template>
-        </el-table-column>
-        <el-table-column label="上传时间" width="180">
-          <template #default="{ row }">{{ row.created_at }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="200">
-          <template #default="{ row }">
-            <el-button text @click="viewKnowledgeFile(row)">查看</el-button>
-            <el-button text type="danger" @click="deleteKnowledgeFile(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+      <!-- 空时只留空态：表格自带的「暂无数据」会和下面的 el-empty 叠成两块 -->
+      <div v-if="knowledgeFiles.length" class="flat-table">
+        <el-table :data="knowledgeFiles" v-loading="kbFilesLoading" style="width:100%">
+          <el-table-column prop="original_name" label="文件名" min-width="240">
+            <template #default="{ row }">
+              <span class="list-cell-strong">{{ row.original_name }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="大小" width="110">
+            <template #default="{ row }">
+              <span class="list-cell-muted">{{ formatSize(row.file_size) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="上传时间" width="150">
+            <template #default="{ row }">
+              <span class="list-cell-muted">{{ formatTime(row.created_at) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="120">
+            <template #default="{ row }">
+              <button type="button" class="list-act" @click="viewKnowledgeFile(row)">查看</button>
+              <button type="button" class="list-act is-danger" @click="deleteKnowledgeFile(row)">删除</button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
 
-      <el-empty v-if="!kbFilesLoading && knowledgeFiles.length === 0" description="暂无知识文件，请上传" />
+      <el-empty v-if="!kbFilesLoading && knowledgeFiles.length === 0" description="暂无知识文件，先选项目再上传" :image-size="54" />
     </el-card>
 
     <el-dialog v-if="uploadMode === 'knowledge'" v-model="showKnowledgeViewer" title="文件内容" width="700px" top="2vh">
@@ -330,34 +326,53 @@
       </div>
     </el-dialog>
 
-    <el-dialog v-model="showCreateProject" title="新建项目" width="500px">
-      <el-form :model="newProject" label-width="100px">
-        <el-form-item label="项目名称">
-          <el-input v-model="newProject.name" placeholder="请输入项目名称" />
-        </el-form-item>
-        <el-form-item label="项目描述">
-          <el-input v-model="newProject.description" type="textarea" placeholder="请输入项目描述" />
-        </el-form-item>
-      </el-form>
+    <!-- 两个新建弹窗与配置区同一套字段写法：标签在上、下划线输入、无盒子 -->
+    <el-dialog v-model="showCreateProject" title="新建项目" width="460px" class="dlg is-plain">
+      <div class="form-block">
+        <div class="form-field">
+          <div class="form-label"><span>项目名称</span></div>
+          <el-input v-model="newProject.name" class="form-input" placeholder="例如：测试资产平台" />
+        </div>
+        <div class="form-field">
+          <div class="form-label"><span>项目描述</span></div>
+          <el-input
+            v-model="newProject.description"
+            type="textarea"
+            :rows="3"
+            class="form-textarea"
+            placeholder="一句话说明这个项目测什么"
+          />
+        </div>
+      </div>
       <template #footer>
-        <el-button @click="showCreateProject = false">取消</el-button>
-        <el-button type="primary" @click="createProject">确定</el-button>
+        <div class="dlg-foot">
+          <span class="dlg-foot-note">项目下可以再建迭代</span>
+          <div class="dlg-foot-actions">
+            <el-button @click="showCreateProject = false">取消</el-button>
+            <el-button type="primary" @click="createProject">创建项目</el-button>
+          </div>
+        </div>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showCreateSprint" title="新建迭代" width="400px">
-      <el-form :model="newSprint" label-width="100px">
-        <el-form-item label="迭代名称">
-          <el-input v-model="newSprint.name" placeholder="如 v1.0、sprint-3" />
-        </el-form-item>
-      </el-form>
+    <el-dialog v-model="showCreateSprint" title="新建迭代" width="420px" class="dlg is-plain">
+      <div class="form-block">
+        <div class="form-field">
+          <div class="form-label"><span>迭代名称</span></div>
+          <el-input v-model="newSprint.name" class="form-input" placeholder="如 v1.0、sprint-3" />
+        </div>
+      </div>
       <template #footer>
-        <el-button @click="showCreateSprint = false">取消</el-button>
-        <el-button type="primary" @click="createSprint">确定</el-button>
+        <div class="dlg-foot">
+          <div class="dlg-foot-actions">
+            <el-button @click="showCreateSprint = false">取消</el-button>
+            <el-button type="primary" @click="createSprint">创建迭代</el-button>
+          </div>
+        </div>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showDescDialog" title="填写功能介绍" width="1400px" top="3vh" :close-on-click-modal="false">
+    <el-dialog v-model="showDescDialog" title="填写功能介绍" width="1160px" top="5vh" class="desc-dialog" :close-on-click-modal="false">
       <div class="desc-layout" v-if="fileList.length > 0">
         <div class="desc-image-panel">
           <div v-if="isImageFile(currentFile)" class="desc-image-viewer"
@@ -405,14 +420,14 @@
               </div>
             </template>
           </div>
-          <div class="desc-image-info">
-            {{ currentFileIndex + 1 }} / {{ fileList.length }}
-          </div>
-          <div class="desc-zoom-controls" v-if="isImageFile(currentFile)">
-            <el-button circle size="small" @click="descZoomOut">-</el-button>
-            <span>{{ Math.round(descImageScale * 100) }}%</span>
-            <el-button circle size="small" @click="descZoomIn">+</el-button>
-            <el-button size="small" @click="descImageScale = 1; descDragOffset = { x: 0, y: 0 }">重置</el-button>
+          <div class="desc-toolbar">
+            <span class="desc-image-info">{{ currentFileIndex + 1 }} / {{ fileList.length }}</span>
+            <div class="desc-zoom-controls" v-if="isImageFile(currentFile)">
+              <button type="button" class="desc-zoom-btn" @click="descZoomOut">−</button>
+              <span class="desc-zoom-value">{{ Math.round(descImageScale * 100) }}%</span>
+              <button type="button" class="desc-zoom-btn" @click="descZoomIn">＋</button>
+              <button type="button" class="desc-zoom-reset" @click="descImageScale = 1; descDragOffset = { x: 0, y: 0 }">重置</button>
+            </div>
           </div>
         </div>
         <div class="desc-form-panel">
@@ -429,10 +444,10 @@
       <template #footer>
         <div class="desc-footer">
           <div class="desc-footer-left">
-            <el-button type="warning" @click="startCrop" :disabled="!isImageFile(currentFile)">框选原图</el-button>
-            <el-button type="warning" @click="startAnnotation" :disabled="!isImageFile(currentFile)">标注交互</el-button>
+            <el-button @click="startCrop" :disabled="!isImageFile(currentFile)">框选原图</el-button>
+            <el-button @click="startAnnotation" :disabled="!isImageFile(currentFile)">标注交互</el-button>
           </div>
-          <el-button @click="showDescDialog = false">完成</el-button>
+          <el-button type="primary" @click="showDescDialog = false">完成</el-button>
         </div>
       </template>
       <div v-if="isCropping" class="crop-fullscreen" @click.self="cancelCrop">
@@ -459,6 +474,11 @@
       <div v-if="isAnnotating" class="crop-fullscreen annotation-mode">
         <div class="annotation-layout">
           <div class="annotation-paths">
+            <!-- 这个模式里「路径」是最容易理解错的概念，先用一句话说明它是什么 -->
+            <div class="ann-head">
+              <span class="ann-title">交互路径</span>
+              <span class="ann-hint">一条路径 = 一次完整操作流程，按步骤顺序识别元素</span>
+            </div>
             <div v-for="(path, pi) in interactionPaths" :key="pi" class="path-section">
               <div class="path-header">
                 <span class="path-label">{{ path.name || '路径'+(pi+1) }}</span>
@@ -485,7 +505,7 @@
                 <el-button size="small" type="primary" @click="runAIAnnotation(pi)" :loading="annotating">AI 识别</el-button>
               </div>
             </div>
-            <el-button size="small" type="warning" @click="addPath" style="width:100%;margin-top:8px">+ 添加路径</el-button>
+            <el-button size="small" text class="ann-add-path" @click="addPath">＋ 添加路径</el-button>
           </div>
           <div class="annotation-image">
             <div class="desc-image-viewer" style="flex:1;border-radius:10px;background:#fff"
@@ -518,109 +538,70 @@
         </div>
         <div class="crop-fullscreen-bar">
           <el-button @click="clearAllAnnotations" :disabled="isAnnotateEmpty">清空</el-button>
-          <el-button @click="isAnnotating = false">完成</el-button>
+          <el-button type="primary" @click="isAnnotating = false">完成标注</el-button>
         </div>
       </div>
     </el-dialog>
 
-    <el-dialog v-model="showModuleReview" title="模块审核" width="1400px" top="2vh" :close-on-click-modal="false">
-      <div v-if="modules.length > 0" class="module-review-layout">
-        <div class="module-review-image-panel">
-          <div class="module-image-viewer"
-               @wheel="handleModuleZoom"
-               @mousedown="startModuleDrag"
-               @mousemove="onModuleDrag"
-               @mouseup="endModuleDrag"
-               @mouseleave="endModuleDrag">
+    <el-dialog v-model="showModuleReview" class="dlg" width="min(1120px, 94vw)" top="4vh" :close-on-click-modal="false">
+      <template #header>
+        <div class="el-dialog__title">模块审核</div>
+        <div class="dlg-sub">AI 拆分出 {{ modules.length }} 个模块 · 逐个确认后一起生成用例</div>
+      </template>
+
+      <div v-if="modules.length > 0" class="dlg-split">
+        <div class="dlg-viewer">
+          <div
+            class="dlg-stage"
+            @wheel="handleModuleZoom"
+            @mousedown="startModuleDrag"
+            @mousemove="onModuleDrag"
+            @mouseup="endModuleDrag"
+            @mouseleave="endModuleDrag"
+          >
             <img
+              v-if="getFilePreviewUrl(0)"
               :src="getFilePreviewUrl(0)"
               :style="{
                 transform: `scale(${moduleImageScale}) translate(${moduleDragOffset.x}px, ${moduleDragOffset.y}px)`,
-                cursor: moduleIsDragging ? 'grabbing' : moduleImageScale > 1 ? 'grab' : 'default',
-                maxWidth: '100%',
-                maxHeight: '100%',
-                objectFit: 'contain',
-                transition: 'transform 0.2s ease',
-                userSelect: 'none'
+                cursor: moduleIsDragging ? 'grabbing' : moduleImageScale > 1 ? 'grab' : 'default'
               }"
               draggable="false"
             />
+            <div v-else class="dlg-stage-empty">暂无预览图</div>
           </div>
-          <div class="module-zoom-controls" v-if="uploadMode === 'image'">
-            <el-button circle size="small" @click="moduleZoomOut">-</el-button>
-            <span>{{ Math.round(moduleImageScale * 100) }}%</span>
-            <el-button circle size="small" @click="moduleZoomIn">+</el-button>
-            <el-button size="small" @click="moduleImageScale = 1; moduleDragOffset = { x: 0, y: 0 }">重置</el-button>
+          <div v-if="uploadMode === 'image' && getFilePreviewUrl(0)" class="dlg-zoom">
+            <button type="button" class="zoom-btn" title="缩小" @click="moduleZoomOut">−</button>
+            <span class="dlg-zoom-val">{{ Math.round(moduleImageScale * 100) }}%</span>
+            <button type="button" class="zoom-btn" title="放大" @click="moduleZoomIn">＋</button>
+            <button type="button" class="zoom-reset" @click="moduleImageScale = 1; moduleDragOffset = { x: 0, y: 0 }">重置</button>
           </div>
         </div>
-        <div class="module-review-form-panel">
-          <div class="module-progress">
-            <span class="progress-text">模块 {{ currentModuleIndex + 1 }} / {{ modules.length }}</span>
-            <el-button size="small" :disabled="currentModuleIndex <= 0" @click="prevModule">上一个</el-button>
-            <el-button size="small" :disabled="currentModuleIndex >= moduleForms.length - 1" @click="nextModule">下一个</el-button>
+
+        <div class="dlg-panel">
+          <div class="dlg-bar">
+            <span class="dlg-bar-text">第 <b>{{ currentModuleIndex + 1 }}</b> / {{ modules.length }} 个模块</span>
+            <div class="dlg-bar-nav">
+              <button type="button" class="dlg-nav" :disabled="currentModuleIndex <= 0" @click="prevModule">上一个</button>
+              <button type="button" class="dlg-nav" :disabled="currentModuleIndex >= moduleForms.length - 1" @click="nextModule">下一个</button>
+            </div>
           </div>
-          <el-form v-if="moduleForms[currentModuleIndex]" label-width="120px" class="module-form">
-            <el-form-item label="模块名称">
-              <el-input v-model="moduleForms[currentModuleIndex].module" />
-            </el-form-item>
-            <el-form-item label="UI元素">
-              <el-input v-model="moduleForms[currentModuleIndex].ui_elements" placeholder="用逗号分隔，如：按钮、输入框、下拉菜单" />
-            </el-form-item>
-            <el-form-item label="功能描述">
-              <el-input v-model="moduleForms[currentModuleIndex].function_description" type="textarea" :rows="4" />
-            </el-form-item>
-            <el-form-item label="交互流程">
-              <el-input v-model="moduleForms[currentModuleIndex].interaction_flow" type="textarea" :rows="3" />
-            </el-form-item>
-            <el-form-item label="测试关注点">
-              <el-input v-model="moduleForms[currentModuleIndex].test_focus" type="textarea" :rows="3" placeholder="用逗号分隔" />
-            </el-form-item>
-            <el-form-item label="用例类型">
-              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                <el-checkbox-group v-model="moduleForms[currentModuleIndex].case_types" :disabled="moduleForms[currentModuleIndex].smart_case_type">
-                  <el-checkbox label="functional">功能测试</el-checkbox>
-                  <el-checkbox label="ui">UI交互测试</el-checkbox>
-                  <el-checkbox label="boundary">边界值测试</el-checkbox>
-                  <el-checkbox label="exception">异常场景测试</el-checkbox>
-                </el-checkbox-group>
-                <el-switch
-                  v-model="moduleForms[currentModuleIndex].smart_case_type"
-                  active-text="智能"
-                  style="margin-left: 12px"
-                />
-              </div>
-            </el-form-item>
-            <el-form-item label="生成数量">
-              <el-input-number
-                v-model="moduleForms[currentModuleIndex].case_count"
-                :min="1"
-                :max="50"
-                :step="1"
-                :disabled="moduleForms[currentModuleIndex].smart_mode"
-              />
-              <el-switch
-                v-model="moduleForms[currentModuleIndex].smart_mode"
-                active-text="智能"
-                style="margin-left: 12px"
-              />
-            </el-form-item>
-            <el-form-item label="附带原图">
-              <el-switch
-                v-model="moduleForms[currentModuleIndex].use_vision"
-                :disabled="!genModelSupportsVision"
-              />
-              <span class="form-hint" style="margin-left:8px;color:#909399;font-size:12px">
-                {{ genModelSupportsVision ? '附带原图可提升用例质量' : '当前模型不支持图片分析' }}
-              </span>
-            </el-form-item>
-          </el-form>
-          <el-empty v-else description="暂无模块数据" />
+          <div class="dlg-scroll">
+            <ModuleFields
+              v-if="moduleForms[currentModuleIndex]"
+              v-model="moduleForms[currentModuleIndex]"
+              mode="generate"
+              :vision-supported="genModelSupportsVision"
+            />
+          </div>
         </div>
       </div>
-      <el-empty v-else description="AI分析中或分析失败，请重试" />
+      <div v-else class="dlg-empty">AI 分析中或分析失败，请重试</div>
+
       <template #footer>
-        <div class="review-footer">
-          <div class="review-actions">
+        <div class="dlg-foot">
+          <span class="dlg-foot-note">生成期间请勿关闭页面，完成后到用例列表审批</span>
+          <div class="dlg-foot-actions">
             <el-button @click="showModuleReview = false">取消</el-button>
             <el-button type="primary" @click="confirmModules" :loading="confirming" :disabled="modules.length === 0">
               确认并生成用例
@@ -632,42 +613,40 @@
 
     <el-dialog
       v-model="showModuleApproval"
-      title="审批模块"
-      width="800px"
-      top="8vh"
+      class="dlg"
+      width="min(720px, 92vw)"
+      top="6vh"
       :close-on-click-modal="false"
     >
-      <div v-if="pendingModules.length > 0 && pendingModules[currentModuleApprovalIndex]" class="review-layout">
-        <el-form label-width="100px">
-          <el-form-item label="模块名称">
-            <el-input v-model="pendingModules[currentModuleApprovalIndex].module" />
-          </el-form-item>
-          <el-form-item label="UI元素">
-            <el-input v-model="pendingModules[currentModuleApprovalIndex].ui_elements" />
-          </el-form-item>
-          <el-form-item label="功能描述">
-            <el-input v-model="pendingModules[currentModuleApprovalIndex].function_description" type="textarea" :rows="3" />
-          </el-form-item>
-          <el-form-item label="交互流程">
-            <el-input v-model="pendingModules[currentModuleApprovalIndex].interaction_flow" type="textarea" :rows="3" />
-          </el-form-item>
-          <el-form-item label="测试关注点">
-            <el-input v-model="pendingModules[currentModuleApprovalIndex].test_focus" type="textarea" :rows="2" />
-          </el-form-item>
-        </el-form>
+      <template #header>
+        <div class="el-dialog__title">审批模块</div>
+        <div class="dlg-sub">通过后这个模块会进入模块库，可用来生成用例</div>
+      </template>
+
+      <div
+        v-if="pendingModules.length > 0 && pendingModules[currentModuleApprovalIndex]"
+        class="dlg-panel is-solo"
+      >
+        <div class="dlg-bar">
+          <span class="dlg-bar-text">第 <b>{{ currentModuleApprovalIndex + 1 }}</b> / {{ pendingModules.length }} 个待审</span>
+          <div class="dlg-bar-nav">
+            <button type="button" class="dlg-nav" :disabled="currentModuleApprovalIndex <= 0" @click="moveToPrevPendingModule">上一个</button>
+            <button type="button" class="dlg-nav" :disabled="currentModuleApprovalIndex >= pendingModules.length - 1" @click="moveToNextPendingModuleManual">下一个</button>
+          </div>
+        </div>
+        <div class="dlg-scroll">
+          <ModuleFields v-model="pendingModules[currentModuleApprovalIndex]" />
+        </div>
       </div>
-      <el-empty v-else description="没有待审模块" />
+      <div v-else class="dlg-empty">没有待审模块</div>
 
       <template #footer>
-        <div class="review-footer">
-          <span class="progress-info">
-            <el-button size="small" :disabled="currentModuleApprovalIndex <= 0" @click="moveToPrevPendingModule">上一个</el-button>
-            审批进度: {{ pendingModules.length > 0 ? currentModuleApprovalIndex + 1 : 0 }} / {{ pendingModules.length }}
-            <el-button size="small" :disabled="currentModuleApprovalIndex >= pendingModules.length - 1" @click="moveToNextPendingModuleManual">下一个</el-button>
-          </span>
-          <div class="review-actions">
-            <el-button type="danger" @click="handleModuleFail" :loading="moduleApprovalFailing">不通过</el-button>
-            <el-button type="success" @click="handleModuleApprove" :loading="moduleApprovalPassing">通过</el-button>
+        <div class="dlg-foot">
+          <span class="dlg-foot-note">「不通过」只把模块标记为废弃，不改动内容</span>
+          <div class="dlg-foot-actions">
+            <el-button @click="showModuleApproval = false">取消</el-button>
+            <el-button type="danger" plain @click="handleModuleFail" :loading="moduleApprovalFailing">不通过</el-button>
+            <el-button type="primary" @click="handleModuleApprove" :loading="moduleApprovalPassing">通过</el-button>
           </div>
         </div>
       </template>
@@ -679,7 +658,8 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, Plus, PictureFilled, Document, Edit, Loading, Delete, Close, Collection, Monitor, Operation, ArrowRight } from '@element-plus/icons-vue'
+import { UploadFilled, PictureFilled, Document, Loading, Delete, Close, Operation } from '@element-plus/icons-vue'
+import ModuleFields from '../components/ModuleFields.vue'
 import api from '../api'
 
 const router = useRouter()
@@ -791,6 +771,27 @@ const approvalRate = computed(() => {
   if (total === 0) return '0%'
   return Math.round(statusCount.value.approved / total * 100) + '%'
 })
+
+// 页头文案跟着模式走：三种模式原来共用一句「上传Figma设计图」当卡片标题，
+// 切到文档模式也不变，得靠看上传区才知道自己在哪一档。
+const HEAD_COPY = {
+  image: {
+    eyebrow: '测试资产 · PROTOTYPE',
+    title: '上传原型图',
+    desc: '拖进 Figma 导出的页面图，AI 先拆出模块，审批通过后再生成测试用例。'
+  },
+  doc: {
+    eyebrow: '测试资产 · DOCUMENT',
+    title: '上传接口文档',
+    desc: '支持 Word 与 Markdown，按章节拆模块，和原型图走同一套审批流程。'
+  },
+  knowledge: {
+    eyebrow: '测试资产 · KNOWLEDGE',
+    title: '知识库',
+    desc: '沉淀的规范与业务资料，生成用例时会作为检索依据带上。'
+  }
+}
+const headCopy = computed(() => HEAD_COPY[uploadMode.value] || HEAD_COPY.image)
 
 const filteredAIConfigs = computed(() => {
   return aiConfigs.value.filter(c => c.supports_vision !== false)
@@ -1626,6 +1627,18 @@ function formatSize(bytes) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
 }
 
+// 后端给的是 ISO 字符串（2026-07-09T06:31:31.002457），直接铺进表格会断成两行
+function formatTime(isoString) {
+  if (!isoString) return ''
+  const d = new Date(isoString)
+  if (Number.isNaN(d.getTime())) return isoString
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${mm}-${dd} ${hh}:${mi}`
+}
+
 async function loadKnowledgeFiles() {
   if (!knowledgeProjectId.value) return
   kbFilesLoading.value = true
@@ -1690,119 +1703,183 @@ async function deleteKnowledgeFile(row) {
   margin: 0 auto;
 }
 
-.status-bar {
+/* ---------- 页头 ---------- */
+.upload-head {
   display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 32px;
-  margin-bottom: 24px;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 40px;
+  padding-bottom: 20px;
 }
-
-.status-item {
-  text-align: center;
-}
-
-.status-num {
-  font-size: 28px;
+.upload-head-main { min-width: 0; }
+.upload-title {
+  margin: 5px 0 0;
+  font-size: 21px;
+  line-height: 1.25;
   font-weight: 600;
-  color: #1d1d1f;
-  letter-spacing: -1px;
+  letter-spacing: -.02em;
+  color: var(--ink);
+}
+.upload-sub {
+  margin: 7px 0 0;
+  max-width: 560px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* 四个计数：数字仍是最重的一层，但只到 17px；标签退到 11px */
+.upload-stats {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 28px;
+  padding-bottom: 1px;
+}
+.stat { text-align: right; }
+.stat-num {
   display: block;
-  transition: transform 0.2s, color 0.2s;
+  font-size: 17px;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
-
-.status-item:hover .status-num {
-  transform: scale(1.1);
-  color: #0071e3;
-}
-
-.status-label {
-  font-size: 10px;
-  color: #86868b;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  font-weight: 500;
-  margin-top: 2px;
+.stat-label {
   display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
-.status-divider {
-  width: 0.5px;
-  height: 36px;
-  background: rgba(0, 0, 0, 0.12);
-}
-
+/* ---------- 模式切换：下划线 tab ---------- */
 .mode-tabs {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 20px;
+  align-items: center;
+  gap: 28px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 18px;
 }
-
 .mode-tab {
+  position: relative;
+  padding: 0 0 11px;
+  border: 0;
+  background: none;
+  font-size: 13.5px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .14s ease;
+}
+.mode-tab:hover { color: var(--ink); }
+.mode-tab.is-on { color: var(--ink); font-weight: 600; }
+.mode-tab.is-on::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+}
+.mode-spacer { margin-left: auto; }
+.mode-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 9px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .14s ease;
+}
+.mode-jump:hover { color: var(--accent); }
+.jump-arrow { font-size: 11px; transform: translateY(-1px); }
+
+/* ---------- 自动化工具入口：浅底一行 ---------- */
+.tool-entry {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 24px;
-  border-radius: 12px;
-  background: #fff;
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  gap: 12px;
+  width: 100%;
+  margin: 0 0 16px;
+  padding: 11px 14px;
+  background: #fafbfc;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  text-align: left;
   cursor: pointer;
-  font-size: 14px;
-  font-weight: 500;
-  color: #86868b;
-  transition: all 0.25s;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+  transition: background .14s ease, border-color .14s ease;
 }
-
-.tool-entry { display:flex; align-items:center; gap:16px; margin:-4px 0 20px; padding:16px 20px; background:#fff; border:1px solid #e4e7ed; border-radius:14px; cursor:pointer; box-shadow:0 1px 2px rgba(16,24,40,.04); transition:border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
-.tool-entry:hover, .tool-entry:focus-visible { border-color:#c9dcf8; box-shadow:0 6px 20px rgba(0,113,227,.10); transform:translateY(-1px); outline:none; }
-.tool-entry-icon { flex-shrink:0; width:40px; height:40px; border-radius:11px; background:linear-gradient(135deg,#0a84ff,#0071e3); color:#fff; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 12px rgba(0,113,227,.25); }
-.tool-entry-text { flex:1; min-width:0; }
-.tool-entry-title { font-size:15px; font-weight:700; color:#1d1d1f; }
-.tool-entry-desc { margin-top:3px; font-size:12.5px; color:#6e6e73; line-height:1.5; }
-.tool-entry-arrow { color:#a1a1a6; transition:transform .18s ease, color .18s ease; }
-.tool-entry:hover .tool-entry-arrow { color:#0071e3; transform:translateX(3px); }
-
-.mode-tab:hover {
-  border-color: rgba(0, 0, 0, 0.12);
-  color: #1d1d1f;
-}
-
-.mode-tab.active {
-  background: #0071e3;
-  border-color: #0071e3;
-  color: #fff;
-  box-shadow: 0 4px 12px rgba(0, 113, 227, 0.25);
-}
-
-.upload-card {
-  border-radius: 16px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04), 0 12px 32px rgba(0, 0, 0, 0.08);
-  border: 1px solid rgba(0, 0, 0, 0.06);
+.tool-entry:hover { background: #f5f7fa; border-color: #d9dfe7; }
+.tool-entry:focus-visible { outline: 2px solid rgba(0, 113, 227, .35); outline-offset: 1px; }
+.tool-entry-icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
   background: #fff;
+  border: 1px solid var(--line-soft);
+  color: var(--ink-2);
 }
+.tool-entry-body { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 12px; }
+.tool-entry-title { flex: none; font-size: 13px; font-weight: 600; color: var(--ink); }
+.tool-entry-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-entry-arrow {
+  flex: none;
+  font-size: 13px;
+  color: var(--faint);
+  transition: transform .14s ease, color .14s ease;
+}
+.tool-entry:hover .tool-entry-arrow { color: var(--accent); transform: translateX(3px); }
 
+/* 卡片：去掉投影，只留一条边。静止的容器不需要浮在页面上 */
+.upload-card,
 .knowledge-card {
-  border-radius: 16px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04), 0 12px 32px rgba(0, 0, 0, 0.08);
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: var(--radius-card);
+  border: 1px solid var(--line-soft);
+  box-shadow: none;
   background: #fff;
 }
 
-.upload-card :deep(.el-card__header),
-.knowledge-card :deep(.el-card__header) {
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-  padding: 20px 32px;
-}
-
-.upload-card :deep(.el-card__body) {
+.upload-card :deep(.el-card__body),
+.knowledge-card :deep(.el-card__body) {
   padding: 0;
 }
 
-.knowledge-card :deep(.el-card__body) {
-  padding: 24px;
+/* 知识库：卡内不再重复一遍标题，只留一条工具栏 */
+.kb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line-soft);
 }
+.kb-toolbar .el-select__wrapper {
+  min-height: 32px;
+  border-radius: var(--radius-ctl);
+  box-shadow: 0 0 0 1px var(--line-soft) inset;
+  font-size: 13px;
+}
+.kb-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.kb-spacer { margin-left: auto; }
+.knowledge-card :deep(.el-empty) { padding: 28px 0 32px; }
 
 .header-actions {
   display: flex;
@@ -1834,61 +1911,158 @@ async function deleteKnowledgeFile(row) {
   padding: 28px 32px 20px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
 }
 
+/* 区块标题：跟着 eyebrow 的尺寸走，不再是大写英文 + 1.5px 字距（中文受不了这个字距） */
 .section-title {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
-  color: #86868b;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
-  margin-bottom: 22px;
+  color: var(--muted);
+  letter-spacing: .02em;
+  margin-bottom: 16px;
 }
 
-.upload-form :deep(.el-form-item) {
-  margin-bottom: 20px;
+/* 配置区限宽：1024 堆叠布局下不把下拉拉到 800px 宽，读起来不散。
+   字段本身的写法在 styles/forms.css（.form-block / .form-field …）。 */
+.config-panel .form-block {
+  max-width: 560px;
+  padding-bottom: 14px;
 }
 
-.upload-form :deep(.el-form-item__label) {
-  font-size: 13px;
+/* 模型参数：字段的附属信息，淡底 + 零缩进，不再是一个带边框的灰盒子 */
+.up-model {
+  margin: 8px 0 4px;
+  padding: 9px 11px 10px;
+  background: #f8fafc;
+  border-radius: 8px;
 }
 
-.project-select-row {
+.up-model-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
+  min-height: 20px;
 }
 
-.new-project-btn {
-  color: #86868b !important;
-  padding: 0 12px !important;
-  flex-shrink: 0;
+.up-model-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.new-project-btn:hover {
-  color: #1d1d1f !important;
-  background: rgba(0, 0, 0, 0.04) !important;
+.up-model-act {
+  flex: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 11.5px;
+  color: #9aa3b1;
+  cursor: pointer;
+  transition: color .14s ease;
 }
 
-.form-hint {
-  margin-left: 10px;
-  color: #999;
+.up-model-act:hover {
+  color: var(--accent);
+}
+
+.up-model-input {
+  flex: none;
+  width: 190px;
+}
+
+.up-model-input :deep(.el-input__wrapper) {
+  height: 26px;
+  padding: 0 0 3px;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  border-bottom: 1px solid var(--accent);
+}
+
+.up-model-input :deep(.el-input__inner) {
+  font-family: var(--mono);
   font-size: 12px;
 }
 
+.up-model-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.up-model-k {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.up-num {
+  flex: none;
+}
+
+.up-num :deep(.el-input__wrapper) {
+  height: 26px;
+  padding: 0 6px;
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px var(--line-soft) inset;
+}
+
+.up-num :deep(.el-input__inner) {
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.up-num :deep(.el-input-number__decrease),
+.up-num :deep(.el-input-number__increase) {
+  background: transparent;
+  border-color: var(--line-faint);
+}
+
+.up-model-api {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #9aa3b1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 虚线框吃满右侧整列的高度：原来它固定 280 高、垂直居中，
+   卡片一变高下面就空出一大片。
+   注意 el-upload 在 drag 模式下多包了一层 .el-upload，只给 .el-upload-dragger
+   设 flex:1 是撑不开的，中间那层也得给。 */
 .upload-dragger {
   width: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.upload-dragger :deep(.el-upload) {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .upload-dragger :deep(.el-upload-dragger) {
+  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   border: 1.5px dashed rgba(0, 0, 0, 0.1);
   border-radius: 16px;
   background: #fafafa;
   transition: all 0.3s ease;
-  padding: 52px 24px;
-  min-height: 280px;
+  padding: 32px 24px;
+  min-height: 240px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1929,10 +2103,14 @@ async function deleteKnowledgeFile(row) {
 }
 
 .file-previews {
+  flex: none;          /* 有预览时不能让虚线框把它压扁 */
   display: flex;
   gap: 10px;
   margin-top: 16px;
   flex-wrap: wrap;
+  /* 文件多时在自己这格里滚，不把卡片顶高、也不让虚线框压到最小 */
+  max-height: 108px;
+  overflow-y: auto;
 }
 
 .file-preview-item {
@@ -1943,6 +2121,43 @@ async function deleteKnowledgeFile(row) {
   position: relative;
   border: 1px solid rgba(0, 0, 0, 0.08);
   background: #f5f5f7;
+}
+
+/* 文档不该塞进 72×72 的方块里：文件名被挤到 9px 还截断。
+   改成一行「图标 + 文件名」，宽度跟着内容走。 */
+.file-preview-item.is-doc {
+  width: auto;
+  max-width: 100%;
+  height: 40px;
+  padding: 0 26px 0 10px;
+  display: flex;
+  align-items: center;
+  background: #fafbfc;
+  border-color: var(--line-soft);
+  border-radius: var(--radius-ctl);
+  overflow: visible;
+}
+.file-preview-item.is-doc .file-doc-preview {
+  width: auto;
+  height: auto;
+  flex-direction: row;
+  gap: 8px;
+  color: var(--muted);
+}
+.file-preview-item.is-doc .file-doc-preview span {
+  max-width: 340px;
+  font-size: 12px;
+  line-height: 1.3;
+  text-align: left;
+  color: var(--ink-2);
+}
+.file-preview-item.is-doc .file-preview-badge {
+  top: 50%;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  margin-top: -9px;
+  font-size: 12px;
 }
 
 .file-preview-item img {
@@ -1994,50 +2209,52 @@ async function deleteKnowledgeFile(row) {
   background: rgba(0, 0, 0, 0.75);
 }
 
-.action-buttons {
+/* 底栏：左侧三个出口是文字，右侧只有一个蓝按钮 */
+.action-bar {
   display: flex;
-  justify-content: center;
-  gap: 12px;
-  padding: 20px 32px 28px;
-  border-top: 1px solid rgba(0, 0, 0, 0.05);
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--line-soft);
 }
-
-.action-buttons .el-button {
-  margin: 0;
-  padding: 12px 28px;
-  font-size: 14px;
+.action-secondary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
-
-.action-buttons .el-button--primary {
-  padding: 12px 36px;
-  font-size: 15px;
+.text-act {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .14s ease;
 }
-
-.action-buttons .el-button--primary:hover {
-  transform: translateY(-1px);
-}
-
-.btn-secondary {
-  background: #f5f5f7 !important;
-  border-color: rgba(0, 0, 0, 0.08) !important;
-  color: #1d1d1f !important;
-}
-
-.btn-secondary:hover {
-  background: #e8e8ed !important;
-}
+.text-act:not(:disabled):hover { color: var(--accent); }
+.text-act:disabled { color: #c9cfd8; cursor: default; }
+.act-sep { font-size: 11px; color: #dfe3e8; user-select: none; }
 
 .desc-layout {
   display: flex;
   gap: 20px;
-  height: 60vh;
+  height: min(62vh, 640px);
+}
+
+:is(.desc-dialog, .form-dialog) :deep(.el-dialog__title) {
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -.2px;
 }
 
 .desc-image-panel {
   width: 50%;
   display: flex;
   flex-direction: column;
-  background: #fafafa;
+  background: #f6f7f9;
   border-radius: 14px;
   padding: 12px;
   border: 0.5px solid rgba(0, 0, 0, 0.06);
@@ -2062,21 +2279,13 @@ async function deleteKnowledgeFile(row) {
   user-select: none;
 }
 
-.desc-zoom-controls {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 8px;
-  font-size: 13px;
-  color: #606266;
-}
-
+/* 底部操作区：一条细线把它和内容分开，否则按钮像浮在空白里 */
 .desc-footer {
   display: flex;
   justify-content: space-between;
   align-items: center;
   width: 100%;
+  padding-top: 2px;
 }
 
 .desc-footer-left {
@@ -2145,16 +2354,42 @@ async function deleteKnowledgeFile(row) {
   display: flex;
   flex-direction: column;
   background: #fff;
-  border-radius: 10px;
-  padding: 12px;
+  border-radius: 12px;
+  padding: 16px 18px;
   overflow-y: auto;
-  gap: 8px;
 }
 
+.ann-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 4px;
+}
+
+.ann-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: .02em;
+}
+
+.ann-hint {
+  font-size: 11.5px;
+  color: var(--faint);
+  line-height: 1.5;
+}
+
+/* 每条路径之间用一条线分开即可：白卡里再套灰块，
+   一层套一层反而看不出哪几条输入属于同一条路径 */
 .path-section {
-  background: #fafafa;
-  border-radius: 8px;
-  padding: 10px;
+  padding: 14px 0 4px;
+  border-bottom: 1px solid var(--line-faint);
+}
+
+.path-section:last-of-type {
+  border-bottom: 0;
 }
 
 .path-label {
@@ -2170,7 +2405,7 @@ async function deleteKnowledgeFile(row) {
 }
 
 .path-steps-section {
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .step-row {
@@ -2191,6 +2426,16 @@ async function deleteKnowledgeFile(row) {
   display: flex;
   gap: 8px;
   align-items: center;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+/* 整宽的 text 按钮会把文字挤到中间，看起来像另一个主操作 */
+.ann-add-path {
+  align-self: flex-start;
+  margin: 10px 0 2px;
+  padding-left: 0;
+  color: var(--muted);
 }
 
 .annotation-image {
@@ -2306,11 +2551,69 @@ async function deleteKnowledgeFile(row) {
   color: #1d1d1f;
 }
 
+/* 页码与缩放在同一行：页码贴左、缩放贴右。
+   原来两块各自居中堆叠，中间隔着 8px 空白，看着像掉出来的。 */
+.desc-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 4px 2px;
+}
+
 .desc-image-info {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: .02em;
+}
+
+.desc-zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+}
+
+.desc-zoom-btn {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+
+.desc-zoom-btn:hover {
+  background: rgba(0, 0, 0, .05);
+  color: var(--ink);
+}
+
+.desc-zoom-value {
+  min-width: 40px;
   text-align: center;
-  font-size: 12px;
-  color: #86868b;
-  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.desc-zoom-reset {
+  margin-left: 6px;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .14s ease;
+}
+
+.desc-zoom-reset:hover {
+  color: var(--accent);
 }
 
 .desc-form-panel {
@@ -2320,11 +2623,9 @@ async function deleteKnowledgeFile(row) {
 }
 
 .desc-form-label {
-  font-size: 14px;
-  font-weight: 600;
-  color: #1d1d1f;
-  margin-bottom: 12px;
-  letter-spacing: -0.2px;
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 8px;
 }
 
 .desc-form-panel .el-textarea {
@@ -2334,140 +2635,19 @@ async function deleteKnowledgeFile(row) {
 .desc-form-panel .el-textarea :deep(.el-textarea__inner) {
   height: 100% !important;
   border-radius: 10px;
-  font-size: 14px;
-  line-height: 1.7;
-  background: #f5f5f7;
-  border: 0.5px solid rgba(0, 0, 0, 0.08);
+  font-size: 13px;
+  line-height: 1.75;
+  padding: 14px 16px;
+  color: var(--ink-2);
+  background: #fbfcfd;
+  border: 1px solid var(--line-soft);
+  box-shadow: none;
 }
 
 .desc-form-panel .el-textarea :deep(.el-textarea__inner:focus) {
   background: #fff;
-  border-color: #0071e3;
-  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.1);
-}
-
-.module-review-layout {
-  display: flex;
-  gap: 20px;
-  height: 70vh;
-}
-
-.module-review-image-panel {
-  width: 45%;
-  display: flex;
-  flex-direction: column;
-  background: #f5f7fa;
-  border-radius: 6px;
-  padding: 12px;
-}
-
-.module-image-viewer {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #fff;
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.module-review-form-panel {
-  flex: 1;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.module-progress {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-}
-
-.progress-text {
-  font-weight: 500;
-  color: #409EFF;
-  margin-right: auto;
-}
-
-.module-form .el-form-item {
-  margin-bottom: 16px;
-}
-
-.module-zoom-controls {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 8px;
-  font-size: 13px;
-  color: #606266;
-}
-
-.model-preview-card {
-  margin: -4px 0 16px 100px;
-  padding: 12px 16px;
-  background: #fafbfc;
-  border-radius: 10px;
-  border: 1px solid rgba(0,0,0,0.08);
-  font-size: 13px;
-}
-
-.model-preview-row {
-  display: flex;
-  align-items: center;
-  margin-bottom: 6px;
-}
-.model-preview-row:last-child { margin-bottom: 0; }
-
-.model-preview-label {
-  color: #909399;
-  margin-right: 8px;
-  font-size: 12px;
-  flex-shrink: 0;
-}
-
-.model-preview-value {
-  color: #303133;
-  font-weight: 500;
-}
-
-.model-preview-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: #1d1d1f;
-  flex: 1;
-}
-
-.model-preview-url {
-  font-size: 11px;
-  color: #909399;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-
-.model-preview-divider {
-  height: 1px;
-  background: rgba(0,0,0,0.06);
-  margin: 6px 0;
-}
-
-.edit-icon {
-  margin-left: 6px;
-  cursor: pointer;
-  color: #909399;
-  font-size: 14px;
-}
-.edit-icon:hover { color: #0071e3; }
-
-.linked-analysis-bar {
-  margin: -8px 0 16px 100px;
-  display: flex;
-  align-items: center;
+  border-color: var(--accent);
+  box-shadow: none;
 }
 
 .progress-dialog :deep(.el-dialog) {
@@ -2519,15 +2699,35 @@ async function deleteKnowledgeFile(row) {
   50% { opacity: 0.05; }
 }
 
-.review-footer {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  width: 100%;
-}
+/* 窄屏（1366 的笔记本开两栏、或者窗口拖窄）：配置区与上传区上下堆叠，
+   否则左栏被压到 300px 以下，字段名和值会挤在一起 */
+@media (max-width: 1080px) {
+  .upload-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+  }
 
-.review-actions {
-  display: flex;
-  gap: 10px;
+  .upload-stats {
+    gap: 22px;
+  }
+
+  .stat {
+    text-align: left;
+  }
+
+  .card-body-layout {
+    flex-direction: column;
+  }
+
+  .config-panel {
+    border-right: 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .upload-panel {
+    min-height: 300px;
+    padding-top: 12px;
+  }
 }
 </style>

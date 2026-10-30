@@ -4,13 +4,13 @@
       <el-header v-if="!panelMode">
         <div class="header-content">
           <div class="brand" @click="$router.push('/')">
-            <svg class="brand-logo" viewBox="0 0 32 32" width="32" height="32">
-              <rect x="2" y="2" width="28" height="28" rx="7" fill="none" stroke="#ffffff" stroke-width="2"/>
-              <path d="M10 20V12l6 8V12" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              <circle cx="22" cy="16" r="2.5" fill="#60a5fa"/>
+            <svg class="brand-logo" viewBox="0 0 24 24" width="24" height="24">
+              <rect x="1.25" y="1.25" width="21.5" height="21.5" rx="5.5" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.25"/>
+              <path d="M7.5 15.5v-7l4.5 7v-7" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="16.5" cy="12" r="1.6" fill="#60a5fa"/>
             </svg>
             <span class="brand-name">AutoCase</span>
-            <span class="brand-divider">·</span>
+            <span class="brand-divider">/</span>
             <span class="brand-sub">Test Case Generator</span>
           </div>
           <el-button @click="$router.push('/settings')" text class="settings-btn">
@@ -48,22 +48,23 @@ watchEffect(() => {
 
 <style>
 #app {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family: var(--sans, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
 }
 
+/* 顶栏：一件深色横条压在页面上方就够，不加渐变之外的装饰。
+   去掉了阴影 —— 卡片上没有投影之后，顶栏下面一坨柔光反而显得脏。 */
 .el-header {
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  height: 72px;
+  background: linear-gradient(135deg, #191c23 0%, #171d2b 55%, #16233a 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, .07);
+  height: 56px;
   display: flex;
   align-items: center;
-  padding: 0 40px;
+  padding: 0 28px;
   position: sticky;
   top: 0;
   z-index: 100;
-  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.2);
 }
 
 .header-content {
@@ -86,22 +87,22 @@ watchEffect(() => {
 }
 
 .brand-name {
-  font-size: 20px;
+  font-size: 15px;
   font-weight: 600;
   color: #ffffff;
-  letter-spacing: -0.3px;
+  letter-spacing: .01em;
 }
 
 .brand-divider {
-  color: rgba(255, 255, 255, 0.3);
-  font-size: 18px;
+  color: rgba(255, 255, 255, .22);
+  font-size: 13px;
 }
 
 .brand-sub {
-  font-size: 13px;
-  color: rgba(255, 255, 255, 0.45);
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, .38);
   font-weight: 400;
-  letter-spacing: 0.2px;
+  letter-spacing: .02em;
 }
 
 .settings-btn {
@@ -119,8 +120,8 @@ watchEffect(() => {
 
 .el-main {
   background: #f5f7fa;
-  padding: 36px 32px;
-  min-height: calc(100vh - 72px);
+  padding: 28px;
+  min-height: calc(100vh - 56px);
 }
 
 /* 编排面板窗口：无顶部导航、无留白、高度锁死一屏 */
@@ -135,7 +136,11 @@ watchEffect(() => {
   overflow: hidden;
 }
 
-/* 全屏工作区：body 默认 8px margin 会造成 16px 溢出（右侧多一条空白 + 滚动条） */
+/* body 默认有 8px margin：不抹掉的话 #app 的 100vh 会多出 16px，
+   每个普通页面右侧都挂着一条空滚动条。原来只在 immersive 下修了。 */
+body { margin: 0; }
+
+/* 全屏工作区：锁掉 body 滚动，避免内部两列滚动时外层跟着晃 */
 body.immersive { margin: 0; overflow: hidden; }
 
 /* ========== 全局 Element Plus 组件样式统一 ========== */

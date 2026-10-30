@@ -840,9 +840,15 @@ def list_generations():
     project_id = request.args.get('project_id')
     if not project_id:
         return jsonify({'error': 'project_id required'}), 400
+    # 任务记录页需要更长的一段历史；脚本页只要最近几条用来判断有没有任务在跑。
+    try:
+        limit = int(request.args.get('limit', 20))
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, 200))
     generations = AutomationGeneration.query.filter_by(project_id=project_id).order_by(
         AutomationGeneration.created_at.desc()
-    ).limit(20).all()
+    ).limit(limit).all()
     return jsonify({'generations': [generation.to_dict(include_events=False) for generation in generations]}), 200
 
 

@@ -293,8 +293,8 @@ batchDeleteTestcases(ids) {
   generateAutomationFromCases(data) {
     return api.post('/automation/generate-from-cases', data, { timeout: 1900000 })
   },
-  getAutomationGenerations(projectId) {
-    return api.get('/automation/generations', { params: { project_id: projectId } })
+  getAutomationGenerations(projectId, limit = 20) {
+    return api.get('/automation/generations', { params: { project_id: projectId, limit } })
   },
   getAutomationGeneration(id, projectId) {
     return api.get(`/automation/generations/${id}`, { params: { project_id: projectId } })

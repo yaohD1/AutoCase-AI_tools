@@ -1,140 +1,167 @@
 <template>
-  <div class="scripts-page">
-    <div class="page-header">
-      <div>
-        <div class="eyebrow">OPENCODE PLAYWRIGHT WORKFLOW</div>
-        <h1>自动化脚本编写</h1>
-        <p>按需求生成时由 planner、generator、healer 完成探索、生成、执行和修复；按用例生成时跳过探索，直接把已审批用例写成脚本。</p>
+  <div class="scripts-page ui-buttons">
+    <!-- 页头：任务记录是一个独立出口（自己的页面），不再挂在配置卡下面当一张列表卡 -->
+    <header class="sp-head">
+      <div class="sp-head-main">
+        <div class="eyebrow">AGENT · OPENCODE</div>
+        <h1 class="sp-title">Agent 探索</h1>
+        <p class="sp-sub">给一段需求和一个真实页面，Agent 会自己打开浏览器探索、写出 Playwright 脚本，跑失败了自己修。</p>
       </div>
-      <el-button @click="$router.push('/')">返回首页</el-button>
-    </div>
+      <div class="sp-head-actions">
+        <el-button @click="goRecords">
+          <span v-if="runningCount" class="run-dot"></span>任务记录
+        </el-button>
+        <el-button text @click="$router.push('/')">返回首页</el-button>
+      </div>
+    </header>
 
-    <div class="main-layout">
-      <el-card class="panel-card">
-        <template #header>
-          <div class="section-header">
-            <span class="card-title">测试任务</span>
-            <el-segmented
-              :model-value="mode"
-              :options="[{ label: '按需求生成', value: 'requirement' }, { label: '按用例生成', value: 'cases' }]"
-              @change="onModeChange"
-            />
-          </div>
-        </template>
-        <el-form :model="form" label-position="top" class="task-form">
-          <el-form-item label="项目">
-            <el-select v-model="selectedProject" placeholder="选择项目" @change="onProjectChange" style="width:100%">
-              <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
-            </el-select>
-          </el-form-item>
+    <nav class="sp-tabs">
+      <button type="button" :class="['sp-tab', { 'is-on': mode === 'requirement' }]" @click="onModeChange('requirement')">按需求生成</button>
+      <button type="button" :class="['sp-tab', { 'is-on': mode === 'cases' }]" @click="onModeChange('cases')">按用例生成</button>
+      <span class="sp-tab-note">
+        {{ mode === 'requirement' ? 'planner 先探索页面，再交给 generator' : '跳过探索，把已审批用例直接写成脚本' }}
+      </span>
+    </nav>
 
+    <div class="sp-grid">
+      <!-- ===== 左：任务 ===== -->
+      <section class="sp-card">
+        <div class="sp-card-head">
+          <span class="sp-card-title">{{ mode === 'requirement' ? '测试需求' : '用例来源' }}</span>
+          <span v-if="mode === 'requirement'" class="sp-card-meta">{{ (form.requirement || '').length }} 字</span>
+          <span v-else-if="caseSource === 'approved'" class="sp-card-meta">已选 {{ selectedCaseIds.length }} 条</span>
+        </div>
+
+        <div class="sp-card-body">
           <template v-if="mode === 'requirement'">
-            <el-form-item label="测试需求" required class="requirement-item">
+            <div class="sp-fill">
               <el-input
                 v-model="form.requirement"
+                class="form-textarea sp-requirement"
                 type="textarea"
                 :rows="10"
                 maxlength="30000"
-                show-word-limit
                 placeholder="例如：验证用户登录、退出和登录失败场景。覆盖正常登录、错误密码、空字段和会话失效后的跳转。"
               />
-              <div class="field-hint">描述业务流程、正向/反向场景和验收标准。Agent 会先访问真实页面再生成脚本。</div>
-            </el-form-item>
+            </div>
+            <!-- 需求区默认是一大块空白画布。底部给三条写作要点，比留一句话更有用，
+                 也不会让整张卡看起来「下面还没画完」。 -->
+            <div class="sp-tips">
+              <div class="sp-tips-label">写作要点</div>
+              <ul>
+                <li>写清从哪个页面开始、按什么顺序操作、到哪里结束</li>
+                <li>反向场景单独列：错误密码、空字段、会话过期</li>
+                <li>验收标准写成可判断的结果：出现什么文案、停在哪个 URL</li>
+              </ul>
+            </div>
           </template>
 
           <template v-else>
-            <el-form-item label="用例来源">
-              <el-radio-group v-model="caseSource" @change="onSourceChange">
-                <el-radio-button value="approved">已审批用例</el-radio-button>
-                <el-radio-button value="markdown">粘贴 Markdown</el-radio-button>
-                <el-radio-button value="form">表单录入</el-radio-button>
-              </el-radio-group>
-            </el-form-item>
+            <div class="sp-src">
+              <button
+                v-for="opt in CASE_SOURCES"
+                :key="opt.value"
+                type="button"
+                :class="['sp-src-btn', { 'is-on': caseSource === opt.value }]"
+                @click="setSource(opt.value)"
+              >{{ opt.label }}</button>
+            </div>
 
-            <el-form-item v-if="caseSource === 'approved'" label="选择用例" required class="requirement-item">
-              <el-select
-                v-model="selectedCaseIds"
-                multiple
-                filterable
-                collapse-tags
-                collapse-tags-tooltip
-                :loading="casesLoading"
-                placeholder="从已审批用例中选择"
-                style="width:100%"
-              >
-                <el-option v-for="item in approvedCases" :key="item.id" :label="`${item.priority || ''} ${item.title}`" :value="item.id" />
-              </el-select>
-              <div class="field-hint">已选 {{ selectedCaseIds.length }} 条。用例直接来自审批通过的数据，格式已规范化。</div>
-            </el-form-item>
-
-            <el-form-item v-else-if="caseSource === 'markdown'" label="用例 Markdown" required class="requirement-item">
-              <el-input
-                v-model="casesMarkdown"
-                type="textarea"
-                :rows="10"
-                placeholder="**Seed:** tests/seed.spec.ts&#10;&#10;#### 验证码错误提示&#10;- 步骤：&#10;  1. 输入错误验证码&#10;- 预期：&#10;  - 提示验证码错误"
-                @input="preview = null"
-              />
-              <div class="cases-actions">
-                <el-button size="small" :loading="previewing" :disabled="!casesMarkdown.trim()" @click="previewMarkdown">预览校验</el-button>
-              </div>
-              <div class="field-hint">每条用例以 #### 开头，包含步骤和预期。标签（步骤：、预期：）会被自动去掉。</div>
-            </el-form-item>
-
-            <el-form-item v-else label="用例表单" required class="requirement-item">
-              <div class="form-cases">
-                <div class="form-cases-head">
-                  <span class="form-cases-count">{{ formCases.length }} / {{ MAX_FORM_CASES }}</span>
-                  <span class="field-hint">每条用例填写标题、步骤和预期结果，最多 {{ MAX_FORM_CASES }} 条</span>
+            <div v-if="caseSource === 'approved'" class="form-block">
+              <div class="form-field">
+                <div class="form-label">
+                  <span>已审批用例</span>
+                  <span class="sp-label-aux">{{ approvedCases.length }} 条可选</span>
                 </div>
+                <el-select
+                  v-model="selectedCaseIds"
+                  class="form-ctl"
+                  multiple
+                  filterable
+                  collapse-tags
+                  collapse-tags-tooltip
+                  :loading="casesLoading"
+                  placeholder="从已审批用例中选择"
+                >
+                  <el-option v-for="item in approvedCases" :key="item.id" :label="`${item.priority || ''} ${item.title}`" :value="item.id" />
+                </el-select>
+                <div class="sp-field-hint">只列出审批通过的用例；生成时按标题、步骤、预期原样拼给 generator。</div>
+              </div>
 
-                <div v-for="(item, ci) in formCases" :key="item.id" class="case-card">
-                  <div class="case-card-head">
-                    <span class="case-index">{{ ci + 1 }}</span>
-                    <el-input v-model="item.title" class="case-title-input" placeholder="用例标题，例如：验证码错误时登录失败" maxlength="200" />
-                    <button
-                      type="button"
-                      class="icon-btn is-danger"
-                      :disabled="formCases.length <= 1"
-                      title="删除这条用例"
-                      @click="removeCase(ci)"
-                    >×</button>
+              <!-- 选完能在这里核对一遍：不然多选下拉收起后只剩「已选 N 条」 -->
+              <div v-if="pickedCases.length" class="picked">
+                <div v-for="item in pickedCases" :key="item.id" class="picked-row">
+                  <span class="chip">{{ item.priority || '未定级' }}</span>
+                  <span class="picked-title" :title="item.title">{{ item.title }}</span>
+                  <button type="button" class="picked-del" title="取消选择" @click="unpickCase(item.id)">×</button>
+                </div>
+              </div>
+              <div v-else-if="!casesLoading && approvedCases.length" class="sp-note">还没有选择用例。可以按标题搜索，或直接选几条。</div>
+
+              <div v-if="!casesLoading && !approvedCases.length" class="sp-note">
+                这个项目还没有已审批用例。可以先在用例列表审批，或改用「粘贴 Markdown」。
+              </div>
+            </div>
+
+            <div v-else-if="caseSource === 'markdown'" class="form-block">
+              <div class="form-field">
+                <div class="form-label">
+                  <span>用例 Markdown</span>
+                  <button type="button" class="form-label-act" :disabled="!casesMarkdown.trim() || previewing" @click="previewMarkdown">
+                    {{ previewing ? '校验中…' : '预览校验' }}
+                  </button>
+                </div>
+                <el-input
+                  v-model="casesMarkdown"
+                  class="form-textarea sp-markdown"
+                  type="textarea"
+                  :rows="12"
+                  placeholder="**Seed:** tests/seed.spec.ts&#10;&#10;#### 验证码错误提示&#10;- 步骤：&#10;  1. 输入错误验证码&#10;- 预期：&#10;  - 提示验证码错误"
+                  @input="preview = null"
+                />
+                <div class="sp-field-hint">每条用例以 #### 开头，包含步骤和预期；「步骤：」「预期：」这类标签会被自动去掉。</div>
+              </div>
+            </div>
+
+            <div v-else class="form-block">
+              <div class="fc-list">
+                <div v-for="(item, ci) in formCases" :key="item.id" class="fc-item">
+                  <div class="fc-head">
+                    <span class="fc-no">{{ ci + 1 }}</span>
+                    <el-input v-model="item.title" class="form-input fc-title" placeholder="用例标题，例如：验证码错误时登录失败" maxlength="200" />
+                    <button type="button" class="fc-del" :disabled="formCases.length <= 1" title="删除这条用例" @click="removeCase(ci)">×</button>
                   </div>
-
-                  <div class="case-block">
-                    <div class="block-label">步骤</div>
-                    <div v-for="(_, si) in item.steps" :key="si" class="case-row">
-                      <span class="row-num">{{ si + 1 }}</span>
-                      <el-input v-model="item.steps[si]" placeholder="描述一个操作，例如：输入正确的用户名" />
-                      <button type="button" class="icon-btn" :disabled="item.steps.length <= 1" title="删除步骤" @click="item.steps.splice(si, 1)">×</button>
+                  <div class="fc-block">
+                    <div class="fc-label">步骤</div>
+                    <div v-for="(_, si) in item.steps" :key="si" class="fc-row">
+                      <span class="fc-row-no">{{ si + 1 }}</span>
+                      <el-input v-model="item.steps[si]" class="form-input" placeholder="描述一个操作，例如：输入正确的用户名" />
+                      <button type="button" class="fc-del" :disabled="item.steps.length <= 1" title="删除步骤" @click="item.steps.splice(si, 1)">×</button>
                     </div>
-                    <button type="button" class="add-row" :disabled="item.steps.length >= MAX_ROWS" @click="item.steps.push('')">+ 添加步骤</button>
+                    <button type="button" class="fc-add" :disabled="item.steps.length >= MAX_ROWS" @click="item.steps.push('')">+ 添加步骤</button>
                   </div>
-
-                  <div class="case-block">
-                    <div class="block-label">预期结果</div>
-                    <div v-for="(_, ei) in item.expected" :key="ei" class="case-row">
-                      <span class="row-mark">✓</span>
-                      <el-input v-model="item.expected[ei]" placeholder="描述一个检查点，例如：提示验证码错误并停留在登录页" />
-                      <button type="button" class="icon-btn" :disabled="item.expected.length <= 1" title="删除预期" @click="item.expected.splice(ei, 1)">×</button>
+                  <div class="fc-block">
+                    <div class="fc-label">预期结果</div>
+                    <div v-for="(_, ei) in item.expected" :key="ei" class="fc-row">
+                      <span class="fc-row-no is-mark">✓</span>
+                      <el-input v-model="item.expected[ei]" class="form-input" placeholder="描述一个检查点，例如：提示验证码错误并停留在登录页" />
+                      <button type="button" class="fc-del" :disabled="item.expected.length <= 1" title="删除预期" @click="item.expected.splice(ei, 1)">×</button>
                     </div>
-                    <button type="button" class="add-row" :disabled="item.expected.length >= MAX_ROWS" @click="item.expected.push('')">+ 添加预期</button>
+                    <button type="button" class="fc-add" :disabled="item.expected.length >= MAX_ROWS" @click="item.expected.push('')">+ 添加预期</button>
                   </div>
-
-                  <div v-if="showFormErrors && !isBlankCase(item) && caseIssues(item).length" class="case-error">
+                  <div v-if="showFormErrors && !isBlankCase(item) && caseIssues(item).length" class="fc-error">
                     {{ caseIssues(item).join('；') }}
                   </div>
                 </div>
-
-                <button type="button" class="add-case" :disabled="formCases.length >= MAX_FORM_CASES" @click="addCase">
-                  <span class="add-case-plus">+</span>
-                  <span>添加用例</span>
-                  <span v-if="formCases.length >= MAX_FORM_CASES" class="add-case-hint">已达上限 {{ MAX_FORM_CASES }} 条</span>
-                </button>
               </div>
-            </el-form-item>
 
-            <div v-if="preview && caseSource !== 'approved'" :class="['preview-result', preview.success ? 'is-ok' : 'is-error']">
+              <button type="button" class="fc-add-case" :disabled="formCases.length >= MAX_FORM_CASES" @click="addCase">
+                <span class="fc-add-plus">+</span>添加用例
+                <span v-if="formCases.length >= MAX_FORM_CASES" class="fc-add-hint">已达上限 {{ MAX_FORM_CASES }} 条</span>
+              </button>
+            </div>
+
+            <div v-if="preview" :class="['sp-note', preview.success ? 'is-ok' : 'is-error']">
               <template v-if="preview.success">校验通过，共 {{ preview.case_count }} 条用例，Seed：{{ preview.seed_file }}</template>
               <template v-else>
                 <div>格式有误，请修改后再提交：</div>
@@ -142,144 +169,118 @@
               </template>
             </div>
           </template>
-        </el-form>
-      </el-card>
-
-      <el-card class="panel-card">
-        <template #header><span class="card-title">Agent 配置</span></template>
-        <el-form :model="form" label-position="top" class="config-form">
-          <el-form-item label="Base URL" required>
-            <el-input v-model="form.base_url" placeholder="https://test.example.com" />
-          </el-form-item>
-          <div class="form-grid">
-            <el-form-item label="浏览器">
-              <el-select v-model="form.browser" style="width:100%">
-                <el-option label="Chromium" value="chromium" />
-                <el-option label="Firefox" value="firefox" />
-                <el-option label="WebKit" value="webkit" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="运行环境">
-              <el-input v-model="form.environment_name" placeholder="test" />
-            </el-form-item>
-          </div>
-          <el-form-item label="服务端 Git 工作区" required>
-            <el-input v-model="form.workspace_path" placeholder="例如 project-a">
-              <template #append>
-                <el-button :icon="FolderOpened" @click="openWorkspacePicker">浏览</el-button>
-              </template>
-            </el-input>
-            <div class="field-hint">
-              必须是后端服务器上、AUTOMATION_WORKSPACE_ROOT 下的 Git + Playwright 项目。
-              <span v-if="workspaceRoot" class="root-hint">根目录：{{ workspaceRoot }}</span>
-            </div>
-          </el-form-item>
-          <el-form-item label="测试目录">
-            <el-input v-model="form.specs_path" placeholder="tests" />
-          </el-form-item>
-          <el-form-item label="Seed 文件">
-            <el-input v-model="form.seed_file" placeholder="tests/seed.spec.ts">
-              <template #append>
-                <el-button :icon="Document" :disabled="!form.workspace_path" @click="openSeedPicker">浏览</el-button>
-              </template>
-            </el-input>
-            <div class="field-hint">planner 探索页面时使用的种子测试，相对工作区路径，必须是 .spec.ts 文件。</div>
-          </el-form-item>
-          <div class="form-grid">
-            <el-form-item label="OpenCode 模型（可选）">
-              <el-select
-                v-model="form.opencode_model"
-                filterable
-                clearable
-                allow-create
-                default-first-option
-                placeholder="留空使用默认模型"
-                style="width:100%"
-                @visible-change="onModelDropdown"
-              >
-                <el-option v-for="m in modelOptions" :key="m.value" :label="m.value" :value="m.value" />
-              </el-select>
-              <div v-if="modelsLoadError" class="field-hint">模型列表加载失败，可手动输入 provider/model。</div>
-            </el-form-item>
-            <el-form-item label="最大修复次数">
-              <el-input-number v-model="form.max_heal_attempts" :min="0" :max="3" style="width:100%" />
-            </el-form-item>
-          </div>
-          <el-form-item label="工作区文件策略">
-            <el-select v-model="form.overwrite_policy" style="width:100%">
-              <el-option label="Agent 自行判断并保留未提交状态" value="reject" />
-              <el-option label="允许修改已有测试文件" value="overwrite" />
-            </el-select>
-          </el-form-item>
-        </el-form>
-        <div class="config-actions">
-          <el-button @click="saveConfig" :loading="saving">保存配置</el-button>
-          <el-button type="primary" @click="generate" :loading="generating" :disabled="!canGenerate">启动 Agent</el-button>
         </div>
-      </el-card>
+      </section>
+
+      <!-- ===== 右：Agent 配置 ===== -->
+      <section class="sp-card">
+        <div class="sp-card-head">
+          <span class="sp-card-title">Agent 配置</span>
+          <span class="sp-card-meta">按项目保存</span>
+        </div>
+
+        <div class="sp-card-body">
+          <div class="form-block">
+            <div class="form-field">
+              <div class="form-label"><span>项目</span></div>
+              <el-select v-model="selectedProject" class="form-ctl" placeholder="选择项目" @change="onProjectChange">
+                <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+              </el-select>
+            </div>
+
+            <div class="form-field">
+              <div class="form-label"><span>Base URL</span></div>
+              <el-input v-model="form.base_url" class="form-input" placeholder="https://test.example.com" />
+            </div>
+
+            <div class="sp-pair">
+              <div class="form-field">
+                <div class="form-label"><span>浏览器</span></div>
+                <el-select v-model="form.browser" class="form-ctl">
+                  <el-option label="Chromium" value="chromium" />
+                  <el-option label="Firefox" value="firefox" />
+                  <el-option label="WebKit" value="webkit" />
+                </el-select>
+              </div>
+              <div class="form-field">
+                <div class="form-label"><span>运行环境</span></div>
+                <el-input v-model="form.environment_name" class="form-input" placeholder="test" />
+              </div>
+            </div>
+
+            <div class="form-field">
+              <div class="form-label">
+                <span>服务端 Git 工作区</span>
+                <button type="button" class="form-label-act" @click="openWorkspacePicker">浏览…</button>
+              </div>
+              <el-input v-model="form.workspace_path" class="form-input" placeholder="例如 project-a" />
+              <div class="sp-field-hint">
+                AUTOMATION_WORKSPACE_ROOT 下的 Git + Playwright 项目<span v-if="workspaceRoot" class="sp-root"> · {{ workspaceRoot }}</span>
+              </div>
+            </div>
+
+            <div class="form-field">
+              <div class="form-label"><span>测试目录</span></div>
+              <el-input v-model="form.specs_path" class="form-input" placeholder="tests" />
+            </div>
+
+            <div class="form-field">
+              <div class="form-label">
+                <span>Seed 文件</span>
+                <button type="button" class="form-label-act" :disabled="!form.workspace_path" @click="openSeedPicker">浏览…</button>
+              </div>
+              <el-input v-model="form.seed_file" class="form-input" placeholder="tests/seed.spec.ts" />
+              <div class="sp-field-hint">planner 探索页面时使用的种子测试，相对工作区路径，必须是 .spec.ts。</div>
+            </div>
+
+            <div class="sp-pair">
+              <div class="form-field">
+                <div class="form-label"><span>OpenCode 模型</span><span class="sp-label-aux">可选</span></div>
+                <el-select
+                  v-model="form.opencode_model"
+                  class="form-ctl"
+                  filterable
+                  clearable
+                  allow-create
+                  default-first-option
+                  placeholder="留空使用默认"
+                  @visible-change="onModelDropdown"
+                >
+                  <el-option v-for="m in modelOptions" :key="m.value" :label="m.value" :value="m.value" />
+                </el-select>
+              </div>
+              <div class="form-field">
+                <div class="form-label"><span>最大修复次数</span></div>
+                <el-input-number v-model="form.max_heal_attempts" class="form-num" controls-position="right" :min="0" :max="3" />
+              </div>
+            </div>
+
+            <div class="form-field">
+              <div class="form-label"><span>工作区文件策略</span></div>
+              <el-select v-model="form.overwrite_policy" class="form-ctl">
+                <el-option label="Agent 自行判断并保留未提交状态" value="reject" />
+                <el-option label="允许修改已有测试文件" value="overwrite" />
+              </el-select>
+            </div>
+          </div>
+          <div v-if="modelsLoadError" class="sp-note">模型列表加载失败，可以直接输入 provider/model。</div>
+        </div>
+      </section>
     </div>
 
-    <el-card class="history-card">
-      <template #header>
-        <div class="section-header">
-          <div class="history-head-left">
-            <span class="card-title">任务记录</span>
-            <span v-if="generations.length" class="history-count">{{ generations.length }}</span>
-          </div>
-          <el-button text @click="loadGenerations">刷新</el-button>
-        </div>
-      </template>
-      <el-empty v-if="!generations.length" description="暂无自动化任务" />
-      <div v-else class="history-list">
-        <div v-for="item in generations" :key="item.id" :class="['history-item', `is-${item.status || 'pending'}`]">
-          <div class="history-top">
-            <el-tag :type="statusType(item.status)" size="small" effect="light" round>{{ statusLabel(item.status) }}</el-tag>
-            <span class="history-url" :title="item.config?.base_url || ''">{{ item.config?.base_url || '未设置 Base URL' }}</span>
-            <span class="history-date">{{ formatDate(item.created_at) }}</span>
-          </div>
-          <p class="history-requirement">{{ item.requirement || '无需求文本' }}</p>
-          <div class="history-bottom">
-            <div class="history-meta">
-              <span class="chip"><i>批次</i>{{ item.run_key || item.id?.slice(0, 8) }}</span>
-              <span class="chip"><i>阶段</i>{{ item.stage || '-' }}</span>
-              <span class="chip"><i>文件</i>{{ (item.files || []).length }}</span>
-              <span class="chip"><i>修复</i>{{ item.heal_attempts || 0 }}</span>
-            </div>
-            <div class="history-actions">
-              <el-button text size="small" @click="showDetails(item)">查看详情</el-button>
-              <el-button v-if="item.status === 'completed'" text size="small" type="primary" @click="download(item)">下载 ZIP</el-button>
-            </div>
-          </div>
-          <div v-if="item.error" class="history-error">{{ item.error }}</div>
-        </div>
+    <!-- 底栏：全页唯一的蓝色主操作 -->
+    <div class="sp-foot">
+      <div class="sp-foot-note">
+        <template v-if="mode === 'requirement'">planner → generator → healer，通常 5–15 分钟</template>
+        <template v-else>generator → healer，跳过页面探索</template>
+        <span v-if="selectedProject" class="sp-foot-sep">·</span>
+        <span v-if="selectedProject">{{ projectName }}</span>
       </div>
-    </el-card>
-
-    <el-dialog v-model="showResult" title="Agent 执行结果" width="820px">
-      <div v-if="result" class="result-content">
-        <el-descriptions :column="2" border>
-          <el-descriptions-item label="状态">{{ statusLabel(result.status) }}</el-descriptions-item>
-          <el-descriptions-item label="阶段">{{ result.stage || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="修复次数">{{ result.heal_attempts || 0 }}</el-descriptions-item>
-          <el-descriptions-item label="生成时间">{{ formatDate(result.completed_at || result.created_at) }}</el-descriptions-item>
-        </el-descriptions>
-        <div class="result-section">
-          <div class="result-title">Git 变更文件</div>
-          <div v-if="!result.files?.length" class="muted">没有检测到工作区变更。</div>
-          <div v-for="file in result.files" :key="file.path" class="result-file">
-            <span>{{ file.path }}</span><el-tag size="small">{{ file.status }}</el-tag>
-          </div>
-        </div>
-        <div class="result-section">
-          <div class="result-title">OpenCode 输出</div>
-          <pre class="event-log">{{ result.event_log || '无输出' }}</pre>
-        </div>
+      <div class="sp-foot-actions">
+        <el-button :loading="saving" @click="saveConfig()">保存配置</el-button>
+        <el-button type="primary" :icon="Promotion" :loading="generating" :disabled="!canGenerate" @click="generate">启动 Agent</el-button>
       </div>
-      <template #footer>
-        <el-button @click="showResult = false">关闭</el-button>
-        <el-button v-if="result?.status === 'completed'" type="primary" @click="download(result)">下载 ZIP</el-button>
-      </template>
-    </el-dialog>
+    </div>
 
     <PathPickerDialog
       v-model="picker.visible"
@@ -295,24 +296,25 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Document, FolderOpened } from '@element-plus/icons-vue'
+import { Promotion } from '@element-plus/icons-vue'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
 
-const projects = ref([])
 const router = useRouter()
+const projects = ref([])
 const selectedProject = ref('')
-const generations = ref([])
 const saving = ref(false)
 const generating = ref(false)
-const result = ref(null)
-const showResult = ref(false)
 const modelOptions = ref([])
 const modelsLoadError = ref(false)
 let modelsLoaded = false
+
+// 「任务记录」按钮上的小圆点：有任务在跑时提示一下，避免用户以为页面没事发生。
+const runningCount = ref(0)
+let runPoll = null
 
 const emptyForm = () => ({
   project_id: '', framework: 'playwright', language: 'typescript', workspace_path: '', specs_path: 'autocase/tests',
@@ -320,6 +322,7 @@ const emptyForm = () => ({
   max_heal_attempts: 3, overwrite_policy: 'reject', seed_file: 'tests/seed.spec.ts'
 })
 const form = ref(emptyForm())
+const projectName = computed(() => projects.value.find(item => item.id === selectedProject.value)?.name || '')
 
 // 路径选择：浏览器拿不到本地绝对路径，由后端在 AUTOMATION_WORKSPACE_ROOT 内列目录，前端只填相对路径。
 const picker = reactive({ visible: false, mode: 'dir', start: '', target: 'workspace' })
@@ -393,7 +396,13 @@ const casesMarkdown = ref('')
 const preview = ref(null)
 const previewing = ref(false)
 
-// 表单录入：每条用例是一张卡片，只填标题、步骤和预期，不填优先级。上限 5 条。
+const CASE_SOURCES = [
+  { value: 'approved', label: '已审批用例' },
+  { value: 'markdown', label: '粘贴 Markdown' },
+  { value: 'form', label: '表单录入' }
+]
+
+// 表单录入：每条用例是一块，只填标题、步骤和预期，不填优先级。上限 5 条。
 const MAX_FORM_CASES = 5
 const MAX_ROWS = 20
 let caseSeq = 0
@@ -403,7 +412,7 @@ const showFormErrors = ref(false)
 
 const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim()
 
-// 完全没填的卡片视为“还没用到”，不校验、不提交；只要填了一部分，就必须填完整。
+// 完全没填的一块视为“还没用到”，不校验、不提交；只要填了一部分，就必须填完整。
 const isBlankCase = item => !clean(item.title) && !item.steps.some(clean) && !item.expected.some(clean)
 const activeFormCases = computed(() => formCases.value.filter(item => !isBlankCase(item)))
 
@@ -413,6 +422,15 @@ function caseIssues(item) {
   if (!item.steps.some(step => clean(step))) issues.push('至少填写一个步骤')
   if (!item.expected.some(value => clean(value))) issues.push('至少填写一条预期结果')
   return issues
+}
+
+const pickedCases = computed(() => {
+  const map = new Map(approvedCases.value.map(item => [item.id, item]))
+  return selectedCaseIds.value.map(id => map.get(id)).filter(Boolean)
+})
+
+function unpickCase(id) {
+  selectedCaseIds.value = selectedCaseIds.value.filter(value => value !== id)
 }
 
 const formCasesValid = computed(() => activeFormCases.value.length > 0 && activeFormCases.value.every(item => caseIssues(item).length === 0))
@@ -452,6 +470,12 @@ function removeCase(index) {
   formCases.value.splice(index, 1)
 }
 
+function setSource(value) {
+  if (caseSource.value === value) return
+  caseSource.value = value
+  onSourceChange()
+}
+
 function onSourceChange() {
   preview.value = null
   showFormErrors.value = false
@@ -461,6 +485,32 @@ function onSourceChange() {
 watch(formCases, () => { preview.value = null }, { deep: true })
 
 onMounted(() => { loadProjects(); loadModels() })
+// keep-alive 下页面还在内存里：离开时停掉轮询，回来再续上。
+onActivated(startRunPoll)
+onDeactivated(stopRunPoll)
+onUnmounted(stopRunPoll)
+
+function startRunPoll() {
+  refreshRuns()
+  if (!runPoll) runPoll = window.setInterval(refreshRuns, 15000)
+}
+function stopRunPoll() {
+  if (runPoll) { window.clearInterval(runPoll); runPoll = null }
+}
+
+async function refreshRuns() {
+  if (!selectedProject.value) return
+  try {
+    const { data } = await api.getAutomationGenerations(selectedProject.value)
+    runningCount.value = (data.generations || []).filter(item => ['running', 'pending'].includes(item.status)).length
+  } catch {
+    runningCount.value = 0
+  }
+}
+
+function goRecords() {
+  router.push({ path: '/scripts/records', query: selectedProject.value ? { project_id: selectedProject.value } : {} })
+}
 
 async function loadModels(force = false) {
   if (modelsLoaded && !force) return
@@ -492,14 +542,11 @@ async function onProjectChange() {
   selectedCaseIds.value = []
   preview.value = null
   try {
-    const [configResponse, generationResponse] = await Promise.all([
-      api.getAutomationConfig(selectedProject.value),
-      api.getAutomationGenerations(selectedProject.value)
-    ])
+    const configResponse = await api.getAutomationConfig(selectedProject.value)
     form.value = { ...emptyForm(), ...(configResponse.data.config || {}), project_id: selectedProject.value, requirement: '' }
-    generations.value = generationResponse.data.generations || []
   } catch { ElMessage.error('加载自动化配置失败') }
   if (mode.value === 'cases') await loadApprovedCases()
+  refreshRuns()
 }
 
 async function onModeChange(value) {
@@ -528,14 +575,6 @@ async function previewMarkdown() {
   } catch (error) {
     preview.value = { success: false, errors: [error.response?.data?.error || '预览失败'] }
   } finally { previewing.value = false }
-}
-
-async function loadGenerations() {
-  if (!selectedProject.value) return
-  try {
-    const response = await api.getAutomationGenerations(selectedProject.value)
-    generations.value = response.data.generations || []
-  } catch { ElMessage.error('加载任务记录失败') }
 }
 
 async function saveConfig(showMessage = true) {
@@ -575,18 +614,13 @@ async function generate() {
         config: form.value
       })
       : await api.generateAutomationFromCases(casesPayload())
-    result.value = response.data.generation
-    router.push({ path: `/scripts/generations/${response.data.generation.id}`, query: { project_id: selectedProject.value } })
-    await loadGenerations()
+    const generation = response.data.generation
     ElMessage.success('Agent 任务已启动')
+    // 直接进任务详情：失败也在同一页看错误和日志，不再弹一个信息更少的对话框。
+    router.push({ path: `/scripts/generations/${generation.id}`, query: { project_id: selectedProject.value } })
   } catch (error) {
-    const generation = error.response?.data?.generation
-    if (generation) {
-      result.value = generation
-      showResult.value = true
-    }
-    ElMessage.error(error.response?.data?.error || 'Agent 工作流失败')
-    await loadGenerations()
+    ElMessage.error(error.response?.data?.error || 'Agent 工作流启动失败')
+    refreshRuns()
   } finally { generating.value = false }
 }
 
@@ -595,148 +629,440 @@ function casesPayload() {
   if (caseSource.value === 'approved') return { ...base, case_ids: selectedCaseIds.value }
   return { ...base, cases_markdown: casesMarkdownText.value }
 }
-
-function showDetails(item) {
-  router.push({ path: `/scripts/generations/${item.id}`, query: { project_id: item.project_id || selectedProject.value } })
-}
-
-async function download(item) {
-  if (!item?.id) return
-  try {
-    const response = await api.downloadAutomationGeneration(item.id, item.project_id || selectedProject.value)
-    const url = window.URL.createObjectURL(new Blob([response.data]))
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `automation_${item.run_key || item.id}.zip`
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    window.URL.revokeObjectURL(url)
-  } catch { ElMessage.error('下载失败') }
-}
-
-function statusLabel(status) { return ({ completed: '完成', running: '执行中', failed: '失败', pending: '等待中', interrupted: '已中断' })[status] || status }
-function statusType(status) { return ({ completed: 'success', running: 'warning', failed: 'danger', pending: 'info', interrupted: 'danger' })[status] || 'info' }
-function formatDate(value) { return value ? new Date(value).toLocaleString() : '-' }
 </script>
 
 <style scoped>
-.scripts-page { max-width:1440px; margin:0 auto; }
+/* ---------- 页面骨架：一屏工作台，卡片内部滚动，底栏常驻 ---------- */
+.scripts-page {
+  max-width: 1440px;
+  margin: 0 auto;
+  height: calc(100dvh - 116px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 
-/* Page header */
-.page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:22px; }
-.eyebrow { color:#0071e3; font-size:11px; font-weight:700; letter-spacing:1.4px; margin-bottom:8px; text-transform:uppercase; }
-h1 { margin:0; color:#1d1d1f; font-size:28px; font-weight:700; letter-spacing:-.3px; }
-.page-header p { margin:8px 0 0; color:#6e6e73; font-size:14px; line-height:1.55; max-width:760px; }
+.sp-head {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 28px;
+  padding-bottom: 16px;
+}
+.sp-head-main { min-width: 0; }
+.sp-title {
+  margin: 5px 0 0;
+  font-size: 21px;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -.02em;
+  color: var(--ink);
+}
+.sp-sub {
+  margin: 7px 0 0;
+  max-width: 620px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.sp-head-actions { flex: none; display: flex; align-items: center; gap: 8px; padding-bottom: 1px; }
 
-/* Shared card look */
-.panel-card, .history-card { border:1px solid #ebedf0; border-radius:14px; overflow:hidden; box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 30px rgba(16,24,40,.05); }
-.panel-card :deep(.el-card__header), .history-card :deep(.el-card__header) { padding:15px 20px; border-bottom:1px solid #f0f2f5; background:linear-gradient(180deg,#fcfdff,#f7f9fc); }
-.panel-card :deep(.el-card__body) { padding:20px; }
-.card-title { position:relative; padding-left:12px; font-size:15px; font-weight:700; color:#1d1d1f; }
-.card-title::before { content:''; position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:15px; border-radius:3px; background:linear-gradient(180deg,#0a84ff,#0071e3); }
+/* 任务记录按钮上的执行中提示：一个小蓝点，比红点安静 */
+.run-dot {
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: run-pulse 1.8s ease-in-out infinite;
+}
+@keyframes run-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 113, 227, .35); }
+  50% { box-shadow: 0 0 0 4px rgba(0, 113, 227, 0); }
+}
 
-/* Main layout: equal-height, bottom-aligned cards */
-.main-layout { display:grid; grid-template-columns:minmax(0,1.08fr) minmax(380px,.92fr); gap:20px; align-items:stretch; }
-.main-layout .panel-card { display:flex; flex-direction:column; }
-.main-layout .panel-card :deep(.el-card__body) { flex:1; display:flex; flex-direction:column; }
+/* ---------- 模式切换：下划线 tab，和首页同一套 ---------- */
+.sp-tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 16px;
+}
+.sp-tab {
+  position: relative;
+  padding: 0 0 10px;
+  border: 0;
+  background: none;
+  font-size: 13.5px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .14s ease;
+}
+.sp-tab:hover { color: var(--ink); }
+.sp-tab.is-on { color: var(--ink); font-weight: 600; }
+.sp-tab.is-on::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+}
+.sp-tab-note {
+  margin-left: auto;
+  padding-bottom: 9px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
 
-/* Forms */
-.task-form, .config-form { display:flex; flex-direction:column; }
-.task-form { flex:1; }
-.task-form :deep(.el-form-item), .config-form :deep(.el-form-item) { margin-bottom:16px; }
-.task-form :deep(.el-form-item__label), .config-form :deep(.el-form-item__label) { font-size:13px; font-weight:600; color:#303133; padding-bottom:6px; }
-.form-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-.field-hint { color:#909399; font-size:12px; line-height:1.5; margin-top:6px; }
-.root-hint { margin-left:6px; color:#a8abb2; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11.5px; }
-.task-form :deep(.el-textarea__inner), .config-form :deep(.el-input__wrapper), .config-form :deep(.el-select__wrapper), .config-form :deep(.el-input-number) { border-radius:8px; }
+/* ---------- 两列：左任务、右配置 ---------- */
+.sp-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 460px);
+  gap: 16px;
+  align-items: stretch;
+}
+.sp-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+}
+.sp-card-head {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 20px 8px;
+}
+.sp-card-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: .02em;
+}
+.sp-card-meta { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.sp-card-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 20px 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.sp-card-body::-webkit-scrollbar { width: 8px; }
+.sp-card-body::-webkit-scrollbar-thumb { background: #e2e6ec; border-radius: 4px; }
+.sp-card-body::-webkit-scrollbar-thumb:hover { background: #d3d9e2; }
 
-/* Requirement textarea grows so both cards share the same height */
-.requirement-item { flex:1; display:flex; flex-direction:column; }
-.requirement-item :deep(.el-form-item__content) { flex:1; display:flex; flex-direction:column; }
-.requirement-item :deep(.el-textarea) { flex:1; }
-.requirement-item :deep(.el-textarea__inner) { height:100% !important; min-height:240px; resize:none; }
+/* 需求输入要吃掉左卡剩余高度，而不是固定 10 行后留一片空白 */
+.sp-fill { flex: 1; min-height: 260px; display: flex; flex-direction: column; padding-top: 6px; }
+.sp-requirement { flex: 1; display: flex; flex-direction: column; }
+.sp-requirement :deep(.el-textarea__inner) {
+  flex: 1;
+  min-height: 240px;
+  padding: 4px 0 8px;
+  font-size: 13.5px;
+  line-height: 1.75;
+}
+.sp-markdown :deep(.el-textarea__inner) {
+  min-height: 280px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+.sp-tips {
+  flex: none;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-faint);
+}
+.sp-tips-label {
+  margin-bottom: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.sp-tips ul { margin: 0; padding-left: 14px; }
+.sp-tips li { font-size: 11.5px; line-height: 1.8; color: var(--muted); }
+.sp-field-hint {
+  margin-top: 5px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--faint);
+}
+.sp-root { font-family: var(--mono); font-size: 11px; color: #c3c9d2; }
+.sp-label-aux { font-size: 11px; color: var(--faint); }
+.form-label-act:disabled { color: #ccd2da; cursor: not-allowed; }
+.form-label-act:disabled:hover { color: #ccd2da; }
 
-/* Mode switch sits in the card header, title on the left */
-.panel-card :deep(.section-header) { gap:12px; flex-wrap:wrap; }
+/* 配置字段比通用表单再紧一档：一行标签 + 一行控件占 60px 才放得下九项。
+   控件高度 34 → 32，字段上下留白 13/7 → 10/6。 */
+.sp-card .form-field { padding: 9px 0 5px; }
+.sp-card .form-label { margin-bottom: 2px; }
+.el-select.form-ctl,
+.el-input.form-input,
+.el-input-number.form-num { height: 32px; }
+.el-select.form-ctl .el-select__wrapper { min-height: 32px; height: 32px; }
+.el-input.form-input .el-input__wrapper { height: 32px; }
+.el-input-number.form-num .el-input__wrapper { height: 32px; }
+.sp-card .sp-field-hint { margin-top: 3px; font-size: 11px; line-height: 1.45; }
 
-/* Markdown cases: preview action and result */
-.cases-actions { display:flex; justify-content:flex-end; margin-top:8px; }
-.preview-result { margin-top:10px; padding:10px 12px; border-radius:8px; font-size:12.5px; line-height:1.6; }
-.preview-result.is-ok { background:#f0faf4; color:#1e7a46; }
-.preview-result.is-error { background:#fff1f0; color:#e5484d; }
+/* 两列短字段：共用一条底线，中间留 20px，避免两条线断开像两张表 */
+.sp-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid rgba(0, 0, 0, .09);
+}
+.sp-pair .form-field { border-bottom: 0; padding-bottom: 0; }
 
-/* Form-entry cases: one card per case, capped at 5 */
-.form-cases { display:flex; flex-direction:column; gap:12px; width:100%; }
-.form-cases-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-.form-cases-count { display:inline-flex; align-items:center; height:22px; padding:0 10px; border-radius:999px; background:#eaf3ff; color:#0071e3; font-size:12px; font-weight:700; font-variant-numeric:tabular-nums; }
-.case-card { position:relative; border:1px solid #ebedf0; border-radius:12px; padding:14px 14px 4px; background:#fff; box-shadow:0 1px 2px rgba(16,24,40,.04); transition:border-color .18s ease, box-shadow .18s ease; }
-.case-card:hover { border-color:#dce7fb; box-shadow:0 4px 14px rgba(16,24,40,.06); }
-.case-card-head { display:flex; align-items:center; gap:10px; }
-.case-index { flex-shrink:0; width:24px; height:24px; border-radius:50%; background:linear-gradient(135deg,#0a84ff,#0071e3); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 6px rgba(0,113,227,.25); }
-.case-title-input { flex:1; min-width:0; }
-.case-block { margin-top:12px; padding-top:10px; border-top:1px dashed #eef0f4; }
-.block-label { font-size:12px; font-weight:700; color:#6e6e73; margin-bottom:8px; letter-spacing:.2px; }
-.case-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
-.row-num, .row-mark { flex-shrink:0; width:20px; text-align:center; font-size:12px; font-weight:700; }
-.row-num { color:#a1a1a6; font-variant-numeric:tabular-nums; }
-.row-mark { color:#34c759; }
-.icon-btn { flex-shrink:0; width:26px; height:26px; border:none; border-radius:7px; background:transparent; color:#a1a1a6; font-size:16px; line-height:1; cursor:pointer; transition:background .15s ease, color .15s ease; }
-.icon-btn:hover:not(:disabled) { background:#f2f4f7; color:#606266; }
-.icon-btn.is-danger:hover:not(:disabled) { background:#fff1f0; color:#e5484d; }
-.icon-btn:disabled { opacity:.35; cursor:not-allowed; }
-.add-row { margin:2px 0 0 28px; padding:2px 6px; border:none; background:none; color:#0071e3; font-size:12.5px; font-weight:600; cursor:pointer; border-radius:6px; }
-.add-row:hover:not(:disabled) { background:#eaf3ff; }
-.add-row:disabled { color:#c0c4cc; cursor:not-allowed; }
-.case-error { margin:6px 0 10px; padding:7px 10px; border-radius:8px; background:#fff1f0; color:#e5484d; font-size:12px; line-height:1.5; }
-.add-case { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:13px; border:1.5px dashed #c9d6ea; border-radius:12px; background:#fbfdff; color:#0071e3; font-size:13.5px; font-weight:600; cursor:pointer; transition:background .18s ease, border-color .18s ease; }
-.add-case:hover:not(:disabled) { background:#eef5ff; border-color:#0071e3; }
-.add-case:disabled { color:#a1a1a6; border-color:#e4e7ed; background:#f7f8fa; cursor:not-allowed; }
-.add-case-plus { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; background:#0071e3; color:#fff; font-size:16px; line-height:1; }
-.add-case:disabled .add-case-plus { background:#c0c4cc; }
-.add-case-hint { font-size:12px; font-weight:500; color:#a1a1a6; margin-left:4px; }
+/* ---------- 用例来源：轻量分段控件 ---------- */
+.sp-src {
+  flex: none;
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 2px;
+  margin: 2px 0 14px;
+  background: #f4f6f9;
+  border-radius: 7px;
+}
+.sp-src-btn {
+  height: 26px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.sp-src-btn:hover { color: var(--ink-2); }
+.sp-src-btn.is-on {
+  background: #fff;
+  color: var(--ink);
+  font-weight: 500;
+  box-shadow: 0 0 0 1px var(--line-soft) inset;
+}
 
-/* Config actions anchored to card bottom */
-.config-actions { display:flex; justify-content:flex-end; gap:10px; border-top:1px solid #f0f2f5; padding-top:16px; margin-top:auto; }
+/* ---------- 表单录入的用例：靠细线分块，不再每块套一个白盒子 ---------- */
+.fc-list { display: flex; flex-direction: column; padding-top: 4px; }
+.fc-item { padding: 12px 0 6px; border-bottom: 1px solid var(--line-soft); }
+.fc-item:last-child { border-bottom: 0; }
+.fc-head { display: flex; align-items: center; gap: 10px; }
+.fc-no {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: #f4f6f9;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.fc-title { flex: 1; min-width: 0; }
+.fc-block { margin: 10px 0 0 30px; }
+.fc-label { margin-bottom: 2px; font-size: 11.5px; color: var(--muted); }
+.fc-row { display: flex; align-items: center; gap: 8px; }
+.fc-row :deep(.el-input.form-input .el-input__wrapper),
+.fc-title :deep(.el-input.form-input .el-input__wrapper) { border-bottom-color: rgba(0, 0, 0, .09); }
+.fc-row-no {
+  flex: none;
+  width: 18px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.fc-row-no.is-mark { color: #b7c0cc; }
+.fc-del {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #a8b1be;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.fc-del:hover:not(:disabled) { background: #f4f6f9; color: #e0352b; }
+.fc-del:disabled { opacity: .3; cursor: not-allowed; }
+.fc-add {
+  margin: 2px 0 0 26px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .14s ease, background .14s ease;
+}
+.fc-add:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+.fc-add:disabled { color: #ccd2da; cursor: not-allowed; }
+.fc-error {
+  margin: 8px 0 4px 30px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #c9342b;
+}
+.fc-add-case {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 40px;
+  margin: 14px 0 4px;
+  border: 1px dashed #d5dbe4;
+  border-radius: 9px;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color .14s ease, color .14s ease, background .14s ease;
+}
+.fc-add-case:hover:not(:disabled) { border-color: #b9c9dd; color: var(--accent); background: #fbfdff; }
+.fc-add-case:disabled { color: #ccd2da; cursor: not-allowed; }
+.fc-add-plus { font-size: 14px; line-height: 1; }
+.fc-add-hint { margin-left: 6px; font-size: 11px; color: var(--faint); }
 
-/* History */
-.history-card { margin-top:20px; }
-.section-header { display:flex; justify-content:space-between; align-items:center; }
-.history-head-left { display:flex; align-items:center; }
-.history-count { display:inline-flex; align-items:center; justify-content:center; min-width:20px; height:20px; padding:0 7px; margin-left:9px; border-radius:10px; background:#eef1f6; color:#6e6e73; font-size:12px; font-weight:600; }
-.history-list { max-height:600px; overflow-y:auto; overscroll-behavior:contain; padding:2px 6px 2px 2px; }
-.history-list::-webkit-scrollbar { width:8px; }
-.history-list::-webkit-scrollbar-thumb { background:#dcdfe6; border-radius:4px; }
-.history-list::-webkit-scrollbar-thumb:hover { background:#c0c4cc; }
+/* 多选里的标签按小方片的样子压平：默认的灰药丸和整页的方片不是一套 */
+.sp-card :deep(.el-select__selection .el-tag) {
+  height: 20px;
+  padding: 0 6px;
+  border-color: transparent;
+  border-radius: var(--radius-chip);
+  background: #f4f6f9;
+  color: #5b6472;
+  font-size: 11px;
+}
+.sp-card :deep(.el-select__selection .el-tag .el-tag__close) { color: #9aa3b1; }
+.sp-card :deep(.el-select__selection .el-tag .el-tag__close:hover) { background: #dfe4ea; color: var(--ink-2); }
 
-.history-item { position:relative; border:1px solid #eef0f4; border-radius:12px; padding:14px 16px 12px 18px; margin-bottom:12px; background:#fff; overflow:hidden; transition:border-color .18s ease, background .18s ease; }
-.history-item::before { content:''; position:absolute; left:0; top:0; bottom:0; width:4px; background:var(--accent,#c0c4cc); }
-.history-item:last-child { margin-bottom:2px; }
-.history-item:hover { border-color:#dce7fb; background:#fbfdff; }
-.is-completed { --accent:#34c759; }
-.is-running { --accent:#ff9f0a; }
-.is-running::before { animation:accent-pulse 1.6s ease-in-out infinite; }
-.is-failed, .is-interrupted { --accent:#ff453a; }
-.is-pending { --accent:#8e8e93; }
-@keyframes accent-pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+/* ---------- 已选用例：核对区 ---------- */
+.picked {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 10px;
+}
+.picked-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line-faint);
+  min-width: 0;
+}
+.picked-row:last-child { border-bottom: 0; }
+.picked-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picked-del {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #a8b1be;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.picked-del:hover { background: #f4f6f9; color: #e0352b; }
 
-.history-top { display:flex; align-items:center; gap:10px; }
-.history-url { flex:1; min-width:0; color:#1d1d1f; font-weight:600; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.history-date { color:#a1a1a6; font-size:12px; white-space:nowrap; }
-.history-requirement { margin:8px 0 10px; color:#6e6e73; font-size:13px; line-height:1.55; white-space:pre-wrap; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.history-bottom { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-.history-meta { display:flex; flex-wrap:wrap; gap:6px; min-width:0; }
-.chip { display:inline-flex; align-items:center; gap:5px; height:24px; padding:0 9px; border-radius:6px; background:#f4f6f9; color:#606266; font-size:12px; white-space:nowrap; }
-.chip i { color:#a8abb2; font-style:normal; font-size:11px; }
-.history-actions { display:flex; gap:2px; flex-shrink:0; margin-left:auto; }
-.history-error { margin-top:10px; padding:8px 10px; border-radius:8px; background:#fff1f0; color:#e5484d; font-size:12px; line-height:1.5; }
+/* ---------- 校验结果 ---------- */
+.sp-note {
+  flex: none;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #f8fafc;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.sp-note.is-ok { background: var(--ok-soft); color: var(--ok); }
+.sp-note.is-error { background: #fdeeed; color: #c9342b; }
 
-/* Result dialog */
-.result-section { margin-top:18px; }
-.result-title { font-weight:700; color:#1d1d1f; margin-bottom:8px; font-size:14px; }
-.result-file { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:9px 12px; background:#f7f8fa; border-radius:8px; margin-bottom:6px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
-.muted { color:#909399; font-size:13px; }
-.event-log { max-height:280px; overflow:auto; white-space:pre-wrap; word-break:break-word; background:#1f2937; color:#d1d5db; border-radius:8px; padding:14px; font-size:11px; line-height:1.6; }
+/* ---------- 底栏 ---------- */
+.sp-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding-top: 14px;
+}
+.sp-foot-note {
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sp-foot-sep { margin: 0 6px; }
+.sp-foot-actions { flex: none; display: flex; align-items: center; gap: 8px; }
 
-@media (max-width: 900px) { .main-layout { grid-template-columns:1fr; } .form-grid { grid-template-columns:1fr; } .page-header { flex-direction:column; gap:12px; } .requirement-item :deep(.el-textarea__inner) { min-height:180px; } }
+/* 矮屏（≤840）：不再锁一屏，让整页滚动。
+   否则配置卡会被截在中间，还要靠一条几乎看不见的内部滚动条才能看到最后两项。 */
+@media (max-height: 840px) {
+  .scripts-page { height: auto; }
+  .sp-card-body { overflow: visible; }
+}
+
+/* ---------- 窄屏：解除一屏锁定，两列改一列 ---------- */
+/* 980 以上仍保持两列（1024 的笔记本窗口还很常见），只是右列收到 340 */
+@media (max-width: 980px) {
+  .scripts-page { height: auto; }
+  .sp-grid { grid-template-columns: 1fr; }
+  .sp-card-body { overflow: visible; }
+  .sp-fill { min-height: 220px; }
+  .sp-requirement :deep(.el-textarea__inner) { min-height: 200px; }
+  .sp-tab-note { display: none; }
+}
+@media (max-width: 720px) {
+  .sp-head { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .sp-head-actions { padding-bottom: 0; }
+  .sp-pair { grid-template-columns: 1fr; gap: 0; padding-bottom: 0; border-bottom: 0; }
+  .sp-pair .form-field { border-bottom: 1px solid rgba(0, 0, 0, .09); padding-bottom: 7px; }
+  .fc-block { margin-left: 0; }
+  .fc-add { margin-left: 26px; }
+}
 </style>

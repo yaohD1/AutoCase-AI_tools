@@ -17,9 +17,24 @@
 - `frontend/src/views/Upload.vue`：首页、图片/文档上传、知识库入口、模块分析和用例生成。
 - `frontend/src/views/CaseList.vue`：已审批用例、用例编辑、待审审批、原型图查看和 XMind 导出。
 - `frontend/src/views/ModuleList.vue`：模块列表和模块审批。
-- `frontend/src/views/Scripts.vue`：Playwright TypeScript 脚本生成工作台。
-- `frontend/src/views/Settings.vue`：AI 配置、项目和迭代管理。
+- `frontend/src/views/Scripts.vue`：Agent 探索（`/scripts`）。一屏工作台：页头 + 下划线 tab（按需求 / 按用例）+ 左任务 / 右 Agent 配置两列 + 底栏唯一的蓝色「启动 Agent」。「任务记录」是页头右上角的独立按钮，不是配置卡下面的一张列表。
+- `frontend/src/views/AutomationRecords.vue`：任务记录（`/scripts/records`），列表页骨架（`.list-page`），项目 / 状态两个筛选 + 表格 + 前端分页（10 条/页），点行进详情。
+- `frontend/src/views/AutomationGenerationDetail.vue`：任务详情（`/scripts/generations/:id`），启动 Agent 后落在这里。
+- `frontend/src/views/RecordingRecords.vue`：生成记录（`/recording/records`）。一屏两栏：左 320px 记录列表（文件名 + 目录/时间 + 状态方片），右详情（步骤 / 文件预览 / Agent 说明）。提交盒钉在右下角，列表和预览各自滚；`≤1080px` 改上下排列、整页滚动。
+- `frontend/src/views/Settings.vue`：AI 服务与项目/迭代管理。左侧竖排导航 + 右侧面板（不锁一屏）。API Key 只展示后端 `mask_key()` 给的前 6 + 后 4，前端 `displayKey()` 只做兜底，不要再二次打码。
 - `frontend/src/api/index.js`：所有前端 API 封装。
+- `frontend/src/styles/tokens.css`：设计 token（文字/线/语义色/圆角/等宽字体）。页面里不要再写死颜色字面量。
+- `frontend/src/styles/buttons.css`：按钮规范，页面根挂 `ui-buttons`、`list-page`，或位于 `.el-dialog` 内生效（弹窗被 teleport 到 body，不在页面容器里）。
+- `frontend/src/styles/list-page.css`：列表页骨架（页头/筛选行/表格/分页/批量条），`/cases`、`/modules`、`/scripts/records` 共用；`.flat-table` 是只借表格外观的轻量入口（首页知识库、设置页在用）。
+- `frontend/src/styles/forms.css`：表单字段的全局规范（`.form-block` / `.form-field` / `.form-label` / `.form-ctl` / `.form-input` / `.form-textarea` / `.form-toggle` / `.form-num` / `.form-static`）。**新表单直接套这几个类**，不要再写 `label-width:100px` 的右对齐 `el-form`，也不要再复制一份 scoped 样式。
+  - 标签 11.5px 灰在上、值 13px 在下，控件不画边框，只靠字段之间 1px 线分隔；`el-input` / `el-select` 的 wrapper 要 `box-shadow:none; background:transparent`。
+  - 全局样式不能用 `:deep()`；class 挂在 `el-select` / `el-input` 上时和 `.el-select` / `.el-input` 是同一个元素，要写 `.el-select.form-ctl .el-select__wrapper`，不能写成 `.form-ctl .el-select ...`（后代选择器永远匹配不到）。
+- `frontend/src/styles/dialog.css`：弹窗外壳规范（`.dlg` / `.dlg-split` / `.dlg-viewer` / `.dlg-stage` / `.dlg-panel` / `.dlg-bar` / `.dlg-scroll` / `.dlg-foot` / `.line-editor`）。用法见文件头注释。
+  - 标题区 / 内容区 / 操作区各一条 1px 横线；`.el-dialog__body` 归零内边距，左图右表单靠一条竖线分栏，不是两张浮起来的灰卡。
+  - 「上一个 / 下一个」放右栏顶部 `.dlg-bar`，footer 只留「决定」（取消 / 不通过 / 通过 / 生成）。四颗按钮挤在 footer 时读不出主行动。
+  - `.dlg-split` 高度 `clamp(400px, calc(100dvh - 200px), 700px)`；`el-dialog` 的下边距改 24px（默认 50px 会把 footer 顶到折叠线以下）。
+- `frontend/src/components/CaseFields.vue`：用例字段块（模块/测试点/标题/优先级/类型/前置/步骤/预期），`CaseList.vue` 的详情与审批两个弹窗共用。
+- `frontend/src/components/ModuleFields.vue`：模块字段块，`mode="review"` 只出五个文本字段，`mode="generate"` 追加用例类型 / 生成数量 / 附带原图。`CaseList`/`ModuleList`/`Upload` 四处弹窗共用，改字段只改这一个文件。
 - `frontend/src/components/PathPickerDialog.vue`：工作区目录/目标文件选择对话框，被 `Recording.vue`、`Scripts.vue` 复用。
 
 ### 后端
@@ -69,8 +84,11 @@
   - 步骤行只留铅笔，`v-if="!stepsCollapsed"` 掉上移/下移/删除（排序改用拖住编号拖拽，防误删）；`.is-lean .step` 收紧 padding。
   - 工具栏切 `.toolbar.is-lean`：3 列等宽网格 + 通栏细线分组，录制中 6 个按钮正好 3+3；未录制只有 5 个，主按钮 `.lean-wide` 占两列补齐整行，右边界与下一行「添加等待」对齐。
   - 嵌入模式下同时把 `panelWidth` 收到 420 并隐藏 `.embed-resizer`（`startResize` 提前返回），展开时还原收起前宽度；只收不放（本来就 <420 保持原宽）。
-- 生成记录独立成页：路由 `/recording/records`，视图 `views/RecordingRecords.vue`（列表 340px + 详情，都内部滚动，默认选中最新一条；带 `?id=` 时选中指定那条）。录制页只留一个跳转按钮（页头 + 生成成功后的「查看生成记录」），相关 state/函数/CSS 全部搬走，不要在 `Recording.vue` 里保留 records 逻辑。
-- 按钮规范统一在 `frontend/src/styles/workspace-buttons.css`，两个页面的根元素挂 `workspace-buttons` 类即可生效：
+- 生成记录独立成页：路由 `/recording/records`，视图 `views/RecordingRecords.vue`。页头用 `.list-page` 那套（灰眉标 + 21px 标题 + 一句陈述），页脚只有「刷新」+ 文字链接「返回录制」。
+  - 两栏平卡：左 320px 列表（文件名 mono + 目录/时间，状态用 `.chip`），右详情（步骤表 / 深色文件预览 / Agent 说明），提交盒 `flex:none` 钉在右下角，只有「未提交」才出现；撤销改成右上角的文字按钮，不和主行动抢位。
+  - 默认选中最新一条；带 `?id=` 时选中指定那条。录制页只留一个跳转按钮，records 的 state/函数/CSS 不要留在 `Recording.vue`。
+  - `≤1080px` 改上下排列（列表限高 240px、整页滚动），不要继续用两栏。
+- 按钮规范统一在 `frontend/src/styles/buttons.css`（原名 `workspace-buttons.css`），页面根元素挂 `ui-buttons` 或 `list-page` 类即可生效：
   - 尺寸只有三档：标准 32px、图标 30×30（步骤行）、整宽主行动 `.generate-btn` 36px（独占一行，不与任何按钮并排）；内联开关（「高级设置」）26px。圆角 8px、字号 13px、无投影。
   - 配色三支：主蓝 `#0071e3`（唯一实心）/ 危险 `#e0352b`（描边与文字，实心用 `#ff3b30`）/ 中性描边 `#dfe3e8` + 文字 `#3c4048`。进行中状态（暂停中、拾取中）统一淡蓝 `#eaf3ff`，**不要**用 Element 的金黄 `#e6a23c` 或草绿 `#34c759`。
   - 禁用一律淡出：主按钮 `#f2f4f7` 底 + `#9ba3ae` 字，次级按钮白底 + `#b6bcc5` 字。**不要**用 Element 默认的浅蓝底白字（`#a0cfff` + white，几乎看不清）。
@@ -105,6 +123,10 @@
 - `storageState` 必须存在且位于工作区内。凭据可由 agent 从 `.env*` 读取；生成的脚本通过 `process.env` 取值，不写死在脚本里。
 - 生成接口返回任务后在后台运行，OpenCode 超时由 `OPENCODE_TIMEOUT` 控制；状态和事件写入 `AutomationGeneration`。
 - 自动化详情页展示 planner 文档、生成脚本、healer 记录和 Git 变更；本地 commit 只提交当前 `run_key` 批次文件，不自动 push。
+- `GET /api/automation/generations?project_id=&limit=`：默认 20 条（脚本页只用来判断「有没有任务在跑」，按钮上的小蓝点），记录页传 100；上限 200。
+- 页面分工：`/scripts` 只管发起新任务 + 保存配置；`/scripts/records` 管历史；`/scripts/generations/:id` 管单次运行。三处互相跳转都带 `project_id`，不要把它丢了。
+- 详情页布局：页头（返回 / 状态 / 需求 / 进度 / 5 段阶段条）+ 两栏（左「文件与记录」，右日志）。左侧分组区自己滚，**提交盒 `margin-top:auto` 钉在底部**——不要把它放进滚动区，否则文件一多就找不到提交/撤回。侧栏文件只显示文件名（同批次目录都一样），完整路径放 `title`。
+- 脚本页一屏锁 `calc(100dvh - 116px)`；配置卡九项在 900 高下刚好放满（字段 32 高、上下留白 9/6），再加字段先量 `bodyScroll > clientHeight`。`max-height:840px` 时解除锁定改整页滚动，否则配置卡会截在中间。
 
 ## 自动化实时日志机制
 

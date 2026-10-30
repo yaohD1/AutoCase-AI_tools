@@ -2,6 +2,20 @@ import uuid
 from datetime import datetime
 from app.models.database import db
 
+
+def mask_key(key):
+    """列表里只展示前 6 位和后 4 位。
+
+    原来写的是 key[:20] + '***'，看着像脱敏，其实 20 位已经覆盖了大部分
+    真实 key（常见 key 也就 30~40 位），短 key 甚至会整段暴露。
+    """
+    if not key:
+        return None
+    if len(key) <= 12:
+        return '•' * len(key)
+    return f'{key[:6]}••••{key[-4:]}'
+
+
 class AIConfig(db.Model):
     __tablename__ = 'ai_configs'
     
@@ -19,7 +33,8 @@ class AIConfig(db.Model):
         return {
             'id': self.id,
             'provider': self.provider,
-            'api_key': self.api_key[:20] + '***' if self.api_key else None,
+            'api_key': mask_key(self.api_key),
+            'has_key': bool(self.api_key),
             'api_base': self.api_base,
             'model': self.model,
             'temperature': self.temperature,

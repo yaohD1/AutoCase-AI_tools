@@ -1,0 +1,340 @@
+/* ==================== 表单字段规范 ====================
+   与录制页配置卡同一套写法：标签 11.5px 灰在上、值 13px 在下，
+   不画输入框，只留字段之间的一条 1px 线；聚焦时才出一条深灰底线。
+
+   为什么不用 el-form 的 label-width：
+   右对齐标签 + 冒号 + 灰底边框输入框是「后台表单」的观感，一屏七八个字段
+   排下来就是一片灰盒子。标签在上时每一行只有一个焦点（那个值），
+   字段本身靠一条线分隔，读起来像一张表单纸。
+
+   用法：
+     <div class="form-block">
+       <div class="form-field">
+         <div class="form-label"><span>项目</span></div>
+         <el-select class="form-ctl" ... />
+       </div>
+     </div>
+
+   类名对照：
+     .form-block        容器（flex column，可加 max-width）
+     .form-field        一个字段（padding + 底部细线）
+     .form-label        标签行（flex space-between，右侧可放 .form-label-act）
+     .form-label-act    标签行右侧的小动作，如「＋ 新建」
+     .form-ctl          el-select
+     .form-input        el-input
+     .form-textarea     el-input type=textarea
+     .form-toggle       整行开关（switch + 文案 + 提示）
+     .form-static       只读值（与输入同高，无交互）
+
+   注意两点：
+   1. 本文件是全局样式，不能用 :deep()。
+   2. class 直接挂在 el-select / el-input 上，它们和 .el-select / .el-input 是同一个元素，
+      所以写成 .el-select.form-ctl .el-select__wrapper（(0,3,0)）：既匹配得上，
+      又能压过 Element 自己的 .el-select .el-select__wrapper（(0,2,0)）。
+*/
+
+.form-block {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 字段之间一条线；最后一个不画，否则会和卡片/弹窗的底边叠成双线 */
+.form-field {
+  padding: 13px 0 7px;
+  border-bottom: 1px solid rgba(0, 0, 0, .09);
+}
+
+.form-field:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+/* 两个短字段并排：共用一条底线。各自画线会在中间断开，
+   看起来像两张并排的小表；共用一条才是一列字段里的一行。 */
+.form-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 22px;
+  border-bottom: 1px solid rgba(0, 0, 0, .09);
+}
+
+.form-pair > .form-field {
+  border-bottom: 0;
+  padding-bottom: 8px;
+}
+
+/* 弹窗里给最后一个字段强制补了线（见文件末尾），两列字段要排除，
+   否则每一对之间都会多出一条短横线 */
+.el-dialog .form-pair > .form-field,
+.el-dialog .form-pair > .form-field:last-child {
+  border-bottom: 0;
+}
+
+.form-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+  letter-spacing: .01em;
+}
+
+.form-label-act {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 11.5px;
+  color: #a8b1be;
+  cursor: pointer;
+  transition: color .14s ease;
+}
+
+.form-label-act:hover {
+  color: var(--accent);
+}
+
+/* ---------- 下拉 ---------- */
+.form-ctl {
+  width: 100%;
+  height: 34px;
+}
+
+.el-select.form-ctl .el-select__wrapper {
+  min-height: 34px;
+  height: 34px;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  border-bottom: 1px solid transparent;
+  transition: border-color .14s ease;
+}
+
+.el-select.form-ctl .el-select__wrapper:hover {
+  border-bottom-color: rgba(0, 0, 0, .16);
+}
+
+/* 聚焦不用蓝线：选完一个值后焦点还留在 select 上，
+   常驻一条蓝线会让人以为这个字段还没填完。蓝色只留给主按钮。 */
+.el-select.form-ctl .el-select__wrapper.is-focused,
+.el-select.form-ctl .el-select__wrapper.is-hovering {
+  border-bottom-color: var(--line);
+  box-shadow: none;
+}
+
+/* 注意：Element Plus 2.4 把「已选中的值」也放在 .el-select__placeholder 里，
+   只有无值时才挂 .is-transparent。所以颜色必须分两条写，
+   否则选中之后值会一直是占位灰。 */
+.form-ctl .el-select__placeholder {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.form-ctl .el-select__placeholder.is-transparent {
+  color: var(--faint);
+}
+
+.form-ctl .el-select__caret {
+  color: #b6bcc5;
+  font-size: 12px;
+}
+
+/* ---------- 单行输入 ---------- */
+.el-input.form-input .el-input__wrapper {
+  height: 34px;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color .14s ease;
+}
+
+.el-input.form-input .el-input__wrapper:hover {
+  border-bottom-color: rgba(0, 0, 0, .16);
+}
+
+.el-input.form-input .el-input__wrapper.is-focus {
+  border-bottom-color: var(--line);
+  box-shadow: none;
+}
+
+.form-input .el-input__inner {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.form-input .el-input__inner::placeholder {
+  color: var(--faint);
+}
+
+/* 密码框自带的「眼睛」颜色太深，会抢走字段值 */
+.form-input .el-input__password {
+  color: #b6bcc5;
+}
+
+/* 前缀/后缀单位（如 "s"、"Token"）比正文淡一档 */
+.form-input .el-input__prefix,
+.form-input .el-input__suffix {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+/* ---------- 多行输入 ---------- */
+.form-textarea .el-textarea__inner {
+  padding: 9px 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink);
+  resize: none;
+  transition: border-color .14s ease;
+}
+
+.form-textarea .el-textarea__inner:hover {
+  border-bottom-color: rgba(0, 0, 0, .16);
+}
+
+.form-textarea .el-textarea__inner:focus {
+  border-bottom-color: var(--line);
+  box-shadow: none;
+}
+
+.form-textarea .el-textarea__inner::placeholder {
+  color: var(--faint);
+}
+
+/* ---------- 整行开关 ---------- */
+.form-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0 11px;
+  border-bottom: 1px solid rgba(0, 0, 0, .09);
+}
+
+.form-toggle:last-child {
+  border-bottom: 0;
+}
+
+.form-toggle-text {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.form-toggle-hint {
+  font-size: 11.5px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 数字输入 ----------
+   el-input-number 的上下箭头保留（改数值比手打快），
+   但边框、圆角、灰底全部去掉，和单行输入统一。 */
+.form-num {
+  width: 104px;
+}
+
+.form-num.is-wide {
+  width: 128px;
+}
+
+.el-input-number.form-num .el-input__wrapper {
+  height: 34px;
+  padding-left: 0;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color .14s ease;
+}
+
+.el-input-number.form-num .el-input__wrapper:hover {
+  border-bottom-color: rgba(0, 0, 0, .16);
+}
+
+.el-input-number.form-num .el-input__wrapper.is-focus {
+  border-bottom-color: var(--line);
+  box-shadow: none;
+}
+
+.el-input-number.form-num .el-input__inner {
+  font-size: 13px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* controls-position="right" 时两颗箭头是上下堆叠在同一列，
+   只设 right: 0；不要再给 decrease 单独设 right，否则两颗会错位成左右并排 */
+.el-input-number.form-num .el-input-number__decrease,
+.el-input-number.form-num .el-input-number__increase {
+  width: 18px;
+  border: 0;
+  background: transparent;
+  color: #aab3c0;
+  font-size: 11px;
+}
+
+.el-input-number.form-num .el-input-number__increase {
+  right: 0;
+}
+
+.el-input-number.form-num .el-input-number__decrease {
+  right: 0;
+}
+
+.el-input-number.form-num .el-input-number__decrease:hover,
+.el-input-number.form-num .el-input-number__increase:hover {
+  color: var(--muted);
+}
+
+/* ---------- 只读值 ---------- */
+.form-static {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.form-static.is-empty {
+  color: var(--faint);
+}
+
+/* ---------- 弹窗内 ----------
+   弹窗里字段少，最后一个字段也要有线，否则单字段弹窗的输入框
+   看起来就是一行悬空的字。 */
+.el-dialog .form-field:last-child {
+  border-bottom: 1px solid rgba(0, 0, 0, .09);
+  padding-bottom: 8px;
+}
+
+/* 弹窗里最后一个「开关行」和字段一样要有一道线，
+   否则它会悬在 footer 上方，看起来像没结束 */
+.el-dialog .form-toggle:last-child {
+  border-bottom: 1px solid rgba(0, 0, 0, .09);
+}
+
+.el-dialog .form-block {
+  padding-bottom: 4px;
+}
+
+/* 弹窗标题与整站 h1 同一档，不要 Element 默认的 24px */
+.form-dialog .el-dialog__title {
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -.2px;
+}
+
+.form-dialog .el-dialog__body {
+  padding-top: 8px;
+}

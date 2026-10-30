@@ -1,0 +1,371 @@
+/* ==================== 弹窗规范 ====================
+   用例详情 / 用例审批 / 模块审核 / 模块生成 / 首页模块弹窗共用。
+
+   和「静物」一致的四条：
+     · 弹窗本体只有一条 1px 线做边界，不用 Element 的双层投影 + 灰边
+     · 标题区、内容区、操作区各用一条横线分开，内容区归零内边距，
+       让左图右表单的竖线能顶到上下两条线
+     · 左图右表单不是两张浮起来的灰卡，而是一块画布 + 一条竖线
+     · 页面级导航（上一个 / 下一个）从 footer 移到右栏顶部，
+       footer 只留「决定」——否则一排四颗按钮，读不出哪个是主行动
+
+   用法：
+     <el-dialog class="dlg" width="min(1120px, 94vw)" top="4vh">
+       <template #header>
+         <div>标题</div>
+         <div class="dlg-sub">副标题</div>
+       </template>
+       <div class="dlg-split">
+         <div class="dlg-viewer">…</div>
+         <div class="dlg-panel">
+           <div class="dlg-bar">…</div>
+           <div class="dlg-scroll">…</div>
+         </div>
+       </div>
+       <template #footer>
+         <div class="dlg-foot">…</div>
+       </template>
+     </el-dialog>
+*/
+
+.el-dialog.dlg {
+  padding: 0;
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  box-shadow: 0 40px 90px -44px rgba(16, 24, 40, .45), 0 0 0 1px var(--line-soft);
+  /* Element 默认留 50px 下边距，加上顶部 4vh 会把 footer 顶到折叠线以下 */
+  margin-bottom: 24px;
+}
+
+/* ---------- 标题区 ---------- */
+.dlg .el-dialog__header {
+  padding: 17px 56px 13px 24px;
+  margin: 0;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: default;
+}
+
+.dlg .el-dialog__title {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -.01em;
+  color: var(--ink);
+}
+
+/* 标题下的一句：当前是哪条、来自哪个项目。比把信息塞进 title 更好读 */
+.dlg-sub {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dlg-sub b { color: var(--ink-2); font-weight: 600; }
+
+/* 关闭按钮收成 28×28，颜色压到最淡：它不该和主行动抢 */
+.dlg .el-dialog__headerbtn {
+  top: 13px;
+  right: 14px;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  transition: background .14s ease;
+}
+.dlg .el-dialog__headerbtn:hover { background: #f2f4f7; }
+.dlg .el-dialog__close { color: #b3bac5; font-size: 15px; }
+.dlg .el-dialog__headerbtn:hover .el-dialog__close { color: var(--ink-2); }
+
+/* ---------- 内容区 ---------- */
+.dlg .el-dialog__body { padding: 0; }
+
+.dlg-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.06fr) minmax(0, 1fr);
+  /* 高度跟着视口走：900 高的屏上刚好放下「生成用例」最多的那组字段，
+     再高就封顶，避免 4K 屏上表单被拉成一长条 */
+  height: clamp(400px, calc(100dvh - 200px), 700px);
+  min-height: 0;
+}
+
+/* ---------- 左：画布 ---------- */
+.dlg-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 16px 18px 12px 22px;
+  border-right: 1px solid var(--line-soft);
+}
+
+.dlg-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f6f7f9;
+  border: 1px solid var(--line-faint);
+  border-radius: 10px;
+  overflow: hidden;
+  user-select: none;
+}
+
+.dlg-stage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transition: transform .2s ease;
+}
+
+.dlg-stage-empty {
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+/* 文档类原型图（md / txt）：白纸一张，别用深色终端 —— 这里要读的是文案 */
+.dlg-doc {
+  flex: 1;
+  min-height: 0;
+  align-self: stretch;
+  overflow: auto;
+  padding: 16px 18px;
+  background: #fff;
+}
+.dlg-doc pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 缩放条：三个字符按钮 + 一个百分比，不要四颗圆按钮 */
+.dlg-zoom {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 1px;
+  height: 24px;
+}
+.dlg-zoom-val {
+  min-width: 42px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.zoom-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.zoom-btn:hover { background: #eef0f3; color: var(--ink); }
+.zoom-reset {
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font: inherit;
+  font-size: 11.5px;
+  color: #a8b1be;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.zoom-reset:hover { background: #eef0f3; color: var(--ink-2); }
+
+/* 缩略图 */
+.dlg-thumbs {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.dlg-thumbs img {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  opacity: .62;
+  cursor: pointer;
+  transition: opacity .14s ease, border-color .14s ease, box-shadow .14s ease;
+}
+.dlg-thumbs img:hover { opacity: 1; }
+.dlg-thumbs img.is-active {
+  opacity: 1;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* ---------- 右：表单 ---------- */
+.dlg-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 13px 22px 11px 20px;
+}
+
+/* 单栏小弹窗（新建项目 / 新建迭代）：没有左右分栏，内容区自己给内边距，
+   标题栏和操作区仍然是那两条线 */
+.dlg.is-plain .el-dialog__body {
+  padding: 12px 24px 4px;
+}
+
+.dlg-panel.is-solo {
+  padding: 15px 24px 13px;
+  max-height: min(72vh, 660px);
+}
+
+.dlg-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 6px;
+}
+.dlg-bar-text {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.dlg-bar-text b { color: var(--ink-2); font-weight: 600; }
+.dlg-bar-note { font-size: 11.5px; color: var(--faint); }
+.dlg-bar-nav { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+
+.dlg-nav {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.dlg-nav:hover:not(:disabled) { background: #f2f4f7; color: var(--ink); }
+.dlg-nav:disabled { color: #cdd3db; cursor: default; }
+
+.dlg-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+.dlg-scroll::-webkit-scrollbar { width: 8px; }
+.dlg-scroll::-webkit-scrollbar-thumb { background: #e6e9ef; border-radius: 4px; }
+.dlg-scroll::-webkit-scrollbar-thumb:hover { background: #d8dde5; }
+
+/* 弹窗里的字段比页面再紧一档：右栏要靠滚动才看得完时，
+   每行省 3px 就能少滚一次 */
+.dlg-scroll .form-field { padding: 8px 0 4px; }
+
+/* 表单最后一行贴到滚动区底边时不至于顶着线 */
+.dlg-scroll .form-block { padding-bottom: 6px; }
+
+/* ---------- 操作区 ---------- */
+.dlg .el-dialog__footer {
+  padding: 12px 24px 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.dlg-foot { display: flex; align-items: center; gap: 16px; }
+.dlg-foot-note { font-size: 11.5px; color: var(--faint); }
+.dlg-foot-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+.dlg-empty {
+  padding: 76px 0;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+/* ---------- 行内元素 ---------- */
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 34px;
+}
+
+.dlg .el-checkbox { margin-right: 14px; }
+.dlg .el-checkbox:last-of-type { margin-right: 0; }
+.dlg .el-checkbox__label { font-size: 12.5px; color: var(--ink-2); padding-left: 6px; }
+.dlg .el-checkbox__inner { border-radius: 3px; }
+.dlg .el-switch { --el-switch-on-color: var(--accent); }
+
+/* 步骤行编辑器：序号 + 输入 + 删除，靠行线分隔，不加盒子 */
+.line-editor { display: flex; flex-direction: column; }
+
+.line-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--line-faint);
+}
+.line-row:last-child { border-bottom: 0; }
+.line-no {
+  flex: none;
+  width: 16px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+.line-row .el-input.form-input { flex: 1; }
+.line-del {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #b6bdc7;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.line-del:hover:not(:disabled) { background: #fff1f0; color: var(--danger); }
+.line-del:disabled { color: #e2e6eb; cursor: default; }
+
+/* 窄屏：左右改成上下，画布给固定高度，否则会被挤成一条 */
+@media (max-width: 900px) {
+  .dlg-split {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    max-height: 76vh;
+    overflow-y: auto;
+  }
+  .dlg-viewer {
+    height: 280px;
+    padding: 14px 16px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .dlg-panel { padding: 14px 16px 12px; }
+  .dlg-scroll { overflow: visible; }
+}

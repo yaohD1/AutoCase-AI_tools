@@ -1,5 +1,5 @@
 <template>
-  <div :class="['recording-page', 'workspace-buttons', { 'is-panel': panelMode, 'is-embed': embedMode, 'is-collapsed': panelCollapsed, 'is-lean': stepsCollapsed, 'is-resizing': resizing }]">
+  <div :class="['recording-page', 'ui-buttons', { 'is-panel': panelMode, 'is-embed': embedMode, 'is-collapsed': panelCollapsed, 'is-lean': stepsCollapsed, 'is-resizing': resizing }]">
     <!-- 嵌入模式：左 iframe 是被测系统（占用剩余全部宽度），右侧是可收起的编排面板 -->
     <iframe v-if="embedMode" class="embed-frame" :src="targetUrl" title="被测系统"></iframe>
 
@@ -111,7 +111,7 @@
 
       <div v-if="!compactMode" class="page-header">
       <div class="page-intro">
-        <div class="eyebrow">RECORDING · CODE GENERATOR</div>
+        <div class="eyebrow">录制 · 代码生成</div>
         <h1>自动化工具</h1>
         <p>
           在真实浏览器里操作，记录步骤与唯一定位；录制时会自动打开编排面板，插入断言后按工作区框架生成脚本。
@@ -126,43 +126,58 @@
 
     <!-- 左配置 / 右步骤+生成：一屏内看完，生成记录单独成页 -->
     <div class="recording-body">
-    <!-- 目标与配置 -->
+    <!-- 目标与配置：默认是一张「规格摘要」，点某一行才就地展开编辑。
+         六个常驻输入框会把 400px 的侧栏塞成注册表单，读不出轻重。 -->
     <el-card v-show="!compactMode || configExpanded" class="panel-card config-card">
       <template #header>
         <div class="section-header">
-          <span class="card-title">目标与配置</span>
-          <span class="field-hint">配置会记在本浏览器里，下次打开自动填入</span>
+          <span class="card-title">录制配置</span>
+          <span class="cfg-saved">已记住上次设置</span>
         </div>
       </template>
-      <el-form label-position="top" class="config-form config-form--grid">
-        <el-form-item class="span-2" label="录制起始地址">
-          <el-input v-model="config.baseUrl" placeholder="http://127.0.0.1:8080/login" clearable />
-        </el-form-item>
-        <el-form-item class="span-2" label="工作区（Git 目录）">
-          <el-input v-model="config.workspace" placeholder="点击「浏览」选择工作区目录" clearable>
-            <!-- 两个按钮要包一层：Element Plus 会给 append 里的 .el-button 加 margin:0 -20px，并排时会重叠 -->
-            <template #append>
-              <div class="append-group">
-                <el-button :icon="FolderOpened" @click="openWorkspacePicker">浏览</el-button>
-                <span class="append-sep"></span>
-                <el-button :loading="detecting" @click="detectWorkspace">检测</el-button>
-              </div>
-            </template>
-          </el-input>
-          <div class="field-hint">
-            必须是 AUTOMATION_WORKSPACE_ROOT 内的目录。
-            <span v-if="workspaceRoot" class="root-hint">根目录：{{ workspaceRoot }}</span>
+
+      <div class="cfg-form">
+        <!-- 唯一必填项：字号比其余值大一档，视线先落在这里 -->
+        <div :class="['cfg-field', 'cfg-field--hero', { 'is-editing': cfgEditing === 'baseUrl' }]">
+          <div class="cfg-label">录制起始地址</div>
+          <div v-if="cfgEditing !== 'baseUrl'" class="cfg-view" @click="beginEdit('baseUrl')">
+            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.baseUrl }]">{{ config.baseUrl || '填写被测系统地址' }}</span>
+            <span class="cfg-hint">编辑</span>
           </div>
-          <!-- 检测结果内联成一行，不再常驻一整栏 -->
-          <div v-if="detect" class="detect-inline">
-            <span class="detect-chip" :class="detect.framework ? 'is-ok' : ''">{{ frameworkName(detect.framework) }}</span>
-            <span class="detect-chip" :class="detect.python ? 'is-ok' : 'is-warn'" :title="detect.python || ''">
+          <el-input
+            v-else
+            :ref="el => setEditRef('baseUrl', el)"
+            v-model="config.baseUrl"
+            class="cfg-input"
+            placeholder="http://127.0.0.1:8080/login"
+            clearable
+            @blur="endEdit"
+            @keyup.enter="endEdit"
+            @keyup.esc="endEdit"
+          />
+        </div>
+
+        <!-- 工作区只能从根目录里挑：手填的路径写错，要到生成时才炸 -->
+        <div class="cfg-field">
+          <div class="cfg-label" :title="'必须是 ' + (workspaceRoot || 'AUTOMATION_WORKSPACE_ROOT') + ' 内的目录'">工作区</div>
+          <div class="cfg-view is-static">
+            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.workspace }]">{{ config.workspace || '还没有选择工作区' }}</span>
+            <span class="cfg-acts">
+              <button type="button" class="cfg-act" @click="openWorkspacePicker">更换</button>
+              <button type="button" class="cfg-act" :disabled="!config.workspace || detecting" @click="detectWorkspace">
+                {{ detecting ? '检测中' : '检测' }}
+              </button>
+            </span>
+          </div>
+          <div v-if="detect" class="cfg-detect">
+            <span :class="['cfg-chip', detect.framework ? 'is-ok' : '']">{{ frameworkName(detect.framework) }}</span>
+            <span :class="['cfg-chip', detect.python ? 'is-ok' : 'is-warn']" :title="detect.python || ''">
               Python {{ detect.python ? tailPath(detect.python) : '未找到' }}
             </span>
-            <span class="detect-chip" :class="detect.seleniumlibrary_version ? 'is-ok' : 'is-warn'">
-              SeleniumLibrary {{ detect.seleniumlibrary_version || '未检测到，按主流写法生成' }}
+            <span :class="['cfg-chip', detect.seleniumlibrary_version ? 'is-ok' : 'is-warn']">
+              SeleniumLibrary {{ detect.seleniumlibrary_version || '未检测到' }}
             </span>
-            <details v-if="(detect.samples && detect.samples.length) || (detect.evidence && detect.evidence.length)" class="detect-more">
+            <details v-if="(detect.samples && detect.samples.length) || (detect.evidence && detect.evidence.length)" class="cfg-details">
               <summary>依据与参考文件</summary>
               <div v-for="sample in detect.samples || []" :key="sample.path" class="detect-sample">{{ sample.path }}</div>
               <div v-for="(item, idx) in detect.evidence || []" :key="idx" class="evidence-line">
@@ -172,55 +187,117 @@
               </div>
             </details>
           </div>
-        </el-form-item>
-        <el-form-item label="框架">
-          <el-select v-model="config.framework" style="width: 100%">
-            <el-option
+        </div>
+
+        <!-- 只有两个取值，分段比下拉少一次点击，也让「当前用哪套」永远可见 -->
+        <div class="cfg-field">
+          <div class="cfg-label">生成框架</div>
+          <div class="cfg-seg" role="radiogroup" aria-label="生成框架">
+            <button
               v-for="item in FRAMEWORKS"
               :key="item.value"
-              :label="item.label"
-              :value="item.value"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="模型（断言解析与代码生成）">
-          <el-select v-model="config.model" filterable placeholder="选择模型" style="width: 100%">
+              type="button"
+              role="radio"
+              :aria-checked="config.framework === item.value"
+              :class="['cfg-seg-item', { 'is-on': config.framework === item.value }]"
+              @click="config.framework = item.value"
+            >{{ item.short }}</button>
+          </div>
+        </div>
+
+        <div :class="['cfg-field', { 'is-editing': cfgEditing === 'model' }]">
+          <div class="cfg-label">模型</div>
+          <div v-if="cfgEditing !== 'model'" class="cfg-view" @click="beginEdit('model')">
+            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.model }]">{{ config.model || '还没选择模型' }}</span>
+            <span class="cfg-hint">{{ config.model ? '更换' : '选择' }}</span>
+          </div>
+          <el-select
+            v-else
+            :ref="el => setEditRef('model', el)"
+            v-model="config.model"
+            class="cfg-select"
+            filterable
+            placeholder="选择模型"
+            @change="endEdit"
+            @visible-change="open => { if (!open) endEdit() }"
+          >
             <el-option v-for="m in modelOptions" :key="m.value" :label="m.value" :value="m.value" />
           </el-select>
-        </el-form-item>
-        <el-form-item label="目标文件（可选，留空由任务书决定）">
-          <el-input v-model="config.targetPath" :placeholder="targetPlaceholder" clearable>
-            <template #append>
-              <!-- 包一层 append-group：Element Plus 给 append 内 .el-button 加 margin:0 -20px，
-                   不覆盖会把这个按钮挤成图标宽、文字被裁到卡片外 -->
-              <div class="append-group">
-                <el-button :icon="Document" :disabled="!config.workspace.trim()" @click="openTargetPicker">浏览</el-button>
-              </div>
-            </template>
-          </el-input>
-          <div class="field-hint">
-            留空就让任务书读项目自己定一个位置（会被 testDir 等约定校正），你在任务书里确认后再写入；
-            填了就以你填的为准，选已有文件会覆盖（生成前会再次确认）。
-            <span v-if="!config.workspace.trim()">需先选择工作区。</span>
-          </div>
-        </el-form-item>
-        <el-form-item label="用例名称">
-          <el-input v-model="config.title" placeholder="例如：登录成功" maxlength="200" clearable />
-        </el-form-item>
-        <div class="span-2 advanced-row">
-          <el-button
-            class="advanced-toggle"
-            text
-            :icon="showAdvanced ? ArrowUp : ArrowDown"
-            @click="showAdvanced = !showAdvanced"
-          >
-            {{ showAdvanced ? '收起高级设置' : '高级设置：Python 解释器' }}
-          </el-button>
         </div>
-        <el-form-item v-if="showAdvanced" class="span-2" label="Python 解释器（可选，留空则自动查找项目里的 .venv）">
-          <el-input v-model="config.python" placeholder="例如 D:/proj/.venv/Scripts/python.exe" clearable />
-        </el-form-item>
-      </el-form>
+
+        <div :class="['cfg-field', { 'is-editing': cfgEditing === 'targetPath' }]">
+          <div class="cfg-label" title="留空则由任务书按项目约定决定位置">目标文件</div>
+          <div v-if="cfgEditing !== 'targetPath'" class="cfg-view" @click="beginEdit('targetPath')">
+            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.targetPath }]">{{ config.targetPath || '留空，由任务书决定' }}</span>
+            <span class="cfg-acts">
+              <button type="button" class="cfg-act" :disabled="!config.workspace.trim()" @click.stop="openTargetPicker">浏览</button>
+            </span>
+          </div>
+          <el-input
+            v-else
+            :ref="el => setEditRef('targetPath', el)"
+            v-model="config.targetPath"
+            class="cfg-input"
+            :placeholder="targetPlaceholder"
+            clearable
+            @blur="endEdit"
+            @keyup.enter="endEdit"
+            @keyup.esc="endEdit"
+          />
+        </div>
+
+        <div :class="['cfg-field', { 'is-editing': cfgEditing === 'title' }]">
+          <div class="cfg-label">用例名称</div>
+          <div v-if="cfgEditing !== 'title'" class="cfg-view" @click="beginEdit('title')">
+            <span :class="['cfg-text', { 'is-empty': !config.title }]">{{ config.title || '例如：登录成功' }}</span>
+            <span class="cfg-hint">编辑</span>
+          </div>
+          <el-input
+            v-else
+            :ref="el => setEditRef('title', el)"
+            v-model="config.title"
+            class="cfg-input"
+            placeholder="例如：登录成功"
+            maxlength="200"
+            clearable
+            @blur="endEdit"
+            @keyup.enter="endEdit"
+            @keyup.esc="endEdit"
+          />
+        </div>
+
+        <!-- 高级项折成一行：值直接写在右侧，不用展开也知道当前用的是哪个解释器 -->
+        <button type="button" class="cfg-adv" @click="showAdvanced = !showAdvanced">
+          <span :class="['cfg-caret', { 'is-open': showAdvanced }]">
+            <el-icon :size="10"><ArrowDown /></el-icon>
+          </span>
+          <span>Python 解释器</span>
+          <span class="cfg-adv-value">{{ config.python ? tailPath(config.python) : '自动查找 .venv' }}</span>
+        </button>
+        <div v-if="showAdvanced" :class="['cfg-field', 'cfg-field--sub', { 'is-editing': cfgEditing === 'python' }]">
+          <div class="cfg-label">解释器路径（留空则自动查找项目里的 .venv）</div>
+          <div v-if="cfgEditing !== 'python'" class="cfg-view" @click="beginEdit('python')">
+            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.python }]">{{ config.python || '自动' }}</span>
+            <span class="cfg-hint">编辑</span>
+          </div>
+          <el-input
+            v-else
+            :ref="el => setEditRef('python', el)"
+            v-model="config.python"
+            class="cfg-input"
+            placeholder="例如 D:/proj/.venv/Scripts/python.exe"
+            clearable
+            @blur="endEdit"
+            @keyup.enter="endEdit"
+            @keyup.esc="endEdit"
+          />
+        </div>
+      </div>
+
+      <!-- 首屏的主行动放在配置末尾：它用的是上面这些设置，不该长在另一张卡里 -->
+      <div v-if="!isRecording && !steps.length && !compactMode" class="cfg-foot">
+        <el-button type="primary" class="cfg-start" :loading="starting" @click="startRecording">开始录制</el-button>
+      </div>
     </el-card>
 
     <div class="main-layout">
@@ -247,12 +324,17 @@
 
         <!-- 工具栏分两组：左边「现在对浏览器做什么」，右边「往步骤里插什么」。
              组本身是一块浅色底，按钮常态无边框，悬停才浮起——少一档样式，视觉就不会碎。 -->
-        <div :class="['toolbar', { 'is-lean': stepsCollapsed }]">
+        <!-- 首屏还没有会话时，这一排全是禁用按钮：不显示，注意力留给左边的「开始录制」。
+             面板/嵌入模式靠工具栏开始，所以那里始终保留。 -->
+        <div v-if="compactMode || session || steps.length" :class="['toolbar', { 'is-lean': stepsCollapsed }]">
           <div class="toolbar-group">
             <!-- 录制 / 拾取 / 关闭浏览器：这一组都不改步骤，改的是浏览器状态 -->
-            <el-button v-if="!isRecording" class="lean-wide" type="primary" :icon="VideoCamera" :loading="starting" @click="startRecording">开始</el-button>
-            <!-- 停止用实心红 + 白色方块，这是录制的通用记号；暂停/继续用浅色描边，避免两个重色按钮打架 -->
-            <el-button v-else type="danger" :loading="stopping" title="停止录制，步骤保留；浏览器不会关" @click="stopRecording">
+            <!-- 首屏（还没有步骤）把主行动放在配置卡末尾，这里就不再重复一个「开始」；
+                 面板/嵌入模式没有完整配置卡，仍由工具栏承担。 -->
+            <el-button v-if="!isRecording && (steps.length || compactMode)" class="lean-wide" type="primary" :icon="VideoCamera" :loading="starting" @click="startRecording">开始</el-button>
+            <!-- 停止用实心红 + 白色方块，这是录制的通用记号；暂停/继续用浅色描边，避免两个重色按钮打架。
+                 条件必须写全：上面那个「开始」在首屏是隐藏的，用 v-else 会让「停止」接在隐藏分支上。 -->
+            <el-button v-else-if="isRecording" type="danger" :loading="stopping" title="停止录制，步骤保留；浏览器不会关" @click="stopRecording">
               <span class="rec-stop" aria-hidden="true"></span>停止
             </el-button>
             <el-button
@@ -321,9 +403,13 @@
         </div>
         <el-alert v-if="session && session.error" :title="session.error" type="error" :closable="false" class="session-error" />
 
-        <div v-if="!steps.length && !draft" class="steps-empty">
+        <div v-if="!steps.length && !draft" :class="['steps-empty', { 'is-roomy': !compactMode }]">
           <span class="steps-empty-dot"></span>
-          <span>还没有步骤 · 点「开始」后，在弹出的浏览器里操作</span>
+          <span v-if="compactMode">还没有步骤 · 点「开始」后，在弹出的浏览器里操作</span>
+          <template v-else>
+            <div class="steps-empty-title">还没有步骤</div>
+            <div class="steps-empty-sub">点左侧「开始录制」，会在独立窗口打开被测页面。你在页面上点过、输入过的内容，会一条条出现在这里。</div>
+          </template>
         </div>
 
         <ol v-if="steps.length" ref="timelineEl" class="timeline">
@@ -715,7 +801,7 @@
       </el-card>
 
       <!-- 生成：面板模式下录制中就藏起来，停止后再出现（面板空间留给步骤） -->
-      <el-card v-if="!compactMode || isStopped" class="panel-card generate-card">
+      <el-card v-if="session && (!compactMode || isStopped)" class="panel-card generate-card">
         <template #header>
           <div class="section-header">
             <span class="card-title">生成</span>
@@ -1142,9 +1228,10 @@ import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
 
 // 与后端保持一致的常量（backend/app/services/recording/intent.py、locators.py）
+// short 用于配置区的分段控制器：两个取值要在一行里放下，全称太长会把分段挤成两行。
 const FRAMEWORKS = [
-  { value: 'robot-selenium', label: 'Robot Framework（SeleniumLibrary）' },
-  { value: 'playwright-ts', label: 'Playwright TypeScript' }
+  { value: 'robot-selenium', label: 'Robot Framework（SeleniumLibrary）', short: 'Robot Framework' },
+  { value: 'playwright-ts', label: 'Playwright TypeScript', short: 'Playwright TS' }
 ]
 const ASSERT_TYPES = ['visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled', 'url_contains', 'page_text_contains']
 // 合并前的老类型 wait_visible / wait_hidden 只会从历史数据里读到，不再出现在下拉里，
@@ -1185,6 +1272,24 @@ const RF_ORDER = ['rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_id
 const FRAGILE_KINDS = ['css', 'rf_css']
 
 const config = reactive(loadConfig())
+
+// ---- 配置行：默认只读，点开才就地展开 ----
+// 六个输入框常驻会把 400px 的侧栏塞成注册表单；默认只显示「值」，
+// 点某一行才换成输入框。只记一个字段名，同一时刻只允许一行处于编辑态。
+const cfgEditing = ref(null)
+const cfgEditRefs = {}
+function setEditRef(name, el) {
+  if (el) cfgEditRefs[name] = el
+}
+async function beginEdit(name) {
+  cfgEditing.value = name
+  // el-input 的 focus() 要等它真的挂上去；同一 tick 里调用会打在旧 DOM 上。
+  await nextTick()
+  cfgEditRefs[name]?.focus?.()
+}
+function endEdit() {
+  cfgEditing.value = null
+}
 // 两种「围绕录制」的布局：
 // - panel=1：split 模式下的独立面板窗口，后端用 CDP 和被测页面左右并排；
 // - embed=1：嵌入模式，本页就是唯一窗口，左边 iframe 加载 target，右边是编排面板。
@@ -3298,7 +3403,7 @@ watch(steps, (list) => {
 <style scoped>
 .recording-page { max-width:1440px; margin:0 auto; animation: page-enter .32s ease both; }
 
-/* 按钮的基础规范见 styles/workspace-buttons.css（本页根元素挂了 workspace-buttons 类）；
+/* 按钮的基础规范见 styles/buttons.css（本页根元素挂了 ui-buttons 类）；
    下面只放本页特有的按钮形态。 */
 
 /* 卡片头两侧的轻量按钮（面板模式的「并排 / 配置」） */
@@ -3372,13 +3477,13 @@ watch(steps, (list) => {
 .is-panel .toolbar :deep(.el-button) { padding:6px 10px; font-size:12.5px; height:30px; }
 .is-panel .config-card :deep(.el-card__body) { padding:14px; }
 /* 面板/嵌入模式只有 600px 宽，配置改回单列 */
-.is-panel .config-form--grid, .is-embed .page-col .config-form--grid { grid-template-columns:1fr; gap:0; }
 
 /* 页头：与「自动化脚本」页保持一致 */
-.page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:22px; }
-.eyebrow { color:#0071e3; font-size:11px; font-weight:700; letter-spacing:1.4px; margin-bottom:8px; text-transform:uppercase; }
-h1 { margin:0; color:#1d1d1f; font-size:22px; font-weight:700; letter-spacing:-.3px; }
-.page-header p { margin:4px 0 0; color:#6e6e73; font-size:13px; line-height:1.5; max-width:820px; }
+/* 页头收一档：小字从蓝色大写标签改成灰色注脚，标题靠字重而不是字号抢视线 */
+.page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:20px; }
+.eyebrow { color:var(--muted); font-size:10.5px; font-weight:600; letter-spacing:.09em; margin-bottom:6px; text-transform:uppercase; }
+h1 { margin:0; color:#15181d; font-size:22px; font-weight:600; letter-spacing:-.02em; }
+.page-header p { margin:6px 0 0; color:#7a8494; font-size:12.5px; line-height:1.6; max-width:820px; }
 .page-intro { min-width:0; }
 .page-actions { display:flex; align-items:center; gap:8px; flex:none; padding-top:2px; }
 .hint-dot { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; margin-left:3px; border-radius:50%; background:#eef1f6; color:#86909c; font-size:10px; font-weight:700; cursor:help; vertical-align:1px; }
@@ -3405,53 +3510,90 @@ h1 { margin:0; color:#1d1d1f; font-size:22px; font-weight:700; letter-spacing:-.
 .field-hint { color:#909399; font-size:12px; line-height:1.5; margin-top:6px; }
 .root-hint { margin-left:6px; color:#a8abb2; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11.5px; }
 
-/* 输入框右侧的动作区：不再是两个浮着的小白块，而是与输入框同高、通顶的分段动作，
-   只靠一条竖线分隔，hover 才有底色 —— 视觉上和输入框是一个整体。 */
-:deep(.el-input-group__append) {
-  padding: 0;
-  background: #f7f8fa;
-  border-left: 1px solid var(--btn-line);
-  box-shadow: none;
+/* ===== 配置区（静物）=====
+   默认是一排「标签 + 值」，点开才换成输入框。整块只有两种分隔线：行与行之间的细线、
+   编辑态的下划线；不再给每个字段套一个盒子，也不再用蓝色竖条标记卡片标题。 */
+.config-card {
+  /* 全部指向 tokens.css：这套「静物」语言现在要铺到别的页面，值只能有一处定义 */
+  --cfg-ink: var(--ink);
+  --cfg-muted: var(--muted);
+  --cfg-line: var(--line);
+  --cfg-line-soft: var(--line-soft);
+  --cfg-accent: var(--accent);
+  --cfg-mono: var(--mono);
 }
-:deep(.el-input-group__append) .append-group { display: flex; align-items: stretch; height: 100%; }
-:deep(.el-input-group__append) .append-group .el-button {
-  flex: 0 0 auto; margin: 0; height: 100%; padding: 0 12px;
-  border: 0; border-radius: 0; background: transparent; box-shadow: none;
-  color: #4a5160; font-size: 12.5px; font-weight: 500;
+/* 卡片撑满左列：主行动要贴住卡片底边，否则下面会空出一大块白 */
+.config-card { display:flex; flex-direction:column; }
+.config-card :deep(.el-card__header) { flex:none; padding:14px 20px; background:#fff; }
+.config-card :deep(.el-card__body) { flex:1; display:flex; flex-direction:column; padding:2px 20px 18px; }
+.config-card .card-title { font-size:14px; font-weight:600; }
+.config-card .card-title::before { display:none; }
+.cfg-saved { margin-left:auto; font-size:11.5px; color:var(--cfg-muted); }
+
+.cfg-form { flex:1; display:flex; flex-direction:column; }
+.cfg-field { padding:13px 0 2px; border-bottom:1px solid var(--cfg-line-soft); }
+.cfg-field:last-of-type { border-bottom:0; }
+.cfg-field--sub { border-bottom:0; padding-top:10px; }
+.cfg-label { font-size:11.5px; color:var(--cfg-muted); letter-spacing:.01em; }
+.cfg-view { display:flex; align-items:center; gap:10px; height:32px; cursor:text; }
+.cfg-text { flex:1; min-width:0; font-size:13px; color:var(--cfg-ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; transition:color .14s ease; }
+.cfg-view:hover .cfg-text { color:#000; }
+/* 工作区只能通过「更换」选目录，这一行本身不可编辑：光标和悬停态都不能骗人 */
+.cfg-view.is-static { cursor:default; }
+.cfg-view.is-static:hover .cfg-text { color:var(--cfg-ink); }
+.cfg-text.is-empty { color:#b3bac5; }
+.cfg-field--hero .cfg-text { font-size:14px; }
+.cfg-mono { font-family:var(--cfg-mono); font-size:12.5px; letter-spacing:-.01em; }
+/* 「编辑」只在悬停时出现：默认状态是一张摘要，不该有七个提示在喊 */
+.cfg-hint { flex:none; font-size:11.5px; color:#c2c8d2; opacity:0; transition:opacity .14s ease, color .14s ease; }
+.cfg-view:hover .cfg-hint { opacity:1; color:var(--cfg-accent); }
+.cfg-acts { display:flex; gap:12px; flex:none; }
+.cfg-act { border:0; background:none; padding:0; font-size:11.5px; color:#9aa3b1; cursor:pointer; transition:color .14s ease; }
+.cfg-act:not(:disabled):hover { color:var(--cfg-accent); }
+.cfg-act:disabled { color:#d3d8e0; cursor:default; }
+
+/* 编辑态：只剩一条下划线，聚焦时变蓝加粗 */
+/* 与只读行同高（32px）：切换编辑时下面的行不能跳一下 */
+.cfg-input { height:32px; }
+.cfg-input :deep(.el-input__wrapper) {
+  height:32px; padding:0 0 5px; background:transparent; border-radius:0; box-shadow:none;
+  border-bottom:1px solid var(--cfg-line);
 }
-:deep(.el-input-group__append) .append-group .el-button:hover { background: #eaf2fd; color: #0071e3; }
-:deep(.el-input-group__append) .append-group .el-button.is-disabled { background: transparent; color: #b3b9c2; }
-.append-sep { flex: 0 0 auto; align-self: center; width: 1px; height: 16px; margin: 0; background: #e3e6ea; }
-
-/* 「高级设置」：从 16px 高的裸链接改成标准文字按钮（有 hover 底色），
-   但压到 26px，不抢表单字段的视觉重量 */
-.advanced-row { margin: -6px 0 6px; }
-.recording-page :deep(.el-button.advanced-toggle.is-text) {
-  height: 26px;
-  margin-left: -8px;
-  padding: 0 8px;
-  border-radius: 7px;
-  color: #5b6472;
-  font-size: 12.5px;
-  font-weight: 500;
+.cfg-input :deep(.el-input__wrapper.is-focus) {
+  border-bottom:1.5px solid var(--cfg-accent); padding-bottom:4.5px;
 }
-.recording-page :deep(.el-button.advanced-toggle.is-text:hover) { background: #f2f7ff; color: #0071e3; }
+.cfg-input :deep(.el-input__inner) { font-family:var(--cfg-mono); font-size:12.5px; color:var(--cfg-ink); }
+.cfg-input :deep(.el-input__inner::placeholder) { font-family:var(--cfg-mono); color:#b3bac5; }
+.cfg-select { width:100%; height:32px; }
+.cfg-select :deep(.el-select__wrapper) {
+  min-height:32px; height:32px; padding:0 0 5px; background:transparent; box-shadow:none; border-radius:0;
+  border-bottom:1.5px solid var(--cfg-accent);
+}
 
-/* 配置：两列网格，起始地址/工作区/目标文件占整行；Python 解释器进「高级设置」 */
-.config-form--grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:0 20px; align-items:start; }
-.config-form--grid .span-2 { grid-column:1 / -1; }
-.config-form :deep(.el-form-item__label) { font-size:12.5px; font-weight:600; color:#303133; padding-bottom:4px; }
-.config-form :deep(.el-form-item) { margin-bottom:12px; }
-/* el-form-item__content 默认是横向 flex，输入框 + 提示 + 检测结果会被挤到一行；这里改成纵向 */
-.config-form :deep(.el-form-item__content) { flex-direction:column; align-items:stretch; }
+/* 框架：只有两个取值，分段控制器比下拉少一次点击，也让「当前用哪套」一直可见 */
+.cfg-seg { display:inline-flex; gap:2px; margin:8px 0 10px; padding:2px; border-radius:9px; background:#f2f4f7; }
+.cfg-seg-item { border:0; background:transparent; padding:6px 12px; border-radius:7px; font-size:12px; color:#7a8494; cursor:pointer; transition:background .14s ease, color .14s ease; }
+.cfg-seg-item:hover { color:var(--cfg-ink); }
+.cfg-seg-item.is-on { background:#fff; color:var(--cfg-ink); box-shadow:0 1px 2px rgba(16,24,40,.09); }
 
-/* 检测结果：一行 chips，细节折叠在「依据与参考文件」里 */
-.detect-inline { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; }
-.detect-chip { display:inline-flex; align-items:center; height:22px; padding:0 9px; border-radius:999px; background:#f2f5f9; color:#5b6472; font-size:11.5px; font-family:ui-monospace, 'Cascadia Code', Consolas, monospace; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.detect-chip.is-ok { background:#eaf7ef; color:#1e7a46; }
-.detect-chip.is-warn { background:#fff7e6; color:#ad6800; }
-.detect-more { flex-basis:100%; margin-top:2px; font-size:12px; color:#6e6e73; }
-.detect-more summary { cursor:pointer; color:#0071e3; font-size:12px; }
+/* 检测结果：小方片而不是药丸——药丸太像标签，杂在表单里更吵 */
+.cfg-detect { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:0 0 10px; }
+.cfg-chip { display:inline-flex; align-items:center; height:20px; padding:0 7px; border-radius:5px; background:#f4f6f9; color:#5b6472; font-size:11px; font-family:var(--cfg-mono); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cfg-chip.is-ok { background:#edf7f1; color:#1e7a46; }
+.cfg-chip.is-warn { background:#fdf6ea; color:#ad6800; }
+.cfg-details { flex-basis:100%; margin-top:4px; font-size:11.5px; color:#7a8494; }
+.cfg-details summary { cursor:pointer; color:#98a1b0; }
+
+/* 高级项：折成一行，右侧直接写当前值，不展开也知道用的是哪个解释器 */
+.cfg-adv { display:flex; align-items:center; gap:6px; width:100%; margin-top:12px; padding:10px 0 2px; border:0; background:none; font-size:11.5px; color:#98a1b0; cursor:pointer; text-align:left; }
+.cfg-adv:hover { color:var(--cfg-accent); }
+.cfg-caret { display:inline-flex; transform:rotate(-90deg); transition:transform .16s ease; }
+.cfg-caret.is-open { transform:rotate(0deg); }
+.cfg-adv-value { margin-left:auto; font-family:var(--cfg-mono); color:#b3bac5; }
+
+/* 主行动：整宽收在配置末尾，它是上面这些设置的出口 */
+.cfg-foot { margin-top:auto; padding-top:16px; border-top:1px solid var(--cfg-line-soft); }
+.config-card .el-button.cfg-start { width:100%; height:38px; border-radius:9px; font-size:13px; letter-spacing:0; }
 code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size:12px; }
 .detect-sample { color:#1d1d1f; font-family: ui-monospace, Consolas, monospace; font-size:12px; line-height:1.7; }
 .evidence-line { display:flex; gap:8px; padding:3px 0; }
@@ -3462,8 +3604,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .main-layout { display:flex; flex-direction:column; gap:16px; min-width:0; }
 /* 左配置 / 右步骤+生成：一屏看完，生成记录单独成页 */
 /* 普通模式整页锁一屏：标题常驻，左右两列各自内部滚动，步骤再多也不把页面撑长。
-   100dvh - 72(顶栏) - 44(上下留白) = 内容高度 */
-.recording-page:not(.is-panel):not(.is-embed) { height:calc(100dvh - 116px); display:flex; flex-direction:column; }
+   100dvh - 56(顶栏) - 44(上下留白 22×2) = 内容高度 */
+.recording-page:not(.is-panel):not(.is-embed) { height:calc(100dvh - 100px); display:flex; flex-direction:column; }
 /* page-col 是内容的外壳（embed 模式也用它）：普通模式下必须把高度传下去，链条才不断 */
 .recording-page:not(.is-panel):not(.is-embed) .page-col { flex:1; min-height:0; display:flex; flex-direction:column; }
 .recording-page:not(.is-panel):not(.is-embed) .page-col > .page-header { flex:none; }
@@ -3475,7 +3617,6 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .recording-body .steps-card { flex:1; min-height:0; display:flex; flex-direction:column; }
 .recording-body .steps-card :deep(.el-card__body) { flex:1; min-height:0; overflow-y:auto; }
 .recording-body .generate-card { flex:none; }
-.recording-body .config-form--grid { grid-template-columns:1fr; gap:0; }
 .recording-body .panel-card { margin-bottom:0; }
 .gen-result-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px; }
 .gen-result-actions .field-hint { margin-top:0; }
@@ -3574,6 +3715,11 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 空状态：一行提示，别用 el-empty 那张大插画占半屏 */
 .steps-empty { display:flex; align-items:center; gap:8px; margin-top:14px; padding:12px 14px; border:1px dashed #e4e7ed; border-radius:10px; background:#fbfcfe; color:#909399; font-size:13px; }
 .steps-empty-dot { flex:none; width:7px; height:7px; border-radius:50%; background:#c9d6ea; }
+/* 宽屏首屏右侧本来就空：给一句说明，而不是一条空横线 */
+.steps-empty.is-roomy { flex-direction:column; align-items:center; gap:8px; margin-top:0; padding:72px 24px; border:0; background:transparent; text-align:center; }
+.steps-empty.is-roomy .steps-empty-dot { width:9px; height:9px; margin-bottom:6px; background:#dbe4f2; box-shadow:0 0 0 6px rgba(201,214,234,.22); }
+.steps-empty-title { font-size:13px; color:#5d6675; }
+.steps-empty-sub { font-size:12px; color:#9aa3b1; line-height:1.75; max-width:330px; }
 
 /* 时间线 */
 .timeline { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:8px; }
@@ -4038,7 +4184,6 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
   .recording-page:not(.is-panel):not(.is-embed) { height:auto; }
   .recording-body { grid-template-columns:1fr; grid-template-rows:auto; }
   .recording-body .config-card { overflow:visible; }
-  .config-form--grid { grid-template-columns:1fr; }
   .form-grid { grid-template-columns:1fr; }
 }
 /* 系统开了「减弱动态效果」就全部瞬时完成 */

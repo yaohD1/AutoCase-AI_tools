@@ -1,0 +1,76 @@
+/* ==================== 设计 token ====================
+   「静物」这一版的所有页面共用。原则只有四条：
+     1. 颜色只分三级：正文近黑、说明灰、失效浅灰；强调只有一支蓝。
+     2. 分隔靠 1px 线，不靠盒子；盒子只留给真正需要边界的整块内容。
+     3. 标签小（11.5px）值大（13~14px），层级靠字号和颜色拉开，不靠字重堆。
+     4. 圆角只有两档：卡片 14、控件 8~9。
+
+   数值改这里就够了 —— 页面里不要再写死 #15181d / #8d97a6 这类字面量。 */
+
+:root {
+  /* 文字 */
+  --ink: #15181d;          /* 正文、当前值 */
+  --ink-2: #3c4048;        /* 次级正文 */
+  --muted: #8d97a6;        /* 标签、说明 */
+  --faint: #b3bac5;        /* 占位、失效 */
+
+  /* 线 */
+  --line: rgba(0, 0, 0, .28);        /* 输入框下划线 */
+  --line-soft: rgba(0, 0, 0, .06);   /* 行分隔、卡片边 */
+  --line-faint: rgba(0, 0, 0, .04);  /* 表格行 */
+
+  /* 语义色 */
+  --accent: #0071e3;
+  --accent-soft: #eef4fd;
+  --danger: #ff3b30;
+  --ok: #1e7a46;
+  --ok-soft: #edf7f1;
+  --warn: #ad6800;
+  --warn-soft: #fdf6ea;
+
+  /* 形状 */
+  --radius-card: 14px;
+  --radius-ctl: 8px;
+  --radius-chip: 5px;
+
+  /* 字体 */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+  /* 尺寸 */
+  --ctl-h: 32px;
+}
+
+/* ==================== 页面通用小件 ==================== */
+
+/* 眉标：全站统一灰，不用蓝 —— 蓝色留给唯一的主动作 */
+.eyebrow {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+/* 小方片，用来标状态、优先级、类型。
+   比药丸（圆角 999）安静：药丸太像标签，成排出现时整张表都在喊。 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--radius-chip);
+  background: #f4f6f9;
+  color: #5b6472;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.chip.is-ok { background: var(--ok-soft); color: var(--ok); }
+.chip.is-warn { background: var(--warn-soft); color: var(--warn); }
+.chip.is-danger { background: #fdeeed; color: #c9342b; }
+.chip.is-accent { background: var(--accent-soft); color: #0b62c4; }
+.chip.is-mute { background: #f4f6f9; color: var(--faint); }
+
+/* 等宽小字：路径、ID、URL 一律用它 */
+.mono { font-family: var(--mono); font-size: 12.5px; letter-spacing: -.01em; }
