@@ -126,6 +126,15 @@
   - Selenium 没有等价 API：RF 侧用 `Wait For Condition    return document.readyState === "complete"`。
 - 点击引起的跳转不记 `goto`，但落点写在**点击那一步**的 `nav_to` 上（`session._mark_click_nav`，只回看三步，能跨过 `new_page`）。生成时据此补 `await page.waitForURL("**" + 路径)`，否则写出来是「点完直接找下一个元素」，站点一慢下一步就扑空。
   - 只取路径、不写死带查询串的整条 URL；`nav_to` 同时显示在步骤行（`.step-nav`，形如 `→ /home?tab=1`），用来解释脚本里那行 `waitForURL` 不是凭空多出来的。
+- 封装动作（`services/recording/actions.py` + 步骤类型 `call`）：录到一串重复操作（登录、新增一条记录）时，选中**连续的**几步合成一个具名动作，原位置替换成一次调用。动作可反复插入、每次传不同实参，生成时写成一个函数。
+  - 数据：`steps` 里出现 `{type:'call', action:'a1', args:{...}}`；动作定义在 `session._actions`，子步骤保留完整定位，只把要参数化的 `value` / `label` 换成 `{{key}}` 占位符。解封就是拿实参替换回占位符、原样铺回去，不做反推。
+  - **只能选连续区间**。中间跳过一步再合体，展开后的顺序不是用户看到的那个；`_tied_range` 会把区间自动扩到不切断「点击 → new_page」的绑定。含 `call` 的区间不能再封装（不嵌套）。
+  - **生成时 call 不展开**（`emit._steps_for_prompt`）：写手要看到「这是一次调用」才会写成函数调用，展开成平铺的 4 步它就真写 4 行，封装等于白做。`_payload` 另给一份 `actions`（子步骤定位 + 占位符 + `called_at`），提示词里写死「同一动作的每次调用必须复用同一个函数」。
+  - **回放要展开**（`replay._expand`）：`_run` 只认原子操作。展开会重排编号，报告里的步号是展开后的。
+  - 动作库按项目存 `<工作区>/.autocase/actions.json`（录制开始时随 `body.workspace` 载入）。没选工作区就只存在内存里，`snapshot().actions_saved` 为 false，界面标「仅本次」；写盘失败不打断操作，只降级。
+  - 删除动作要求它**没有调用点**，否则那些步骤会变成指向空气的调用；解封不删动作定义（别处可能还在用）。改了动作名会同步所有调用卡的显示名。
+  - 参数名优先取元素快照里的 `snap.name` / `placeholder`（往往就是代码里的 `username`），中文别名转不出合法标识符才退回 `arg` / `arg2`，用户在封装弹窗里可改。
+  - 界面：工具栏「封装」进多选态（行内换成勾选圈、拖拽关闭、Esc 退出），底部浮出「已选 N 步」条；`el-popover` 里的按钮必须给 `popper-class` 加 `ui-buttons`，否则 `primary + plain` 会退化成蓝底蓝字（全站那份兜底规则只覆盖 `.ui-buttons` / `.dialog` 容器）。
 - 生成记录独立成页：路由 `/recording/records`，视图 `views/RecordingRecords.vue`。页头用 `.list-page` 那套（灰眉标 + 21px 标题 + 一句陈述），页脚只有「刷新」+ 文字链接「返回录制」。
   - 两栏平卡：左 320px 列表（文件名 mono + 目录/时间，状态用 `.chip`），右详情（步骤表 / 深色文件预览 / Agent 说明），提交盒 `flex:none` 钉在右下角，只有「未提交」才出现；撤销改成右上角的文字按钮，不和主行动抢位。
   - 默认选中最新一条；带 `?id=` 时选中指定那条。录制页只留一个跳转按钮，records 的 state/函数/CSS 不要留在 `Recording.vue`。

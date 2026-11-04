@@ -213,6 +213,28 @@ batchDeleteTestcases(ids) {
   moveRecordingStep(no, direction) {
     return api.post(`/automation/recording/steps/${no}/move`, { direction })
   },
+  // 封装：把连续的几步换成一个具名动作，原位置变成一次调用。
+  // params 每项 {step, key, label, field}，不传就是不参数化。
+  groupRecordingAction(steps, name, desc = '', params = []) {
+    return api.post('/automation/recording/actions', { steps, name, desc, params })
+  },
+  renameRecordingAction(actionId, payload) {
+    return api.patch(`/automation/recording/actions/${actionId}`, payload)
+  },
+  deleteRecordingAction(actionId) {
+    return api.delete(`/automation/recording/actions/${actionId}`)
+  },
+  // 插入一次调用；args 缺的键会用第一次调用时的值补上。
+  insertRecordingCall(actionId, afterNo = null, args = null) {
+    return api.post(`/automation/recording/actions/${actionId}/calls`, { after_no: afterNo, args })
+  },
+  // 解封：把这一次调用还原成它包含的原始步骤（动作定义保留）。
+  ungroupRecordingStep(no) {
+    return api.post(`/automation/recording/steps/${no}/ungroup`)
+  },
+  updateRecordingCallArgs(no, args) {
+    return api.patch(`/automation/recording/steps/${no}/args`, { args })
+  },
   addRecordingStep(payload) {
     return api.post('/automation/recording/steps', payload)
   },

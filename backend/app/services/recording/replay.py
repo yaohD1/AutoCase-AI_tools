@@ -348,17 +348,30 @@ def _run(steps, framework, headless, on_step):
     return done
 
 
-def replay(steps, headless=True, framework=PW_FRAMEWORK):
+def replay(steps, headless=True, framework=PW_FRAMEWORK, actions=None):
     """steps 为 RecordingSession.ir() 的结果。返回执行过的步骤数。失败抛 ReplayError。"""
-    return _run(steps, framework, headless, None)
+    return _run(_expand(steps, actions), framework, headless, None)
 
 
-def replay_checked(steps, framework=PW_FRAMEWORK, headless=True):
+def _expand(steps, actions):
+    """动作调用先展开成子步骤再跑：_run 只认识原子操作。
+
+    展开会按展开后的顺序重排编号，所以报告里的步号是「展开后」的。
+    失败时用户看的是描述（哪一步、什么类型），编号错位不影响定位问题。
+    """
+    if not actions or not any(s.get('type') == 'call' for s in steps):
+        return steps
+    from app.services.recording import actions as actions_mod
+    return actions_mod.expand(steps, actions)
+
+
+def replay_checked(steps, framework=PW_FRAMEWORK, headless=True, actions=None):
     """回放并把每一步的结果收集成报告。
 
     失败不抛异常（前端需要展示「前面几步走通了、第 N 步定位失效」），
     返回 {'ok', 'done', 'total', 'steps': [...], 'error', 'failed_no'}。
     """
+    steps = _expand(steps, actions)
     trace = []
     payload = {'framework': framework, 'total': len(steps), 'steps': trace}
     try:

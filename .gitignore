@@ -71,3 +71,5 @@ shots/_*.png
 shots/_*.json
 shots/_*.txt
 shots/_dialog_styles.html
+# opencode 每次调用生成的临时配置（含 MCP 定义），落在 cwd 时会被 git 看到
+opencode.emit-*.json

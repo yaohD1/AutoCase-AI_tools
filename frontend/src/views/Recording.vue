@@ -476,6 +476,58 @@
             <el-button :icon="Loading" :disabled="!canEdit" title="插入一步：等页面加载到指定状态。点击后页面跳转、站点又慢的时候用它，比固定等待可靠" @click="openDraft('ready')">等待加载</el-button>
             <el-button :icon="Clock" :disabled="!canEdit" title="插入一步：不管条件，先干等指定秒数。等页面加载请用左边的「等待加载」——固定等待既慢又不可靠" @click="openDraft('sleep')">固定等待</el-button>
           </div>
+
+          <span class="toolbar-sep"></span>
+
+          <!-- 封装：录到「一连串重复动作」时把它们合成一个有名字的动作。
+               动作是项目级的（写进 .autocase/actions.json），下次录制还能直接插入。 -->
+          <div class="toolbar-group">
+            <el-button
+              :type="selectMode ? 'warning' : 'default'"
+              :plain="selectMode"
+              :icon="selectMode ? Close : Files"
+              :disabled="!canEdit || !steps.length"
+              :title="selectMode ? '退出封装选择（Esc）' : '多选连续的几步，把它们封装成一个可以反复调用的动作'"
+              @click="toggleSelectMode"
+            >
+              {{ selectMode ? '取消封装' : '封装' }}
+            </el-button>
+            <el-popover
+              v-model:visible="actionLib.open"
+              placement="bottom-end"
+              :width="340"
+              trigger="click"
+              popper-class="action-lib-popper ui-buttons"
+            >
+              <template #reference>
+                <el-button :icon="Box" :disabled="!steps.length" title="动作库：把已封装的动作插入到流程末尾">
+                  动作库<span v-if="actions.length" class="lib-count">{{ actions.length }}</span>
+                </el-button>
+              </template>
+              <div class="lib-head">
+                <span class="lib-title">已封装的动作</span>
+                <span v-if="!session || !session.actions_saved" class="lib-warn" title="没有选择工作区，动作只在本次录制有效">仅本次</span>
+              </div>
+              <div v-if="!actions.length" class="lib-empty">
+                还没有动作。选中连续的几步，点「封装」把它们合成一个。
+              </div>
+              <div v-else class="lib-list">
+                <div v-for="action in actions" :key="action.id" class="lib-item">
+                  <div class="lib-item-main">
+                    <div class="lib-name lib-name-btn" title="点击重命名" @click="renameAction(action)">{{ action.name }}</div>
+                    <div class="lib-meta">
+                      {{ action.steps }} 步 · 已调用 {{ action.calls }} 次
+                      <template v-if="action.params.length"> · {{ action.params.map(p => p.key).join(' / ') }}</template>
+                    </div>
+                  </div>
+                  <el-button size="small" type="primary" plain :disabled="!canEdit"
+                             style="flex:none;white-space:nowrap" @click="insertAction(action)">插入</el-button>
+                  <el-button size="small" text :icon="Delete" :disabled="!canEdit || action.calls > 0"
+                             :title="action.calls > 0 ? '还有调用点，先解封再删' : '从动作库删除'" @click="removeAction(action)" />
+                </div>
+              </div>
+            </el-popover>
+          </div>
         </div>
 
         <!-- 断言解析器：录制一开始就在后台起进程并预热。状态放这一行，
@@ -514,9 +566,20 @@
             v-for="step in steps"
             :key="step.no"
             :data-step-no="step.no"
-            :class="['step', { 'is-blocked': ['ambiguous', 'suspect'].includes(effectiveStatus(step)), 'is-flash': flashingNo === step.no }]"
+            :class="['step', {
+              'is-blocked': ['ambiguous', 'suspect'].includes(effectiveStatus(step)),
+              'is-flash': flashingNo === step.no,
+              'is-selecting': selectMode,
+              'is-picked': isPicked(step.no),
+              'is-call': step.type === 'call'
+            }]"
+            @click="onRowClick(step)"
           >
-            <div class="step-no" :title="canEdit ? '按住拖动可排序' : ''">{{ step.no }}</div>
+            <!-- 多选态下编号位置换成勾选圈：拖拽排序这时候关着，编号没有用 -->
+            <div v-if="selectMode" class="step-check" :class="{ 'is-on': isPicked(step.no) }">
+              <span v-if="isPicked(step.no)" class="step-check-mark"></span>
+            </div>
+            <div v-else class="step-no" :title="canEdit ? '按住拖动可排序' : ''">{{ step.no }}</div>
             <div class="step-body">
               <!-- 就地编辑：只改值，不动定位 -->
               <div v-if="editing && editing.no === step.no" class="step-editor">
@@ -608,6 +671,16 @@
                   </span>
                   <span class="step-text">{{ stepDescription(step) }}</span>
                 </div>
+                <!-- 调用卡：把这次调用的实参摊开。不同调用点通常只差这一两个值，
+                     不显示的话用户得逐个点开才发现「这里传的还是 admin」。 -->
+                <div v-if="step.type === 'call'" class="call-args">
+                  <span v-for="arg in callArgs(step)" :key="arg.key" class="call-arg">
+                    <span class="call-arg-key">{{ arg.key }}</span>
+                    <span class="call-arg-value">{{ arg.value || '（空）' }}</span>
+                  </span>
+                  <span v-if="!callArgs(step).length" class="call-noarg">无参数</span>
+                  <span v-if="callMissing(step)" class="call-missing" title="动作库里找不到这个动作，解封或删除它">动作已删除</span>
+                </div>
                 <div v-if="step.text" class="step-note">{{ step.text }}</div>
                 <!-- 点击引起的跳转：脚本里会在这一步后补一句「等跳转落地」，
                      这里把落点标出来，否则生成的那行 waitForURL 看起来像凭空多出来的 -->
@@ -679,7 +752,25 @@
                 </div>
               </template>
             </div>
-            <div class="step-actions">
+            <div v-if="!selectMode" class="step-actions">
+              <!-- 动作调用没有定位可编辑：改的是实参，或者解封回原始步骤 -->
+              <template v-if="step.type === 'call'">
+                <el-button
+                  v-if="callAction(step) && callAction(step).params.length"
+                  text
+                  :icon="EditPen"
+                  :disabled="!canEdit"
+                  title="改这一次调用的参数值"
+                  @click.stop="openArgsDialog(step)"
+                />
+                <el-button
+                  text
+                  :icon="Unlock"
+                  :disabled="!canEdit"
+                  title="解封：把这一步还原成封装前的几步（动作定义保留）"
+                  @click.stop="ungroupStep(step)"
+                />
+              </template>
               <!-- 「在这一步之后插入」：hover 才出现，点开选断言 / 固定等待 / 刷新。
                    拖拽只能挪已录的步骤，中途补一步才是高频动作，所以入口放在行尾。 -->
               <el-dropdown
@@ -725,6 +816,18 @@
             </div>
           </li>
         </ol>
+
+        <!-- 多选操作条：只认连续区间。中间跳过一步再合体，展开后的顺序就不是用户看到的顺序了。 -->
+        <div v-if="selectMode" class="select-bar">
+          <div class="select-info">
+            <span class="select-count">已选 {{ pickedNos.length }} 步</span>
+            <span :class="['select-hint', { 'is-bad': pickHintBad }]">{{ pickHint }}</span>
+          </div>
+          <div class="select-actions">
+            <el-button size="small" @click="toggleSelectMode">取消</el-button>
+            <el-button size="small" type="primary" :disabled="!canGroup" @click="openGroupDialog">封装为动作</el-button>
+          </div>
+        </div>
 
         <!-- 断言 / 等待 / 固定等待 模板 -->
         <div v-if="draft" class="draft-card">
@@ -1459,6 +1562,81 @@
         </template>
       </el-dialog>
 
+      <!-- 封装为动作：名字 + 说明 + 参数表。参数表只列输入值，
+           断言和点击没有「可替换的值」，硬塞进来只会让表单变长。 -->
+      <el-dialog
+        v-model="groupDialog.visible"
+        title="封装为动作"
+        width="min(520px, calc(100vw - 24px))"
+        :close-on-click-modal="false"
+        append-to-body
+        class="group-dialog"
+      >
+        <div class="gd-body">
+          <div class="gd-field">
+            <span class="gd-label">动作名</span>
+            <el-input v-model="groupDialog.name" size="small" maxlength="40" placeholder="例如 登录、新增一条记录" />
+          </div>
+          <div class="gd-field">
+            <span class="gd-label">说明</span>
+            <el-input v-model="groupDialog.desc" size="small" maxlength="200" placeholder="可选，会写进代码注释" />
+          </div>
+          <div class="gd-section">
+            <span>参数</span>
+            <span class="gd-sub">自动识别自输入值，取消勾选就写死</span>
+          </div>
+          <div v-if="!groupDialog.params.length" class="gd-empty">
+            这段步骤里没有输入值，封装后是一个不带参数的动作。
+          </div>
+          <div v-else class="gd-params">
+            <div class="gd-param is-head">
+              <span></span><span>参数名</span><span>原值</span><span>来源</span>
+            </div>
+            <div v-for="p in groupDialog.params" :key="p.step + '-' + p.field" class="gd-param">
+              <el-checkbox v-model="p.on" size="small" />
+              <el-input v-model="p.key" size="small" :disabled="!p.on" maxlength="32" />
+              <span class="gd-value" :title="p.value">{{ p.value }}</span>
+              <span class="gd-from">第 {{ p.step }} 步</span>
+            </div>
+          </div>
+          <div class="gd-preview">
+            包含 {{ groupDialog.steps.length }} 步 · {{ groupDialog.params.filter(p => p.on).length }} 个参数
+            <template v-if="groupDialog.noWorkspace"> · 没选工作区，动作只在本次录制有效</template>
+          </div>
+        </div>
+        <template #footer>
+          <el-button size="small" @click="groupDialog.visible = false">取消</el-button>
+          <el-button
+            size="small"
+            type="primary"
+            :loading="groupDialog.busy"
+            :disabled="!groupDialog.name.trim()"
+            @click="submitGroup"
+          >封装并替换这 {{ groupDialog.steps.length }} 步</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 改一次调用的实参：同一个动作在不同位置的差异通常只有这一两个值 -->
+      <el-dialog
+        v-model="argsDialog.visible"
+        title="改调用参数"
+        width="min(420px, calc(100vw - 24px))"
+        append-to-body
+      >
+        <div class="gd-body">
+          <div class="gd-section"><span>{{ argsDialog.name }}</span></div>
+          <div v-if="!argsDialog.rows.length" class="gd-empty">这个动作没有参数。</div>
+          <div v-for="row in argsDialog.rows" :key="row.key" class="gd-field">
+            <span class="gd-label">{{ row.key }}</span>
+            <el-input v-model="row.value" size="small" />
+          </div>
+        </div>
+        <template #footer>
+          <el-button size="small" @click="argsDialog.visible = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="argsDialog.busy" @click="submitArgs">保存</el-button>
+        </template>
+      </el-dialog>
+
       <PathPickerDialog
         v-model="picker.visible"
         :mode="picker.mode"
@@ -1477,7 +1655,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Aim, ArrowUp, ArrowDown, CircleCheck, Clock, Close, Delete, Document, EditPen, Expand, Fold, FolderOpened, Loading, Plus, Refresh, Search, Tickets, Timer, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Expand, Files, Fold, FolderOpened, Loading, Plus, Refresh, Search, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -1516,10 +1694,12 @@ const READY_LABELS = { load: '整页加载完', domcontentloaded: 'HTML 解析�
 const READY_TIMEOUT_DEFAULT = 15
 const STEP_LABELS = {
   goto: '打开页面', reload: '刷新', click: '点击', fill: '输入', select: '选择', press: '按键',
-  dialog: '弹窗', new_page: '新标签页',
+  dialog: '弹窗', new_page: '新标签页', call: '动作',
   assert: '断言', wait: '等待', sleep: '固定等待'
 }
-const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger' }
+// 动作调用用紫色系（kind-action 在样式里单独定义）：它不是一种操作，
+// 而是「一串操作的入口」，跟任何一种原子步骤共色都会让人误读。
+const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger', call: 'action' }
 const STATE_LABELS = {
   idle: '未开始', starting: '启动中', recording: '录制中', stopping: '停止中', stopped: '已停止',
   cancelled: '已取消', failed: '失败', idle_timeout: '超时已停止', closed: '浏览器已关闭'
@@ -1962,7 +2142,7 @@ const planTargetError = ref('')
 // 录制步骤变了（增删、改写），旧任务书就不再可信：后端也会用 plan_stale 拦一次，
 // 这里提前把「按此执行」置灰，别让用户白等一次请求。
 const stepsSignature = computed(() => steps.value
-  .map(s => `${s.no}:${s.type}:${s.target?.alias || ''}`).join('|'))
+  .map(s => `${s.no}:${s.type}:${s.action || s.target?.alias || ''}`).join('|'))
 const planStale = computed(() => !!planState.value
   && (planState.value.stale || planState.value.sig !== stepsSignature.value))
 
@@ -2819,6 +2999,268 @@ async function togglePause() {
   }
 }
 
+// ---- 封装 / 动作库 ----
+// 多选只认连续区间：中间跳过一步再合体，展开后的顺序就不是用户看到的那个顺序了。
+const selectMode = ref(false)
+const pickedNos = ref([])
+const groupDialog = reactive({ visible: false, busy: false, name: '', desc: '', params: [], steps: [], noWorkspace: false })
+const argsDialog = reactive({ visible: false, busy: false, no: 0, name: '', rows: [] })
+const actionLib = reactive({ open: false })
+
+const actions = computed(() => session.value?.actions || [])
+const pickedSorted = computed(() => [...pickedNos.value].sort((a, b) => a - b))
+const pickContiguous = computed(() => {
+  const nos = pickedSorted.value
+  return nos.length < 2 || nos[nos.length - 1] - nos[0] + 1 === nos.length
+})
+const canGroup = computed(() => pickedSorted.value.length >= 2 && pickContiguous.value)
+const pickHint = computed(() => {
+  if (!pickedNos.value.length) return '点步骤行选中，至少两步'
+  if (!pickContiguous.value) return '选中的步骤中间断开了，只能封装连续的一段'
+  return '再点一次取消选中'
+})
+const pickHintBad = computed(() => pickedNos.value.length > 0 && !pickContiguous.value)
+
+function toggleSelectMode() {
+  selectMode.value = !selectMode.value
+  if (!selectMode.value) pickedNos.value = []
+  // 多选态关掉拖拽，开着的话拖一下就和勾选打架。
+  nextTick(initSortable)
+}
+
+function isPicked(no) {
+  return pickedNos.value.includes(no)
+}
+
+function toggleStepPick(no) {
+  const index = pickedNos.value.indexOf(no)
+  if (index >= 0) pickedNos.value.splice(index, 1)
+  else pickedNos.value.push(no)
+}
+
+function onRowClick(step) {
+  if (selectMode.value) toggleStepPick(step.no)
+}
+
+function onSelectKeydown(event) {
+  if (event.key === 'Escape' && selectMode.value) {
+    // 弹窗开着时先让弹窗自己收（它的 Esc 比这里更近），这里只处理列表态。
+    if (groupDialog.visible || argsDialog.visible) return
+    toggleSelectMode()
+  }
+}
+
+// 与后端 actions.suggest_key 同一套规则：ASCII 别名直接用，中文退回 arg / arg2。
+// 两边不一致的话，弹窗里显示的名字和实际写进动作定义的名字会对不上。
+function asciiKey(value) {
+  return String(value || '').replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '')
+}
+
+// 元素别名多半是中文（「用户名」），但快照里还有 name / placeholder，
+// 往往就是代码里那个英文标识符。按「越像标识符越靠前」的顺序挑一个。
+function keyHint(step) {
+  const target = step.target || {}
+  const snap = target.snap || {}
+  for (const value of [snap.name, snap.placeholder, snap.id, target.alias]) {
+    const raw = asciiKey(value)
+    if (raw.length > 1) return raw
+  }
+  return ''
+}
+
+function suggestKey(hint, used) {
+  let raw = asciiKey(hint).slice(0, 32) || 'arg'
+  if (/^[0-9]/.test(raw)) raw = `arg_${raw}`
+  let key = raw
+  let n = 2
+  while (used.has(key)) {
+    const suffix = String(n)
+    key = raw.slice(0, 32 - suffix.length) + suffix
+    n += 1
+  }
+  used.add(key)
+  return key
+}
+
+// 动作名默认取第一个「点击」的目标：「点登录按钮」这一段动作，人叫它「登录」。
+// 没有点击就留空，让用户自己起——拿第一步的输入框别名当动作名只会误导。
+function defaultActionName(picked) {
+  const click = picked.find((step) => step.type === 'click')
+  const alias = (click && click.target && click.target.alias) || ''
+  return alias.replace(/(按钮|按键|链接|button|btn|link)$/i, '').trim()
+}
+
+function openGroupDialog() {
+  if (!canGroup.value) return
+  const picked = steps.value.filter((step) => pickedSorted.value.includes(step.no))
+  if (picked.some((step) => step.type === 'call')) {
+    ElMessage.warning('这段里有动作调用，不能把调用再封装一次；先解封它')
+    return
+  }
+  const used = new Set()
+  const params = []
+  for (const step of picked) {
+    if (!['fill', 'select'].includes(step.type) || !step.value) continue
+    const alias = (step.target && step.target.alias) || ''
+    params.push({
+      on: true,
+      step: step.no,
+      field: 'value',
+      key: suggestKey(keyHint(step), used),
+      label: alias || '输入值',
+      value: step.value
+    })
+  }
+  groupDialog.name = defaultActionName(picked)
+  groupDialog.desc = ''
+  groupDialog.params = params
+  groupDialog.steps = picked.map((step) => ({ no: step.no, type: step.type }))
+  groupDialog.noWorkspace = !(session.value && session.value.actions_saved)
+  groupDialog.visible = true
+}
+
+async function submitGroup() {
+  const params = groupDialog.params
+    .filter((param) => param.on)
+    .map((param) => ({ step: param.step, key: param.key.trim(), label: param.label, field: param.field }))
+  if (params.some((param) => !param.key)) {
+    ElMessage.warning('参数名不能为空')
+    return
+  }
+  groupDialog.busy = true
+  try {
+    const { data } = await api.groupRecordingAction(
+      groupDialog.steps.map((step) => step.no),
+      groupDialog.name.trim(),
+      groupDialog.desc.trim(),
+      params
+    )
+    applySession(data)
+    groupDialog.visible = false
+    selectMode.value = false
+    pickedNos.value = []
+    ElMessage.success(`已封装为「${groupDialog.name.trim()}」`)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    groupDialog.busy = false
+  }
+}
+
+// 动作被删掉（或换了一次录制、库里没有）时，调用点只有 id，名字靠 step.label 兜着。
+function callAction(step) {
+  return actions.value.find((action) => action.id === step.action) || null
+}
+
+function callMissing(step) {
+  return !!step.action && !callAction(step)
+}
+
+// 参数按动作定义的顺序展示；定义丢了就退回调用点自己带的键。
+function callArgs(step) {
+  const action = callAction(step)
+  const keys = action ? action.params.map((param) => param.key) : Object.keys(step.args || {})
+  return keys.map((key) => ({ key, value: (step.args || {})[key] }))
+}
+
+async function insertAction(action) {
+  try {
+    const { data } = await api.insertRecordingCall(action.id)
+    applySession(data)
+    actionLib.open = false
+    ElMessage.success(`已在末尾插入「${action.name}」`)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+// 动作名是封装时随手填的，事后发现不贴切很常见。改名字会同步所有调用卡的显示，
+// 但不动子步骤——要改内容只能解封。
+async function renameAction(action) {
+  let name
+  try {
+    const answer = await ElMessageBox.prompt('给这个动作起个新名字', '重命名动作', {
+      inputValue: action.name,
+      confirmButtonText: '保存',
+      inputValidator: (value) => (String(value || '').trim() ? true : '名字不能为空')
+    })
+    name = String(answer.value || '').trim()
+  } catch {
+    return
+  }
+  try {
+    const { data } = await api.renameRecordingAction(action.id, { name })
+    applySession(data)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+async function removeAction(action) {
+  try {
+    await ElMessageBox.confirm(
+      `从动作库删除「${action.name}」？已经解封出来的步骤不受影响。`,
+      '删除动作',
+      { type: 'warning', confirmButtonText: '删除' }
+    )
+  } catch {
+    return
+  }
+  try {
+    const { data } = await api.deleteRecordingAction(action.id)
+    applySession(data)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+async function ungroupStep(step) {
+  const action = callAction(step)
+  const count = action ? action.steps : ''
+  try {
+    await ElMessageBox.confirm(
+      `把「${step.label || '动作'}」还原成封装前的 ${count} 步？动作本身仍留在动作库里。`,
+      '解封',
+      { type: 'info', confirmButtonText: '解封' }
+    )
+  } catch {
+    return
+  }
+  try {
+    const { data } = await api.ungroupRecordingStep(step.no)
+    applySession(data)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+function openArgsDialog(step) {
+  const action = callAction(step)
+  if (!action) return
+  argsDialog.no = step.no
+  argsDialog.name = action.name
+  argsDialog.rows = action.params.map((param) => ({
+    key: param.key,
+    value: (step.args || {})[param.key] ?? ''
+  }))
+  argsDialog.visible = true
+}
+
+async function submitArgs() {
+  const args = {}
+  for (const row of argsDialog.rows) args[row.key] = row.value
+  argsDialog.busy = true
+  try {
+    const { data } = await api.updateRecordingCallArgs(argsDialog.no, args)
+    applySession(data)
+    argsDialog.visible = false
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    argsDialog.busy = false
+  }
+}
+
 async function removeStep(no) {
   try {
     const { data } = await api.deleteRecordingStep(no)
@@ -2916,7 +3358,7 @@ function initSortable() {
   if (!timelineEl.value) return
   // `.timeline` 是 v-if 渲染的，元素变化时重建实例。
   if (sortable && sortable.el === timelineEl.value) {
-    sortable.option('disabled', !canEdit.value)
+    sortable.option('disabled', !canEdit.value || selectMode.value)
     return
   }
   if (sortable) {
@@ -2928,7 +3370,7 @@ function initSortable() {
     handle: '.step-no',
     ghostClass: 'step-ghost',
     chosenClass: 'step-chosen',
-    disabled: !canEdit.value,
+    disabled: !canEdit.value || selectMode.value,
     onEnd: async (evt) => {
       const { oldIndex, newIndex, from, item } = evt
       if (oldIndex === newIndex || oldIndex == null || newIndex == null) return
@@ -3359,6 +3801,8 @@ function stepDescription(step) {
       return message ? `弹窗「${message}」→ 点${action}` : `弹窗 → 点${action}`
     }
     case 'new_page': return '切换到新打开的标签页'
+    // 名字后面跟「调用」，一眼能和普通步骤区分：这一步本身什么都不做。
+    case 'call': return `调用动作「${step.label || '未命名'}」`
     case 'sleep': return `固定等待 ${step.intent ? step.intent.seconds : ''} 秒`
     case 'assert':
     case 'wait': return intentDescription(step.intent, step.target)
@@ -4054,6 +4498,8 @@ onMounted(async () => {
     if (emitRunning.value) nowTick.value = Date.now() / 1000
   }, 250)
   window.addEventListener('resize', clampPanelWidth)
+  // 多选态按 Esc 退出：框选到一半想放弃时，不必再去够工具栏那颗按钮。
+  window.addEventListener('keydown', onSelectKeydown)
   try {
     const { data } = await api.getAutomationModels()
     modelOptions.value = data.models || []
@@ -4083,6 +4529,7 @@ onUnmounted(() => {
   clearTimeout(memoryTimer)
   clearInterval(tickTimer)
   window.removeEventListener('resize', clampPanelWidth)
+  window.removeEventListener('keydown', onSelectKeydown)
   window.removeEventListener('keydown', onSheetKeydown, true)
   // 浮层开着就切走页面：body 的 overflow 是全局的，不还回去整站都滚不动。
   if (planSheetOpen.value) document.body.style.overflow = sheetBodyOverflow || ''
@@ -5088,4 +5535,63 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
   .toolbar { transition:none !important; }
   .toolbar :deep(.el-button) { animation:none !important; }
 }
+
+/* ==================== 封装 / 动作库 ==================== */
+/* 多选态：编号位置换成勾选圈，行内按钮整组隐藏，点整行即可勾选 */
+.step.is-selecting { cursor:pointer; }
+.step.is-selecting:hover { border-color:var(--line-ctl-hover); }
+.step.is-picked { border-color:color-mix(in srgb, var(--accent) 48%, transparent); background:var(--accent-soft); }
+.step-check { flex:none; width:20px; height:20px; margin-top:2px; border-radius:50%; border:1.5px solid var(--line-ctl); display:flex; align-items:center; justify-content:center; transition:background .15s ease, border-color .15s ease; }
+.step-check.is-on { background:var(--accent); border-color:var(--accent); }
+.step-check-mark { width:8px; height:4px; border-left:1.6px solid #fff; border-bottom:1.6px solid #fff; transform:rotate(-45deg) translate(1px, -1px); }
+
+.select-bar { position:sticky; bottom:0; z-index:2; margin-top:12px; padding:9px 12px; border:1px solid var(--accent-line); border-radius:11px; background:var(--bg-card); box-shadow:0 -10px 22px -16px rgba(0, 0, 0, .4); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.select-info { display:flex; flex-direction:column; gap:1px; min-width:0; }
+.select-count { font-size:12.5px; font-weight:600; color:var(--ink); }
+.select-hint { font-size:11.5px; color:var(--muted); }
+.select-hint.is-bad { color:var(--danger); }
+.select-actions { margin-left:auto; display:flex; gap:6px; flex:none; }
+
+/* 调用卡：紫色系。它不是一种操作，而是「一串操作的入口」，
+   和任何一种原子步骤共色都会被读成「又是一步点击」。 */
+.step.is-call { --call:#6d4bd8; --call-soft:rgba(109, 75, 216, .10); border-color:color-mix(in srgb, var(--call) 24%, var(--line-soft)); background:color-mix(in srgb, var(--call) 4%, var(--bg-card)); }
+[data-theme="dark"] .step.is-call { --call:#a78bfa; --call-soft:rgba(167, 139, 250, .15); }
+.kind-action { background:var(--call-soft); color:var(--call); }
+.call-args { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:6px; }
+.call-arg { display:inline-flex; align-items:center; gap:4px; max-width:100%; padding:1px 7px; border-radius:5px; background:var(--call-soft); font-size:11.5px; line-height:1.7; }
+.call-arg-key { color:var(--call); font-weight:600; }
+.call-arg-value { color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:190px; }
+.call-noarg { font-size:11.5px; color:var(--faint); }
+.call-missing { font-size:11.5px; color:var(--danger); }
+
+.lib-count { margin-left:4px; padding:0 4px; border-radius:8px; background:var(--accent-soft); color:var(--accent); font-size:10.5px; }
+.lib-head { display:flex; align-items:center; gap:6px; margin-bottom:8px; }
+.lib-title { font-size:12.5px; font-weight:600; color:var(--ink); }
+.lib-warn { margin-left:auto; font-size:11px; color:var(--warn); }
+.lib-empty { font-size:12px; color:var(--muted); line-height:1.6; }
+.lib-list { display:flex; flex-direction:column; gap:6px; max-height:300px; overflow:auto; }
+.lib-item { display:flex; align-items:center; gap:6px; padding:7px 8px; border:1px solid var(--line-soft); border-radius:8px; }
+.lib-item :deep(.el-button) { flex:none; }
+/* 浮层被 teleport 到 body，不在 .ui-buttons 容器里，primary+plain 会退化成蓝底蓝字。
+   全站那份兜底规则够不到这里，只能就地再给一次。 */
+.lib-item :deep(.el-button--primary.is-plain) { background:var(--accent-soft); border-color:var(--accent-line); color:var(--accent); box-shadow:none; }
+.lib-item-main { flex:1; min-width:0; }
+.lib-name { font-size:12.5px; font-weight:600; color:var(--ink); }
+.lib-name-btn { cursor:pointer; border-radius:4px; }
+.lib-name-btn:hover { color:var(--accent); }
+.lib-meta { margin-top:2px; font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+.gd-body { display:flex; flex-direction:column; }
+.gd-field { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+.gd-label { flex:none; width:52px; text-align:right; font-size:12.5px; color:var(--muted); }
+.gd-section { display:flex; align-items:baseline; gap:8px; margin:14px 0 7px; font-size:12.5px; font-weight:600; color:var(--ink); }
+.gd-sub { font-size:11.5px; font-weight:400; color:var(--faint); }
+.gd-empty { padding:10px 12px; border:1px dashed var(--line-field); border-radius:8px; font-size:12px; color:var(--muted); }
+.gd-params { border:1px solid var(--line-soft); border-radius:9px; overflow:hidden; }
+.gd-param { display:grid; grid-template-columns:24px minmax(0, 1fr) minmax(0, 1.1fr) 58px; align-items:center; gap:8px; padding:6px 9px; border-bottom:1px solid var(--line-faint); font-size:12px; }
+.gd-param:last-child { border-bottom:0; }
+.gd-param.is-head { padding:5px 9px; background:var(--bg-sunken); color:var(--faint); font-size:11px; }
+.gd-value { font-size:11.5px; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gd-from { font-size:11px; color:var(--faint); text-align:right; }
+.gd-preview { margin-top:10px; font-size:11.5px; color:var(--muted); }
 </style>

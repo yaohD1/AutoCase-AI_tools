@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
 from app.services.recording import intent as intent_mod
+from app.services.recording import actions as actions_mod
 from app.services.recording import emit, ir, progress, verify, winwindows
 from app.services.recording.ask_pool import STOP_DELAY_SECONDS as ASK_STOP_DELAY_SECONDS
 from app.services.recording.ask_pool import AskPool, disabled_snapshot
@@ -289,9 +290,12 @@ class RecordingSession(object):
 
     def __init__(self, base_url, headless=False, driver=None, panel_url=None,
                  panel_ratio=0.45, hud_panel=False, embed_url=None,
-                 ask_daemon=None, ask_model=None, ask_config=None):
+                 ask_daemon=None, ask_model=None, ask_config=None, workspace=None):
         self.id = uuid.uuid4().hex
         self.base_url = base_url
+        # 工作区在录制开始时可能还没填（用户可以边录边配）。为空时动作库只在内存里，
+        # 封装的调用照常工作，只是关掉窗口就没了——界面上会明说。
+        self.workspace = str(workspace) if workspace else None
         self.status = 'starting'
         self.error = None
         self._headless = headless
@@ -336,6 +340,13 @@ class RecordingSession(object):
         self._overlay_frame = None
         self._events = []
         self._steps = []
+        # 具名动作库：项目级（.autocase/actions.json）+ 本次会话新封装的。
+        # 读不出来只是没有可复用的动作，不该让录制起不来。
+        try:
+            self._actions = actions_mod.load(self.workspace)
+        except Exception:  # noqa: BLE001
+            self._actions = {}
+        self._actions_error = None
         self._picks = []
         # 元素身份 → 别名。同一个元素复用同一个别名，不同元素撞名时加后缀（见 _alias_for）。
         self._alias_keys = {}
@@ -381,7 +392,7 @@ class RecordingSession(object):
     @classmethod
     def start_new(cls, base_url, headless=False, driver=None, panel_url=None,
                   panel_ratio=0.45, hud_panel=False, embed_url=None,
-                  ask_daemon=None, ask_model=None, ask_config=None):
+                  ask_daemon=None, ask_model=None, ask_config=None, workspace=None):
         with cls._current_lock:
             current = cls._current
             if current is not None and current.status in ('starting', 'recording'):
@@ -391,7 +402,8 @@ class RecordingSession(object):
             current.dispose()
         session = cls(base_url, headless=headless, driver=driver, panel_url=panel_url,
                       panel_ratio=panel_ratio, hud_panel=hud_panel, embed_url=embed_url,
-                      ask_daemon=ask_daemon, ask_model=ask_model, ask_config=ask_config)
+                      ask_daemon=ask_daemon, ask_model=ask_model, ask_config=ask_config,
+                      workspace=workspace)
         with cls._current_lock:
             cls._current = session
         session._thread.start()
@@ -565,6 +577,12 @@ class RecordingSession(object):
                 'error': self.error,
                 'steps': steps,
                 'picks': picks,
+                # 具名动作库：前端用它渲染调用卡的名字、动作库抽屉和封装弹窗的参数表。
+                'actions': self.actions_snapshot(),
+                # 动作库有没有落盘。没选工作区时是 False，界面上要说明「只在本次有效」。
+                # 绕过 __init__ 造的会话没有 workspace 属性，一律走 getattr。
+                'actions_saved': bool(getattr(self, 'workspace', None)),
+                'actions_error': getattr(self, '_actions_error', None),
                 'aliases': self.aliases(),
                 # 下拉里要区分「删除」和「删除#2」，只给字符串分不出来（见 alias_items）。
                 'alias_items': self.alias_items(),
@@ -614,6 +632,18 @@ class RecordingSession(object):
         """完整 IR（含可执行的定位 spec），供回放与生成使用；不返回给前端。"""
         with self._lock:
             return [ir.replay_view(s) for s in self._steps]
+
+    def action_definitions(self):
+        """生成用的动作定义：完整子步骤与定位，只走服务端链路，不发给前端。
+
+        返回副本而不是引用：生成是另一个线程，写手跑的几十秒里用户可能还在改录制。
+        """
+        actions = getattr(self, '_actions', None) or {}
+        lock = getattr(self, '_lock', None)
+        if lock is None:
+            return {aid: actions_mod.clean(a) for aid, a in actions.items()}
+        with lock:
+            return {aid: actions_mod.clean(a) for aid, a in actions.items()}
 
     def events_after(self, after=-1):
         with self._lock:
@@ -706,6 +736,173 @@ class RecordingSession(object):
         if self._steps[idx]['type'] == 'new_page':
             return True
         return idx + 1 < len(self._steps) and self._steps[idx + 1]['type'] == 'new_page'
+
+    # ---- 具名动作（封装 / 调用 / 解封）----
+    #
+    # 动作是纯数据，真正的改写都在 actions 模块里做；这里只负责加锁、重编号、
+    # 落盘和把异常翻译成 RecordingError（路由按 409 返回，前端能直接显示原因）。
+
+    def actions_snapshot(self):
+        """给前端的动作列表。steps 只给数量，定义留在后端——调用卡不需要渲染内部。
+
+        取值一律走 getattr：测试和一些工具会绕过 __init__ 直接造会话。
+        """
+        def build():
+            steps = getattr(self, '_steps', []) or []
+            return [{
+                'id': action['id'],
+                'name': action['name'],
+                'desc': action.get('desc') or '',
+                'params': [dict(p) for p in action.get('params') or []],
+                'steps': len(action.get('steps') or []),
+                'calls': len(actions_mod.calls_of(steps, action['id'])),
+            } for action in (getattr(self, '_actions', None) or {}).values()]
+
+        lock = getattr(self, '_lock', None)
+        if lock is None:
+            return build()
+        with lock:
+            return build()
+
+    def group_steps(self, nos, name, desc='', params=None):
+        """把连续的几步合成一个动作，原位置替换成一次调用。"""
+        with self._lock:
+            if len(self._actions) >= actions_mod.MAX_ACTIONS:
+                raise RecordingError('动作库最多 %d 个，请先删掉不用的' % actions_mod.MAX_ACTIONS)
+            try:
+                steps, action = actions_mod.group(
+                    self._steps, nos, name, desc=desc, params=params)
+            except actions_mod.ActionError as exc:
+                raise RecordingError(str(exc))
+            self._steps = steps
+            self._actions[action['id']] = action
+            self._renumber()
+        self._save_actions()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def ungroup_step(self, no):
+        """把某一次调用还原成它包含的步骤。动作定义保留，别处还在用。"""
+        with self._lock:
+            try:
+                self._steps = actions_mod.ungroup(self._steps, self._actions, no)
+            except actions_mod.ActionError as exc:
+                raise RecordingError(str(exc))
+            self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def insert_call(self, action_id, args=None, after_no=None):
+        """插入一次调用。args 缺的键用「第一次调用时的值」补齐，省得每次重填。"""
+        with self._lock:
+            action = self._actions.get(action_id)
+            if action is None:
+                raise RecordingError('动作不存在，可能已被删除')
+            keys = [p['key'] for p in action.get('params') or []]
+            incoming = args if isinstance(args, dict) else {}
+            defaults = self._default_args(action)
+            step = ir.make_step(
+                'call', 0, source='manual', action=action_id, label=action['name'],
+                page_index=self._page_index_near(after_no),
+                args={k: str(incoming.get(k, defaults.get(k, ''))) for k in keys},
+            )
+            step['text'] = action.get('desc') or None
+            self._insert_step(step, after_no)
+            self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def update_call(self, no, args):
+        """改这一次调用的实参。只允许动作声明过的键，拼错的会静默失效。"""
+        if not isinstance(args, dict):
+            raise RecordingError('args 必须是对象')
+        with self._lock:
+            step = self._steps[self._index_of(no)]
+            if step.get('type') != 'call':
+                raise RecordingError('这一步不是动作调用')
+            action = self._actions.get(step.get('action')) or {}
+            keys = [p['key'] for p in action.get('params') or []]
+            unknown = sorted(set(args) - set(keys))
+            if unknown:
+                raise RecordingError('这个动作没有这些参数：%s' % '、'.join(unknown))
+            merged = dict(step.get('args') or {})
+            for key in keys:
+                if key not in args:
+                    continue
+                value = args.get(key)
+                value = '' if value is None else str(value)
+                if len(value) > MAX_VALUE_LENGTH:
+                    raise RecordingError('参数 %s 的值最长 %d 个字符' % (key, MAX_VALUE_LENGTH))
+                merged[key] = value
+            step['args'] = merged
+        self._schedule_hud()
+        return self.snapshot()
+
+    def update_action(self, action_id, changes):
+        """改动作名 / 说明。子步骤不允许在这里改——要改就解封，改完重新封装。"""
+        if not isinstance(changes, dict):
+            raise RecordingError('请求体必须是对象')
+        unknown = sorted(set(changes) - {'name', 'desc'})
+        if unknown:
+            raise RecordingError('动作只支持改名称和说明：%s' % '、'.join(unknown))
+        with self._lock:
+            action = self._actions.get(action_id)
+            if action is None:
+                raise RecordingError('动作不存在')
+            if 'name' in changes:
+                name = (changes.get('name') or '').strip()
+                if not name:
+                    raise RecordingError('动作名不能为空')
+                if len(name) > actions_mod.MAX_NAME:
+                    raise RecordingError('动作名最长 %d 个字' % actions_mod.MAX_NAME)
+                action['name'] = name
+                # 调用卡上的名字是快照，动作改名后要跟着改，否则同一条流程里新旧名字并存。
+                for step in self._steps:
+                    if step.get('type') == 'call' and step.get('action') == action_id:
+                        step['label'] = name
+            if 'desc' in changes:
+                desc = (changes.get('desc') or '').strip()
+                if len(desc) > actions_mod.MAX_DESC:
+                    raise RecordingError('说明最长 %d 个字' % actions_mod.MAX_DESC)
+                action['desc'] = desc
+                for step in self._steps:
+                    if step.get('type') == 'call' and step.get('action') == action_id:
+                        step['text'] = desc or None
+        self._save_actions()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def remove_action(self, action_id):
+        """删掉动作。还有调用点时拒绝：否则那些步骤会变成指向空气的调用。"""
+        with self._lock:
+            action = self._actions.get(action_id)
+            if action is None:
+                raise RecordingError('动作不存在')
+            calls = actions_mod.calls_of(self._steps, action_id)
+            if calls:
+                raise RecordingError('动作「%s」还在第 %s 步被调用，请先解封再删'
+                                     % (action['name'], '、'.join(str(n) for n in calls)))
+            self._actions.pop(action_id, None)
+        self._save_actions()
+        return self.snapshot()
+
+    def _default_args(self, action):
+        """同一动作的第二次调用沿用第一次的实参：多数时候只改其中一两个值。"""
+        keys = [p['key'] for p in action.get('params') or []]
+        for step in self._steps:
+            if step.get('type') == 'call' and step.get('action') == action.get('id'):
+                args = step.get('args') or {}
+                return {k: args.get(k, '') for k in keys}
+        return {k: '' for k in keys}
+
+    def _save_actions(self):
+        """落盘。没有工作区或写失败只是降级为「仅本次会话」，不打断用户操作。"""
+        workspace = getattr(self, 'workspace', None)
+        if not workspace:
+            self._actions_error = '还没有选择工作区，动作只在本次录制有效'
+            return
+        path = actions_mod.save(workspace, self._actions)
+        self._actions_error = None if path else '动作库写入失败，动作只在本次录制有效'
 
     def remove_step(self, no):
         with self._lock:
@@ -1612,6 +1809,9 @@ class RecordingSession(object):
             title = '弹窗「%s」→ %s' % ((info.get('message') or '')[:24], action)
         elif kind in ('assert', 'wait'):
             title = alias or (step.get('text') or '')
+        elif kind == 'call':
+            # 动作调用在页面上什么都没做，浮层只能显示「调用了谁」，不能退回空字符串。
+            title = '调用「%s」' % (step.get('label') or '动作')
         else:
             title = alias or (step.get('value') or '')
         return {

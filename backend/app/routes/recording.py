@@ -103,6 +103,8 @@ def start_recording():
             # 断言解析器：录制一开始就在后台起并预热，开始录制时选的模型先用来热身。
             ask_model=body.get('model'),
             ask_config=_opencode_config(),
+            # 动作库按项目存：同一个工作区下次录制能直接看到上次封装的动作。
+            workspace=_recording_workspace(body),
         )
     except RecordingBusy as exc:
         return _error(str(exc), 409)
@@ -318,6 +320,63 @@ def clear_recording_highlight():
     return _mutate(lambda session: session.clear_highlight())
 
 
+@recording_bp.route('/automation/recording/actions', methods=['POST'])
+def group_recording_action():
+    """把连续的几步封装成一个具名动作，原位置替换成一次调用。
+
+    params 每项 `{step, key, label, field}`：step 是要替换的原步骤号，field 是
+    value 或 label。不传 params 就是不参数化，子步骤的值原样写死。
+    """
+    body = request.get_json(silent=True) or {}
+    nos = body.get('steps')
+    if not isinstance(nos, list) or not nos:
+        return _error('缺少要封装的步骤编号', 400)
+    params = body.get('params')
+    if params is not None and not isinstance(params, list):
+        return _error('params 必须是数组', 400)
+    return _mutate(lambda session: session.group_steps(
+        nos, body.get('name'), desc=body.get('desc') or '', params=params or []))
+
+
+@recording_bp.route('/automation/recording/actions/<action_id>', methods=['PATCH'])
+def update_recording_action(action_id):
+    """只改动作名和说明；子步骤要改就解封，改完重新封装。"""
+    body = request.get_json(silent=True) or {}
+    return _mutate(lambda session: session.update_action(action_id, body))
+
+
+@recording_bp.route('/automation/recording/actions/<action_id>', methods=['DELETE'])
+def delete_recording_action(action_id):
+    """删除动作。还有调用点时会被拒绝，避免留下指向空气的步骤。"""
+    return _mutate(lambda session: session.remove_action(action_id))
+
+
+@recording_bp.route('/automation/recording/actions/<action_id>/calls', methods=['POST'])
+def insert_recording_call(action_id):
+    """在指定步骤之后（省略则末尾）插入一次调用。"""
+    body = request.get_json(silent=True) or {}
+    args = body.get('args')
+    if args is not None and not isinstance(args, dict):
+        return _error('args 必须是对象', 400)
+    return _mutate(lambda session: session.insert_call(
+        action_id, args=args, after_no=body.get('after_no')))
+
+
+@recording_bp.route('/automation/recording/steps/<int:no>/ungroup', methods=['POST'])
+def ungroup_recording_step(no):
+    """把这一次调用还原成它包含的原始步骤。动作定义保留。"""
+    return _mutate(lambda session: session.ungroup_step(no))
+
+
+@recording_bp.route('/automation/recording/steps/<int:no>/args', methods=['PATCH'])
+def update_recording_call_args(no):
+    """改这一次调用的实参。只接受动作声明过的参数名。"""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body.get('args'), dict):
+        return _error('缺少 args', 400)
+    return _mutate(lambda session: session.update_call(no, body['args']))
+
+
 @recording_bp.route('/automation/recording/steps/<int:no>/locate', methods=['POST'])
 def locate_recording_step(no):
     """这一步「生成时到底用哪条定位」，以及它此刻在当前页面上还在不在、唯不唯一。
@@ -479,6 +538,7 @@ def plan_recording():
             progress=progress.mark,
             memory=memory.for_plan(profile) if profile else None,
             session=active,
+            actions=ctx['actions'],
         )
 
     try:
@@ -504,6 +564,22 @@ def plan_recording():
     except Exception as exc:
         progress.PROGRESS.fail('规划失败：%s' % exc)
         raise
+
+
+def _recording_workspace(body):
+    """开始录制时能拿到的工作区，用来加载项目动作库。
+
+    拿不到不算错误：用户可以边录边配，此时封装的调用照常能用，只是关掉窗口就没了
+    （snapshot 里 actions_saved 为 false，界面会说明）。
+    """
+    try:
+        _, workspace = AutomationScriptGenerator(current_app.config)._resolve_workspace(
+            body.get('workspace'))
+    except ValueError:
+        return None
+    if not workspace or not Path(workspace).is_dir():
+        return None
+    return str(workspace)
 
 
 def _prime_project_memory(body):
@@ -627,6 +703,8 @@ def _prepare_generation(body):
         'target_path': target_path,
         'title': title,
         'steps': session.ir(),
+        # 动作定义跟着一起走：规划和写手都要知道「这几个 call 背后是什么」。
+        'actions': session.action_definitions(),
         # 登录态只在「跑一遍」时用：注入到临时配置里，不写进用户仓库、不返回给前端。
         # 浏览器已经关掉也可能有（停止时抓过一份），所以这里取的是缓存而不是活对象。
         'storage_state': session.storage_state(),
@@ -695,6 +773,7 @@ def generate_recording():
             storage_state=ctx['storage_state'],
             memory=memory.for_writer(profile) if profile else None,
             session=session, write_scope=write_scope,
+            actions=ctx['actions'],
         )
         progress.mark('record')
         record = records.create(
@@ -805,7 +884,8 @@ def replay_recording():
         return _error('还没有录制任何步骤', 400)
     try:
         result = replay.replay_checked(steps, framework=framework,
-                                       headless=bool(body.get('headless', True)))
+                                       headless=bool(body.get('headless', True)),
+                                       actions=session.action_definitions())
     except Exception as exc:  # 浏览器起不来、页面打不开等环境问题
         return _error('回放无法执行：%s' % exc, 500)
     return jsonify(result), 200

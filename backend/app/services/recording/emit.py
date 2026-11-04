@@ -224,10 +224,28 @@ def target_problem(workspace, target_path, framework):
     return None
 
 
-def _steps_for_prompt(steps, framework):
-    """把 IR 整理成 agent 能直接用的形式：每一步只带需要的定位与意图，不带内部字段。"""
+def _steps_for_prompt(steps, framework, actions=None):
+    """把 IR 整理成 agent 能直接用的形式：每一步只带需要的定位与意图，不带内部字段。
+
+    call 步骤**不展开**：写手要看到「这是一次动作调用」才会写成函数调用；
+    展开成平铺的 4 步，它就会真的写 4 行，封装等于白做。动作内容在 actions 里给。
+    """
+    known = actions or {}
     out = []
     for step in steps:
+        if step.get('type') == 'call':
+            action = known.get(step.get('action')) or {}
+            item = {
+                'no': step['no'],
+                'type': 'action',
+                'action_id': step.get('action'),
+                'name': action.get('name') or step.get('label') or '动作',
+                'args': dict(step.get('args') or {}),
+            }
+            if step.get('text'):
+                item['text'] = step['text']
+            out.append(item)
+            continue
         item = {'no': step['no'], 'type': step['type'], 'text': step.get('text')}
         # 带最长等待就是轮询等待。老数据里可能存在 type 仍是 assert 的，这里统一成 wait，
         # 免得提示词里「立即断言」和「等到成立」两套写法各自为政。
@@ -277,6 +295,28 @@ def _steps_for_prompt(steps, framework):
         if step.get('page_index'):
             item['page_index'] = step['page_index']
         out.append(item)
+    return out
+
+
+def _actions_for_prompt(actions, framework, steps):
+    """动作定义：子步骤按写手需要的形状（定位串 + `{{参数}}` 占位符）。
+
+    called_at 是抽函数的关键信号。**只调用一次也要抽**——用户封装就是要那个名字，
+    不是为了去重；但写手必须知道同一动作在流程里出现几次，出现多次时绝不能
+    展开成多段重复代码。
+    """
+    out = []
+    for action in (actions or {}).values():
+        calls = [s.get('no') for s in steps
+                 if s.get('type') == 'call' and s.get('action') == action.get('id')]
+        out.append({
+            'id': action.get('id'),
+            'name': action.get('name'),
+            'desc': action.get('desc') or '',
+            'params': [p.get('key') for p in action.get('params') or []],
+            'called_at': calls,
+            'steps': _steps_for_prompt(action.get('steps') or [], framework),
+        })
     return out
 
 
@@ -444,6 +484,12 @@ def _plan_step(step):
     给 planner 完整 candidates 会让提示词暴涨，而且它要做的是「项目里有没有现成封装」，
     和「这个元素有几条 css 候选」无关。元素身份用 alias / tag / text 表达就够了。
     """
+    if step.get('type') == 'call':
+        item = {'no': step['no'], 'type': 'action',
+                'name': step.get('label') or '动作', 'args': dict(step.get('args') or {})}
+        if step.get('text'):
+            item['text'] = step['text']
+        return item
     item = {'no': step['no'], 'type': step['type']}
     for key in ('text', 'value', 'label', 'url', 'seconds'):
         if step.get(key) is not None:
@@ -514,7 +560,7 @@ def _project_facts(workspace, framework):
 
 
 def _plan_payload(framework, steps, target_path, title, feedback=None, previous_plan=None,
-                  workspace=None, memory=None, context_reused=False):
+                  workspace=None, memory=None, context_reused=False, actions=None):
     payload = {
         'framework': framework,
         # 空字符串 = 用户没指定，由规划按项目约定选一个。
@@ -523,6 +569,18 @@ def _plan_payload(framework, steps, target_path, title, feedback=None, previous_
         'steps': [_plan_step(step) for step in steps],
         'output_language': 'Simplified Chinese',
     }
+    if actions:
+        # planner 只看意图，但 action 调用的 note 必须写出「这一段具体做了什么」，
+        # 否则任务书里这一步就是一句「调用登录」，写手拿不到任何可执行信息。
+        payload['actions'] = [{
+            'id': action.get('id'),
+            'name': action.get('name'),
+            'desc': action.get('desc') or '',
+            'params': [p.get('key') for p in action.get('params') or []],
+            'called_at': [s.get('no') for s in steps
+                          if s.get('type') == 'call' and s.get('action') == action.get('id')],
+            'steps': [_plan_step(sub) for sub in action.get('steps') or []],
+        } for action in actions.values()]
     if context_reused:
         # 同一会话的第二轮：项目已经读过了，别让模型以为还要再读一遍。
         payload['context_reused'] = True
@@ -735,12 +793,15 @@ def plan_matches_steps(plan, steps):
     return not sig or sig == steps_signature(steps)
 
 
-def _prepare(workspace, steps, framework, target_path):
+def _prepare(workspace, steps, framework, target_path, actions=None):
     """规划和写入共用的入口校验：路径、框架、步骤、以及「元素还在不在」。
 
     target_path 允许为空：规划阶段可以不给路径，让 agent 自己按项目约定提名，
     用户确认后再带着确定路径进入写入。为空时跳过路径校验，由调用方在拿到
     规划结果后补一次（见 target_problem）。
+
+    动作的子步骤也要一起校验：call 本身没有 target，只看主步骤的话，一个封装了
+    4 步的动作里元素全没了也照样放行，写手只能照着死定位写。
     """
     if target_path:
         problem = target_problem(workspace, target_path, framework)
@@ -758,32 +819,42 @@ def _prepare(workspace, steps, framework, target_path):
     # 「让模型自己拼字符串」，剩下的风险只在 css 候选上（见 LOCATOR_RULES）。
     # 只有连一条候选都命不中（元素已经不在页面上）才拒绝——那种情况写不出任何定位。
     blocked, degraded = [], []
-    for step in steps:
+    checks = [(step, None) for step in steps]
+    for action in (actions or {}).values():
+        for sub in action.get('steps') or []:
+            checks.append((sub, action.get('name')))
+    for step, owner in checks:
         target = step.get('target')
         if not target:
             continue
         info = _locator_info(target, framework)
         if info is None:
-            blocked.append(step['no'])
+            blocked.append((owner, step.get('no')))
         elif info['mode'] == 'ambiguous':
-            degraded.append({
-                'no': step['no'],
+            entry = {
+                'no': step.get('no'),
                 'alias': target.get('alias'),
                 'locator': info['locator'],
                 'matches': info['matches'],
                 'nth': info['nth'],
-            })
+            }
+            if owner:
+                entry['action'] = owner
+            degraded.append(entry)
     if blocked:
+        where = ['第 %s 步' % no if not owner else '动作《%s》第 %s 步' % (owner, no)
+                 for owner, no in blocked]
         raise EmitError(
-            '第 %s 步的目标元素在页面上已经找不到（匹配数为 0），请重新拾取后再生成'
-            % '、'.join(str(n) for n in blocked),
-            details=['missing:%s' % n for n in blocked],
+            '%s 的目标元素在页面上已经找不到（匹配数为 0），请重新拾取后再生成'
+            % '、'.join(where),
+            details=['missing:%s' % (no or 0) for _, no in blocked],
         )
     return root, degraded
 
 
 def plan(runner, workspace, model, steps, framework, target_path, title, python=None,
-         feedback=None, previous_plan=None, progress=None, memory=None, session=None):
+         feedback=None, previous_plan=None, progress=None, memory=None, session=None,
+         actions=None):
     """只跑规划：读项目、出任务书，不写任何文件。
 
     返回值里的 plan 已经归一化：用户配了 target_path 就锁死它、把模型想改的
@@ -797,14 +868,15 @@ def plan(runner, workspace, model, steps, framework, target_path, title, python=
         if progress is not None:
             progress(stage, detail)
 
-    root, _ = _prepare(workspace, steps, framework, target_path)
+    root, _ = _prepare(workspace, steps, framework, target_path, actions)
     mark('planning')
     partial = {}
     reused = session is not None
     prompt = _plan_prompt(
         _plan_payload(framework, steps, target_path, title,
                       feedback=feedback, previous_plan=previous_plan,
-                      workspace=workspace, memory=memory, context_reused=reused),
+                      workspace=workspace, memory=memory, context_reused=reused,
+                      actions=actions),
         revise=bool(reused and previous_plan),
     )
     try:
@@ -911,6 +983,22 @@ def _prompt(payload, resumed=False):
         head += (
             '没有任务书：动笔之前先自己看一眼项目和已有用例，跟上它们的写法再写。\n'
         )
+    if payload.get('actions'):
+        head += (
+            '本次步骤里有**封装动作**：steps 里 type 为 action 的项不是普通操作，'
+            '而是对 actions 里某个动作的一次调用。\n'
+            '- actions 的每个条目写成一个函数（Robot Framework 写成一个 Keyword）：'
+            '函数名用 name，参数按 params 的顺序。子步骤里的 `{{key}}` 是占位符，'
+            '函数体必须用同名参数，绝不能把 `{{...}}` 原样写进代码。\n'
+            '- steps 里每次 action 调用写成对这个函数的一次调用，实参取该项的 args。'
+            '同一动作被调用多次时（见 called_at），**必须复用同一个函数**，'
+            '绝不允许展开成多段重复代码——封装的目的正是这个。\n'
+            '- 即使 called_at 只有一处也要抽成函数：封装是用户给的命名，不是自动去重。\n'
+            '- actions 里 steps 的 no 是**动作内部的相对序号**，不是流程里的步号；'
+            '流程位置只看 called_at。\n'
+            '- 函数放在 target_path 里（import 之后、test 之前）。项目里已经有覆盖同样动作的'
+            '封装时用项目那个，不要重复定义。\n'
+        )
     if payload.get('project_memory'):
         if (payload.get('project_memory') or {}).get('map'):
             head += (
@@ -945,7 +1033,8 @@ def _prompt(payload, resumed=False):
 
 
 def _payload(framework, steps, target_path, title, detected, keywords, plan=None,
-             plan_feedback=None, memory=None, context_reused=False, write_scope='exact'):
+             plan_feedback=None, memory=None, context_reused=False, write_scope='exact',
+             actions=None):
     samples = list(detected.get('samples') or [])
     snippet = (memory or {}).get('snippet') or {}
     if snippet.get('code'):
@@ -960,7 +1049,7 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
         'framework': framework,
         'target_path': target_path,
         'title': title,
-        'steps': _steps_for_prompt(steps, framework),
+        'steps': _steps_for_prompt(steps, framework, actions),
         'evidence': detected.get('evidence', []),
         'samples': samples,
         'keywords': keywords,
@@ -977,6 +1066,9 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
         payload['context_reused'] = True
     payload['write_scope'] = (write_scope if write_scope in ('exact', 'workspace', 'instruction_only')
                               else 'exact')
+    if actions:
+        # 只在真有过封装时才加这个键：没有动作时多一个空列表会让写手以为漏了什么。
+        payload['actions'] = _actions_for_prompt(actions, framework, steps)
     return payload
 
 
@@ -1017,7 +1109,7 @@ def _repair_turn(session, runner, root, model, target_path):
 
 def generate(runner, workspace, model, steps, framework, target_path, title, python=None,
              overwrite=False, plan=None, plan_feedback=None, progress=None, storage_state=None,
-             memory=None, session=None, write_scope='exact'):
+             memory=None, session=None, write_scope='exact', actions=None):
     """按任务书写入脚本。返回 {'path', 'changed', 'outside', 'backup_id', 'validated', ...}。
 
     这里**不再跑规划**：规划是独立的一步（见 plan），任务书由用户确认后随请求带进来。
@@ -1032,7 +1124,7 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         if progress is not None:
             progress(stage, detail)
 
-    root, degraded = _prepare(workspace, steps, framework, target_path)
+    root, degraded = _prepare(workspace, steps, framework, target_path, actions)
 
     # 检测结果只作提示（决策 12），与用户选择的框架不一致时也不阻止，由返回值中的 detected 说明。
     mark('detect')
@@ -1076,7 +1168,8 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         mark('writing')
         payload = _payload(framework, steps, target_path, title, detected, keywords,
                            plan, plan_feedback, memory,
-                           context_reused=resumed, write_scope=write_scope)
+                           context_reused=resumed, write_scope=write_scope,
+                           actions=actions)
         prompt = _prompt(payload, resumed=resumed)
 
         if resumed:

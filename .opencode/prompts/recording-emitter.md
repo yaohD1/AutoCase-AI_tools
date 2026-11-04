@@ -66,6 +66,15 @@ Write straight into `target_path`; do not create directories for it. The directo
     `await expect.poll(async () => { await page.reload(); return <immediate check>; }, { timeout: <timeout * 1000>, intervals: [<interval * 1000>] }).toBe(true);`
     The immediate check must not use a matcher (matchers wait internally and swallow the interval): visible -> `await loc.isVisible()`; hidden -> `!(await loc.isVisible())`; text_contains -> `((await loc.textContent()) || '').includes(value)`; text_equals -> `(((await loc.textContent()) || '').trim()) === value`; value_equals -> `(await loc.inputValue()) === value`; enabled -> `await loc.isEnabled()`; url_contains -> `page.url().includes(value)`; page_text_contains -> `((await page.locator('body').innerText()) || '').includes(value)`. Do not hand-write `while (true)` loops.
 
+# Encapsulated actions
+When the dispatch has `actions`, some steps are calls into a user-defined action instead of plain operations.
+- `steps[]` with `type: "action"` is **one call** of `actions[].id`; its `args` are the actual values for that call.
+- Write each entry of `actions` as **one function** (one Robot Framework keyword): name from `name`, parameters in `params` order. Inside its `steps`, `{{key}}` is a placeholder — use the parameter in the code, never emit the braces literally.
+- Each `action` step becomes a call to that function with its `args`.
+- The same action may be called several times (`called_at` lists the step numbers). **Reuse the one function for every call site.** Never inline a copy per call — removing that duplication is the entire reason the user grouped the steps.
+- Even when `called_at` holds a single number, still write the function: the user named this block on purpose.
+- Put the function inside `target_path`, between the imports and the first test. If the project already has a helper covering the same action, call that one instead of defining a second.
+
 # Final message
 - List every file you wrote. For each extra file (anything other than `target_path`) give one line: its purpose and why it could not be inlined.
 - Then the number of steps written, and any step you could not express. If you could not write the file, say why in one sentence.
