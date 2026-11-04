@@ -195,6 +195,37 @@
         "submit_plan": false,
         "skill": false
       }
+    },
+    "recording-profiler": {
+      "description": "Use this agent to survey an existing test project and describe its conventions as a reusable JSON profile. Read-only: it never writes files. Called by the AutoCase recording feature once per workspace, in the background.",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/prompts/recording-profiler.md}",
+      "permission": {
+        "edit": {
+          "*": "deny"
+        },
+        "write": {
+          "*": "deny"
+        },
+        "bash": {
+          "*": "deny"
+        }
+      },
+      "tools": {
+        "ls": true,
+        "glob": true,
+        "grep": true,
+        "read": true,
+        "edit": false,
+        "write": false,
+        "bash": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "apply_patch": false,
+        "submit_plan": false,
+        "skill": false
+      }
     }
   }
 }

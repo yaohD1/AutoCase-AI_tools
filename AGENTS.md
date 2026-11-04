@@ -12,8 +12,25 @@
 
 ### 前端
 
-- `frontend/src/App.vue`：全局壳层、顶部导航、全局样式。
-- `frontend/src/router/index.js`：路由入口。
+- `frontend/src/App.vue`：全局壳层、顶部导航（品牌 + 深浅色切换 + 设置）、全局 Element 覆盖。
+- `frontend/src/styles/motion.css`：全站动效，只做两件事 —— 首页首帧入场（页头 0ms 起手 → 240ms 画线 340ms → tab 400ms → 工具条 480ms → 卡片 560ms，每块 620ms、上移 16px、`cubic-bezier(.16,1,.3,1)`）、路由切换淡入（`.page-enter-*`，240ms、上移 4px）+ 内容区顶部 1px 导航线（`.nav-line`）。
+  - 首页那条「线条先行」是 `.mode-tabs::after`（tab 行下的 1px 横线）做 `scaleX`。**选择器必须带 `::after`**：挂到 `.enter-rule`（nav 本身）上会把整行横向压扁，宽度算成 0。
+  - tab 文字单独动（`.mode-tab` / `.mode-jump`），容器不整体淡入 —— 父级 `opacity` 会连伪元素一起淡，线就抽不出来了。
+  - 页头必须 0ms 起手。让它等线画完再出现的话，前 0.3 秒页面全空、只有一条线悬着，像渲染坏了。
+  - **只写 enter，不写 leave**：离开动画一存在，旧页面还没走完新页面就压上来，`keep-alive` 的缓存切换会跟着抖。
+  - 一律关在 `@media (prefers-reduced-motion: no-preference)` 里；`reduce` 下 `.nav-line` 必须 `display:none`，否则会留一根永远亮着的蓝线。
+  - 「从别的页回到首页」的轻版就是路由过渡本身（keep-alive 重新激活同样走 enter），不另写一套。
+  - 首页入场只在本会话第一次打开时播（`Upload.vue` 的 `playEntry`，`sessionStorage['ac-entered']`），演完 1400ms 把类摘掉 —— 不摘的话 `keep-alive` 把页面搬回来时元素重新插入 DOM，动画会从头重播。
+  - `main.js` 里 `router.isReady()` 之后才 `mount`：直接挂载会先渲染一个空的 `router-view`，首个路由解析完再塞页面，等于首屏白拿一次路由淡入，和首页入场叠在一起。
+  - `App.vue` 的 `navTick` 只在真实换页时 +1（`from.name` 为空说明是首次进入，不扫线；只有 query 变化不算换页）。
+- 品牌启动幕（冷启动，本会话一次）：`frontend/index.html` 里的 `#ac-boot` + `frontend/src/composables/useBoot.js`。
+  - **幕布必须是 HTML 里的静态节点**，样式内联在 `index.html` 的 `<style>` 里。等 Vue 挂载后再插遮罩，中间那段正是白屏 / 半截页面；而放 `#app` 里面会被 `mount` 清空。
+  - 判定在 `<head>` 的同步脚本里（`sessionStorage['ac-booted']`，`data-boot="1"`），和主题脚本同一段逻辑；`prefers-reduced-motion: reduce` 直接不给幕布。兜底：8s 未揭幕就自己摘掉，别留一块盖住整站的黑板。
+  - 幕布底色 = 页面底色（`--bg-page` 的两套值写死在内联样式里，首帧读不到 token），所以**必须给 `::after` 一条 1px 下沿**：没有这条线，揭到一半看起来不是「幕在走」，而是「内容被裁了一半」。
+  - 字标在揭幕时**只淡出、不跟着位移**，否则会看到 `AUTOCASE` 悬在页面顶端一路滑上去。
+  - 冷启动这一轮**不叠阶梯入场**，改用 `.upload-page.is-boot-in` 整页淡入 380ms。原因不是重复，是方向对不上：幕布 `translateY(-100%)` 自下而上让开，阶梯自上而下落，下半屏会先露出来而那里的卡片还在 delay 里（opacity 0），揭开过程会有 100~200ms 像少渲染了一块。
+  - 淡入用 `--boot-off`（`useBoot.js` 算出的延迟）而不是「揭幕后补类」：补类会让元素先以 opacity 1 亮一帧。延迟要比幕布起手**早 PRE=160ms** —— CSS 动画的 `startTime` 是首帧样式算完的那一刻，实测比写类晚 100ms 出头。
+- `frontend/src/router/index.js`：路由入口。`scrollBehavior` 换页回顶（后退/前进仍由浏览器恢复），末尾有 `/:pathMatch(.*)*` 回落首页。
 - `frontend/src/views/Upload.vue`：首页、图片/文档上传、知识库入口、模块分析和用例生成。
 - `frontend/src/views/CaseList.vue`：已审批用例、用例编辑、待审审批、原型图查看和 XMind 导出。
 - `frontend/src/views/ModuleList.vue`：模块列表和模块审批。
@@ -23,7 +40,12 @@
 - `frontend/src/views/RecordingRecords.vue`：生成记录（`/recording/records`）。一屏两栏：左 320px 记录列表（文件名 + 目录/时间 + 状态方片），右详情（步骤 / 文件预览 / Agent 说明）。提交盒钉在右下角，列表和预览各自滚；`≤1080px` 改上下排列、整页滚动。
 - `frontend/src/views/Settings.vue`：AI 服务与项目/迭代管理。左侧竖排导航 + 右侧面板（不锁一屏）。API Key 只展示后端 `mask_key()` 给的前 6 + 后 4，前端 `displayKey()` 只做兜底，不要再二次打码。
 - `frontend/src/api/index.js`：所有前端 API 封装。
-- `frontend/src/styles/tokens.css`：设计 token（文字/线/语义色/圆角/等宽字体）。页面里不要再写死颜色字面量。
+- `frontend/src/styles/tokens.css`：设计 token + **双主题**。`:root` 是浅色，`[data-theme="dark"]` 是夜墨暗色。四组：表面（`--bg-page/card/sunken/stage/raised/hover/code`）、文字（`--ink/ink-2/muted/faint`）、线（`--line*/line-ctl`）、语义（`--accent*/danger*/ok*/warn*`）。
+  - **页面里不准再写颜色字面量**（`#fff`、`#f4f6f9`、`rgba(0,0,0,.06)`）。只有两种情况可以写死：原型截图里的颜色、深色面板上本来就该是白的字/图标。
+  - 同一个文件里还有 Element Plus 的 `--el-*` 映射（`:root, html.dark`）：主色的九档浅色用 `color-mix` 由 `--accent` 推出来，`--el-bg-color` / `--el-text-color-*` / `--el-fill-color-*` 全部指向我们的 token。不接管会出现「组件是 Element 的灰、页面是我们的灰」，暗色下拉选中行会变成一坨褐黄。
+  - 深色面板（日志、代码、终端）两套主题都保持深色，用 `--bg-code`（浅色 #12161d / 暗色 #0b0f14）：暗色下它比页面更深一档，才不会和卡片糊在一起。
+- `frontend/src/composables/useTheme.js`：深浅色切换。`localStorage['ac-theme']` 存 `light` / `dark`；没存过就跟随系统。切换时同时设 `<html data-theme="dark">` 和 `.dark` 类 —— 我们的 token 认前者，Element 的 `dark/css-vars.css` 认后者，少一个就会一半暗一半亮。
+- `frontend/index.html`：首屏内联脚本按同一个 key 先把主题定下来。**不要删**：等 Vue 挂载再切会先闪一帧白。键名 `ac-theme` 在三处出现（这里、useTheme.js、localStorage），改的时候一起改。
 - `frontend/src/styles/buttons.css`：按钮规范，页面根挂 `ui-buttons`、`list-page`，或位于 `.el-dialog` 内生效（弹窗被 teleport 到 body，不在页面容器里）。
 - `frontend/src/styles/list-page.css`：列表页骨架（页头/筛选行/表格/分页/批量条），`/cases`、`/modules`、`/scripts/records` 共用；`.flat-table` 是只借表格外观的轻量入口（首页知识库、设置页在用）。
 - `frontend/src/styles/forms.css`：表单字段的全局规范（`.form-block` / `.form-field` / `.form-label` / `.form-ctl` / `.form-input` / `.form-textarea` / `.form-toggle` / `.form-num` / `.form-static`）。**新表单直接套这几个类**，不要再写 `label-width:100px` 的右对齐 `el-form`，也不要再复制一份 scoped 样式。
@@ -66,6 +88,18 @@
 - 入口 `frontend/src/views/Recording.vue`（`/recording`），接口 `backend/app/routes/recording.py`，会话 `backend/app/services/recording/session.py`。
 - 默认 `RECORDING_LAYOUT=embed`：录制浏览器只开**一个窗口**并最大化，主页面是前端外壳页 `?embed=1&target=<被测地址>`，左边 iframe 是被测系统（占满剩余宽度），右边是可收起/可拖拽的编排面板。外壳页是 AutoCase 自己，靠 init script 传入 `__AUTOCASE_SKIP_ORIGIN` 让 recorder 跳过（否则点面板会被录成步骤）。
 - `RECORDING_LAYOUT=split` 是兜底：独立 context 开面板窗口，用 CDP `Browser.setWindowBounds` 与被测页面按 `RECORDING_PANEL_RATIO` 左右并排；面板窗口不注入 recorder、不记为 `new_page`。
+  - **面板窗口优先走 `--app` 无壳形态**（`_open_panel_app`）：独立浏览器实例 + 独立临时 profile，没有标签栏/地址栏，跟被测窗口贴在一起像 AutoCase 自己的侧栏。起不来（非 Windows、无头、找不到浏览器）才退回「同浏览器再开一个窗口」。
+  - 用 **系统 Edge** 而不是 Playwright 自带的 Chromium：后者是 Chrome for Testing，顶部必挂一条「仅适用于自动测试」的提示条，`--test-type` / `--disable-features=ChromeForTesting` 都关不掉（v148 实测），面板只有三四百像素宽，这条横幅能吃掉首屏一整行。Edge 还要加 `--disable-sync --no-service-autorun`（否则拿 Windows 账号弹「同步你的浏览数据」，那是个独立窗口，会盖住被测页面）；`--ignore-certificate-errors` **只在面板 URL 是 https 时加**，http 下加了会被挂一条黄色安全警告条。
+  - **`GetWindowRect` 比眼睛看到的大**：Win10 每个窗口左右各约 8px 是不可见的拉伸边框，按矩形贴死视觉上漏 16px，露出来的是桌面壁纸（看着像黑缝，但**不是阴影**）。贴齐必须用 `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` 拿可见边界再反推回窗口矩形。实测可见边界对齐后缝只剩 2px 一条线。
+  - **粘合**（`winwindows.Glue`）：`SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE)` 监听两个窗口，拖任意一个另一个跟着走。三个坑：钩子必须装在**收消息的那个线程**（OUTOFCONTEXT 回调投递到安装线程的队列）；不能用布尔标志防乒乓（回调异步投递，标志早清了），要记住「我刚把它放到哪」；`idObject` 必须是 `OBJID_WINDOW`，否则子控件移动也会触发。
+  - **跟着走 ≠ 只挪位置**（`winwindows.plan_follow`，纯函数、有单测）。两个窗口中间那条缝用户会当分隔条拖，这时必须「靠缝那侧伸缩、**外侧边钉死**」。只同步位置的话，拖接缝等于把对面整个推走（推 A 的右边 → B 整体右移 → B 的右边也跑了），手感是「拖中间，外边的边怎么也在动」。判别方式：比 src 前后两条边的位移，**相等=整体平移**（照搬位移、尺寸不动），**不等=拖边**（接缝跟走、对面从缝那侧伸缩）。高度跟 src 保持一致，不然两个窗口下沿是锯齿。
+  - 拖到把对面压到 `SPLIT_MIN_W/SPLIT_MIN_H` 时，要把被拖的那条边**推回来**（`src_fix`），否则窗口继续变宽、接缝裂开。回声判定留 4px 容差：窗口管理器会取整、窗口自己的最小尺寸也会顶住，严格相等会把自己的一次摆位当成用户拖动，两个窗口开始对推。
+  - **摆位函数会先还原再摆**（`winwindows.prepare`）：调用方常见场景是某个窗口被最大化过。以前 `is_usable` 直接把最大化判成不可用，整条原生路径被跳过，只剩 CDP 兜底——而**无壳面板是另一个进程的窗口，CDP 够不着**，结果「只有被测窗口动了一下、面板原地不动」。现在 `prepare()` 先 `SW_RESTORE` 再摆；`layout_windows()` 在原生失败且没有 `_panel_page` 时**如实返回 False**，不谎报成功。
+  - **刚落还原的窗口要摆两遍**：还原那一刻边框尺寸才从「最大化无边框」变回「带 8px 拉伸边框」，第一遍 `move_visible` 用的还是旧边框，实测 806 会摆成 896、面板右边界直接跑到屏幕外。摆完用 `_pair_is_flush` 校验（位置 / 两窗宽度 / 接缝 0），不对就再摆，最多 3 遍。
+  - **没有「重新并排」按钮**（曾有过，鸡肋已去掉）：排一次是 `_run` 启动时自动做的，之后靠粘合跟着走。`RecordingSession.relayout()` 保留成线程安全入口，只给验证脚本 / 测试用，界面上没有入口，也没有对应的 HTTP 路由。
+  - **关面板要按窗口所属进程杀整棵树**（`winwindows.kill_tree`）：Edge/Chrome 的启动器把活交给真正的浏览器进程后自己就退了，`Popen.terminate()` 拿的是空壳，窗口会留在桌面上（实测残留过 7 个）。另外模块级 `atexit` 兜底，后端异常退出也不留窗口。
+  - 最大化/最小化时跳过跟随（`is_usable`），否则另一个窗口会被拽到屏幕外；任务书浮层（`sheet_windows`）要先解开粘合再铺宽。
+
 - 嵌入模式下「被测页面」的判定是 `_is_app_frame`：按 `base_url` 的 origin 过滤，外壳页（AutoCase 前端）会被排除，`target=_blank` 打开的新标签页仍算应用页面。`goto` / `new_page` 步骤都依赖它。
 - 拾取模式（`_apply_pick`）要遍历 `page.frames`——嵌入模式下被测页面在 iframe 里，只对主 frame 执行会失效。
 - 面板宽度由前端拖拽决定（localStorage `autocase.recording.panelWidth`），收起后 iframe 占约 97%。拖拽必须 `setPointerCapture` + 拖动期间禁用 iframe 命中测试，否则 pointermove 会被 iframe 吞掉。
@@ -79,11 +113,19 @@
   - 配置表单在 400px 窄列里是单列；Python 解释器收进「高级设置」；工作区检测结果内联成一行 chips（`.detect-inline`），不再常驻右栏。
   - 坑：`.el-form-item__content` 默认是横向 flex，输入框后的提示和检测结果会被挤到同一行，需要显式改 `flex-direction:column`。
   - 面板/嵌入模式 600px 宽：`.recording-body` 回落成纵向 flex，配置仍单列；空状态用 `.steps-empty` 一行提示（不要 el-empty 大插画）；未停止录制时「生成」卡用 `.gen-compact` 一行摘要，停止后才展开 `.checklist`。
+  - **`.is-panel`（split 兜底布局的独立面板窗口）的 `.page-col` 必须自己吃高度**：`.recording-page.is-panel .page-col { flex:1; min-height:0; display:flex; flex-direction:column }`。漏了这条，下面几层 `flex:1` / `min-height:0` 全部无处可依，步骤一多整列被撑到 1951px，再被 `#app.is-panel-mode .el-main{overflow:hidden}` 裁掉——表现是「步骤列表滚不动、底下的步骤也点不到」，但 `.el-card__body` 上明明写着 `overflow-y:auto`。嵌入模式和独立整页各自的 `.page-col` 规则不同，别合并。
   - 窄屏（≤1100px）单列后必须解除 `height:calc(100dvh-116px)` 并把 `grid-template-rows` 改回 `auto`：否则第一行（配置卡）会被 `minmax(0,1fr)` 压成 0 高，配置整块看不见。
 - 「收起」= 面板的精简模式（`stepsCollapsed`，不持久化，默认展开）。只在 `compactMode` 显示，按钮在步骤卡标题右侧（状态标签旁，`Fold`/`Expand` 图标）：
   - 步骤行只留铅笔，`v-if="!stepsCollapsed"` 掉上移/下移/删除（排序改用拖住编号拖拽，防误删）；`.is-lean .step` 收紧 padding。
   - 工具栏切 `.toolbar.is-lean`：3 列等宽网格 + 通栏细线分组，录制中 6 个按钮正好 3+3；未录制只有 5 个，主按钮 `.lean-wide` 占两列补齐整行，右边界与下一行「添加等待」对齐。
   - 嵌入模式下同时把 `panelWidth` 收到 420 并隐藏 `.embed-resizer`（`startResize` 提前返回），展开时还原收起前宽度；只收不放（本来就 <420 保持原宽）。
+- 等页面加载 = `intent.type = 'page_ready'`（工具栏「等待加载」，步骤类型仍是 `wait`）。参数只有两个：`state`（`load` 默认 / `domcontentloaded` / `networkidle`）和 `timeout`（默认 15s，超时**算失败**）。
+  - **不加新的 step 类型**。时间线渲染、上移下移、拖拽、回放全按 `type` 分叉，加一个 `ready` 要改一圈；走 `wait` + `intent.type` 只动四层：intent 校验、工具栏草稿卡、两条生成提示词、`replay._assert_once`。
+  - 它**不在** `INTENT_TYPES` 里：那是自然语言解析的词表，让模型自己产出这个类型，它会把「等元素出现」也塞进来。这一档只由工具栏按钮直接给，`step_type_for_intent` 里单独判。
+  - 要跟用户说清楚 `waitForLoadState` 的真实语义：**当前文档已经到那个状态就立刻返回**。所以它治的是「点击后页面正在跳转、还没 load 完」，不治「SPA 页内异步渲染」——后者还是得用「断言 + 等到成立」等一个具体元素。
+  - Selenium 没有等价 API：RF 侧用 `Wait For Condition    return document.readyState === "complete"`。
+- 点击引起的跳转不记 `goto`，但落点写在**点击那一步**的 `nav_to` 上（`session._mark_click_nav`，只回看三步，能跨过 `new_page`）。生成时据此补 `await page.waitForURL("**" + 路径)`，否则写出来是「点完直接找下一个元素」，站点一慢下一步就扑空。
+  - 只取路径、不写死带查询串的整条 URL；`nav_to` 同时显示在步骤行（`.step-nav`，形如 `→ /home?tab=1`），用来解释脚本里那行 `waitForURL` 不是凭空多出来的。
 - 生成记录独立成页：路由 `/recording/records`，视图 `views/RecordingRecords.vue`。页头用 `.list-page` 那套（灰眉标 + 21px 标题 + 一句陈述），页脚只有「刷新」+ 文字链接「返回录制」。
   - 两栏平卡：左 320px 列表（文件名 mono + 目录/时间，状态用 `.chip`），右详情（步骤表 / 深色文件预览 / Agent 说明），提交盒 `flex:none` 钉在右下角，只有「未提交」才出现；撤销改成右上角的文字按钮，不和主行动抢位。
   - 默认选中最新一条；带 `?id=` 时选中指定那条。录制页只留一个跳转按钮，records 的 state/函数/CSS 不要留在 `Recording.vue`。
@@ -106,11 +148,79 @@
   - **`desc` 必传**：index 是「某一条候选」的匹配顺序，换一条候选就不是同一个元素。`target.chosen` 优先于任何自动选择（`emit._locator_info` 的 `mode='chosen'`），步骤行显示 `.nth(n)`、状态变「已选定」。
   - 停止录制重新校验时 `chosen.index >= count` 标 `index_invalid`（界面红标「序号失效」），**不要静默改回第一个**——那会点到别的元素，比报错更糟。
   - 录制时另存 `target.matches`（那几个元素的行文本），浏览器一关就查不到了。注意 `getByRole` 命中多个时主定位会退到 css 绝对路径（`fragile`），这种步骤**同样**要存，否则用户看不到「其实有 3 个、你点的是第 2 个」。生成时它进提示词，模型据此在 `nth` 那行写注释。
+- **定位详情**（准星右边的放大镜 `.loc-detail-btn` → `el-dialog` 单栏 520）：回答「采用的到底是哪条 / 此刻还在不在 / 唯不唯一」。
+  - `POST /api/automation/recording/steps/<no>/locate {framework}` → `{ok, code, kind, mode, count, exists, unique, visible, index, recorded_count, page_url, page_gone, candidates, items}`。顺带在页面上把匹配元素框出来（只给数字不画框，等于没验证），`highlight/clear` 由前端关弹窗时调。
+  - **「采用哪条」必须复用 `emit._locator_info` / `_pick_locator`**，不要在 session 里另写一份判断——两份判断迟早会「弹窗说 A、生成写 B」。`_locator_info` 顺带返回 `kind/desc/spec` 就是给这个弹窗用的。
+  - 候选清单只列**当前框架**那一组（`pool_for`）：Playwright 与 Robot 各有一套，混在一起列十几条用户对不上号；`adopted` 标出生成用哪条。
+  - 结论只有三档：`count==1` 绿「存在 · 唯一」、`count>1` 黄「匹配到 N 个，取第 K 个」、`count==0` 红「找不到」。失败要分 `no_target / no_frame / no_candidate / frame_lost / overlay_failed` 说清原因，别让用户以为是定位坏了。
+  - 口径是**此刻**：页面可能已经走到后面几步，弹窗里必须写明页面 URL + 校验时间；`page_gone` 的步骤再补一句「只代表当前页面」。
+  - 弹窗宽度写成 `min(520px, calc(100vw - 24px))`（el-dialog 的 `width` 属性）：面板窗口本来就是 400~800，写死 520 在窄面板里会横向溢出。`class` 上的 `max-width` **不生效**——Element 的 `.el-dialog` 根节点拿不到 scoped 的 `data-v-*`。
+- **不唯一 = 必选弹窗，不是提醒**（`el-dialog.loc-dialog`，没有关闭按钮，点遮罩和 Esc 都不关）。出口只有两个：「就这个，继续」和「不看这个，允许降级」（`POST /steps/<no>/degrade`，落 `target.degraded`，之后 `blockers` / `needsLocConfirm` / `reviewable` 都放过它）。
+  - **不再有「回到这一步的页面」这条主路径**。取而代之的是按下鼠标那一刻截的图：`pointerdown` 的 `precount` 比 `click` 和跳转都早，`_capture_shot()` 就在那里截一张**视口**图（只在不唯一时截，唯一的一次点击不付这 50~80ms），存 `self._shots[shot_id]`，只在内存、不落盘、不进工作区。
+  - **图必须裁到被测 frame**：embed 模式的顶层页面是 AutoCase 外壳（左边 iframe + 右边编排面板），`page.screenshot()` 截整页会把我们自己的面板也拍进去；而框的坐标是 iframe 内的，画在整页图上会整体偏移。`_shot_clip()` 取 `frame.frame_element().bounding_box()` 作为 `clip`，`shot.w/h` 直接用 clip 的 CSS 尺寸；元素在主 frame 时返回 None（整页就是被测页面）。这也顺带修好了「被测系统自己套了一层 iframe」的偏移。
+  - **fill / press 也要截**：它们没有 `pointerdown`，只有 `input` / `keydown`，以前永远没有图——「很多都显示没截到」主要就是它们。`_shot_for()` 在事件到达时截（这两类不会把页面带走）；`fill` 每敲一个字符来一条，合并到上一条 fill 时直接沿用它的 `shot`，另有 `FILL_SHOT_REUSE=1.5s` 的兜底窗口，否则打字会被一张 80ms 的截图拖死。
+  - 截图失败不再 `return None` 吞掉：`_capture_shot()` 回 `{error: '…'}`，`_register_shot()` 原样转给前端，弹窗里写「页面立刻跳转了 / 截图超时 / 浏览器关了」。`SHOT_TIMEOUT_MS=1500`，不能用 Playwright 默认的 30s——截图期间录制线程是停着的，会堵住后面的点击。
+  - 图给前端的是 `target.shot = {id, w, h}`（没截到时是 `{error}`），`w/h` 是 **CSS 像素**：有 clip 时就是 clip 尺寸；没有 clip 时从 PNG 的 IHDR 读像素宽高再除以 `devicePixelRatio` 折回来。不折的话 125% 缩放的机器上框会整体偏小一圈。
+  - 框用百分比定位（`left = x / w * 100%`），所以弹窗宽度、图片缩放怎么变都对得上；完全在视口外的元素不画框，列表里标「不在视口里」。
+  - **整页图直接缩进 500px 的框里是 0.26 倍，这是「看不出 A 和 B 是哪个」的真正原因**，不是没截到。现在分两层：`.shot-stage`（画布，宽高比 = 聚焦框的比）+ `.shot-inner`（整张图按原比例放大后的那块，`left/top/width/height` 全用百分比，所以画布宽度由 CSS 决定也不用重新量）。
+  - 聚焦框 `focusRect`（`Recording.vue`）算法：候选框求并集 → 四周留 `FOCUS_PAD=44` → 宽度下限 `FOCUS_MIN_PX=150`（这个数就是放大倍数：画布约 460，460/150≈3 倍）→ 比例夹进 `[1.15, 3.0]`（防止一行表格压成一条横缝、一列按钮压成一条竖缝）→ 夹回图内 → 占满整图 90% 以上就退回整页（候选散在四角时放大反而看不出关系）。**只有宽度设下限，高度别兜底**：给高度兜一个「至少四分之一屏」会把一行按钮压成半屏白。
+  - 右侧每个候选带一张「证件照」：同一张图当放大镜，`loc-thumb img` 按元素中心对齐、`thumbScale = min(1, 46*0.78/item.w)`（**最多 1:1，放大只会把几十像素插值成一团糊**），圈用 `thumbRingStyle` 画在元素位置上。屏幕外的元素没有像素可裁，标「屏外」且不画框。
+  - 图上和列表都用 **A/B/C 字母**（`LOC_TAGS`），不用数字：数字在缩略图上只有 5px 高。徽标默认压框左上角，会盖住元素开头的字，所以上方有 20px 空间就挪到框外（`shotTagOutside` → `.is-tag-out`）。
+  - **`is-origin`（录制时点的那个）不能铺满底色**：`var(--warn-soft)` 会把元素本身的文字盖掉，等于没截。只留 2px 琥珀边 + 7% 透明底。同理 `.loc-thumb-ring` 只描边不填色。
+  - 悬停联动：指列表某行（或图上某个框）→ 该框加粗、其余 `.is-dim{opacity:.3}`。两个同名按钮挨在一起时，光靠字母还是会看串行。
+  - 元素坐标在 `MATCH_SUMMARY_JS` 里顺手取（`getBoundingClientRect`，视口坐标），和截图同一时刻，所以对得上；`overlay.js` 那套是页面坐标，只用于实时框选，别混用。
+  - 有截图就**不再调 `highlight`**：它会 `scrollIntoView`，等于替用户把被测页面滚了——那正是「回到刚才那页」难用的根源。
+  - 弹窗版式走 `styles/dialog.css` 的 `.dlg-split`（左图右候选，900 以下自动上下）。**`align-center` 在 Element Plus 2.4 里并不能真正垂直居中**：它只给弹窗加 `margin:auto`，遮罩层还是 `overflow:auto` 的块容器，弹窗会沉到底部。必须在全局样式里把 `.loc-overlay .el-overlay-dialog` 改成 flex（写在 scoped 里无效：遮罩层不是本组件的元素，没有 data-v）。
+  - 窄屏（≤900）要覆盖 dialog.css 的 `.dlg-viewer{height:280px}` 成 `height:auto` + `.dlg-stage{flex:none}`：聚焦后的截图是一条横带，撑满固定高度就会上下各留一大块灰。
+  - 用 `locator.click()` 写测试时截图会丢：它把 down/up 挤在一起，`precount` 那条 binding 还没到 Python 页面就被 click 带走了。测试里要 `mouse.down()` → 停 100ms → `mouse.up()`（见 `test_recording_shot._click_like_a_human`）。真人点击天然有这段间隔。
+  - 生成前还剩 `blockers` 时不再弹确认框放行，而是直接把这几步排队弹出来，选完才能写（`executePlan` 里 `startLocReview()` + return）。
 - 生成入口只有一个任务、两个窗口：主界面 `/recording` 和录制面板 `/recording?panel=1` 都能点「生成并写入工作区」，状态放服务端（`services/recording/progress.py`，随 `snapshot()` 的 `emit` 字段返回），任一处点击后另一处最迟 2 秒变成同一份进度并禁用按钮；后到的请求被 `PROGRESS.start()` 拦成 409（不是错误，前端按提示跟着进度走）。
-  - 阶段由 `emit.generate(progress=...)` 打点：prepare → detect → snapshot → writing → check → validate（校验失败退回 repair 再 validate）→ record → done。百分比只给基准值，前端按 `stage_at` 指数逼近 `cap` 插值（`emitPercent`），避免模型写脚本那几分钟里进度条卡死或提前满格。
+  - 阶段由 `emit.generate(progress=...)` 打点：prepare → detect → snapshot → writing → check → validate（校验失败退回 repair 再 validate）→ run（执行失败退回 run_repair）→ record → done。百分比只给基准值，前端按 `stage_at` 指数逼近 `cap` 插值（`emitPercent`），避免模型写脚本那几分钟里进度条卡死或提前满格。
   - **停止录制后不能停轮询**：`syncPolling()` 把 stopped/idle_timeout/closed 降到 2 秒继续轮，否则两个窗口都收不到生成进度；`pollEnabled` 只由 keep-alive 的 onDeactivated 关。
   - 失败原因写进 `emit.error`，冲突（目标文件已存在）`reset()` 成 idle——那是让用户选覆盖或改名，不是失败。
-- `recording-emitter` 的写权限白名单匹配的是**相对工作区路径**：opencode 内部是 `ask({permission:"edit", patterns:[path.relative(worktree, filepath)]})`。所以根目录文件必须原样写 `"x.spec.ts": "allow"`，只写 `**/x.spec.ts` 或绝对路径**一条都命中不了**，最后只剩 `*: deny`，表现是「agent 说权限被拒、没写出目标文件」。`*: deny` 必须排最前（规则是最后命中者生效）；`bash`/`task` 必须关，否则能绕过 edit 权限。
+- `recording-emitter` 的写权限有两种范围（`_emit_config(..., scope=)`）：
+  - **`workspace`（默认，产品走这条）**：`edit` / `write` 对**整个工作区** allow，只把 `.git`、`.opencode`、`node_modules` deny 掉——能写 git hook 等于能执行任意命令，能改 `.opencode` 等于能改自己的权限规则。规则是「最后命中者生效」，所以 `*` 在前、这三条 deny 在后。
+  - **`file`（保底）**：只 allow `target_path` 一个文件。它匹配的是**相对工作区路径**：opencode 内部是 `ask({permission:"edit", patterns:[path.relative(worktree, filepath)]})`，所以根目录文件必须原样写 `"x.spec.ts": "allow"`，只写 `**/x.spec.ts` 或绝对路径**一条都命中不了**，最后只剩 `*: deny`，表现是「agent 说权限被拒、没写出目标文件」。
+  - 相对路径是按 **git worktree** 算的，不是 cwd。工作区不是 git 仓库时算出来的路径对不上任何规则，写入一律被拒（报 `a rule prevents you from using this specific tool call`）。真实流程里 `validate_workspace` 强制「git 仓库根」，所以没问题——但**写验证脚本时必须先 `git init` + commit**，否则会误判成权限坏了（实测踩过三次）。
+  - 1.18.31 暴露给 recording-emitter 的**写工具叫 `apply_patch`，没有 `write` / `edit` 这两个工具名**（配置里 `"write": true` 只是把它打开）。提示词里不要写「用 write 工具」，那会让模型以为自己没有写能力。
+  - `bash` / `task` 两种范围都 deny。`tools.bash` 也保持 `false`：**只改 permission 不打开 tools，工具根本不会出现**（踩过一次，模型说「我没有 bash」其实是没这个工具）。
+- **规划轮和写入轮是同一个 opencode session**（`services/recording/emit_session.py`：`SessionRegistry` + `EmitSession`）。以前 `/plan` 和 `/generate` 各起一个 serve、各建一个 session，模型读完项目，写轮从零开始；修复轮还要再来一次。
+  - **一个 session、一个 serve**：写权限一开始就是整个工作区（只排除 `.git` / `.opencode` / `node_modules`），规划期就能用最终那份配置起 serve——规划走只读的 `recording-planner`，写入和修复换 `recording-emitter`，中途不重启进程。
+  - **为什么不再收窄到单个文件**：收窄依赖 `target_path`，而那个路径要到任务书轮结束才知道，只能换 config 重启 serve（就是上一版的「一个 session、两个 serve」）。更关键的是它**看着严、实际脆**：opencode 按 `path.relative(worktree, filepath)` 匹配白名单，工作区不是 git 仓库根时一条都命中不了（验证脚本连踩三次）；1.18.31 上模型实际调用的是 `apply_patch`，它的路径检查和白名单对不上，被误拒过；而它只覆盖三个写工具，拦不住任何别的通道。现在改成「允许写 + 事后清单 + 手动还原」，用能还原替代拦得住。
+  - **降级只有一级**：serve 还在就正常走完三轮；serve 提前退出 → `begin_write` 返回 `reused=False`，调用方退回一次性生成（重新读项目，界面会说）。没有第二个进程可退了。
+  - **越界不自动还原**：`guard.capture()` 把越界文件在生成前的内容导出到 `.autocase/backups/<id>/manifest.json`（`restore` 有原内容 / `delete` 是新建 / `skip` 拿不到），前端列清单 + 单个/全部还原（`POST /recording/backups/<id>/revert`）。不自动删的理由：模型确实可能需要写 helper，自动删会把有用的东西一起删，也会误伤用户在生成期间自己的编辑。**导出必须紧接生成结束**——`stash create` 的 commit 没有 ref，git gc 之后就取不到了。
+  - **`bash` / `task` 仍然 deny**：文件改动能还原，命令造成的破坏不能。实测放行 `npx playwright test*` 也不划算——模型看输出必然加 `2>&1 | tail`，而管道会被**整条**拒掉（opencode 会解析 `&&` / `;` / `|` 后逐段校验，这点反而是好事），每拒一次浪费一轮。`tools.bash` 也保持 `false`：只改 permission 不打开 tools，工具根本不会出现。
+  - **写轮仍然发全量 payload**：规划轮用的是 `_plan_step`（故意不含 locator），也没有 `keywords` / `samples` / 用户确认后的 plan。会话只负责省掉「重新读项目」，事实仍由 payload 保证；即使 opencode 触发了上下文压缩也不丢。
+  - **生命周期**：`/plan` 建，`/generate` 的 `finally` 关；文件冲突 409 **不关**（用户点覆盖还要接着写）；新录制开始 `close_all()`；1h 空闲 / 4h 上限 / 8 轮上限兜底。
+  - **建会话和发消息的 model 形状不同**：`POST /session` 要 `{id, providerID}`，`prompt_async` 要 `{providerID, modelID}`。传错直接 400 `{"_tag":"BadRequest"}`，实测踩过一次。
+  - **任务书存服务端**（`progress.remember_plan()` → `/recording/current` 的 `emit.plan`）：刷新页面能恢复，不用重规划——重规划意味着模型重新读一遍项目。
+  - **取消**：`POST /automation/recording/emit/cancel` → `REGISTRY.cancel()` 先 abort 再收进程树。路由在 `EmitError` 分支里先看 `progress.cancelled()`，把「用户取消」和「生成失败」分成两种说法。
+
+- **执行闭环（Playwright）**：`toolchain.run_playwright()` 在静态校验之后真跑一次生成的脚本，失败交回 `recording-emitter` 修，最多 2 轮（`MAX_RUN_REPAIR_ROUNDS`），同一错误会早停（指纹先把数字抹掉，否则 Playwright 的 `14 × locator resolved` 每轮都变）。
+  - 登录态不写进用例：`session._capture_storage_state()` 在**停止录制前**抓（先抓再重校验，重校验会跳页面），`_prepare_generation` 把它传给 `emit.generate`，运行器写成临时文件、用 `AUTOCASE_STORAGE_STATE` 注入，跑完即删。里面有 cookie，不能落进用户仓库。
+  - 临时配置必须放在**项目根**（`.autocase.verify.config.ts`）：Playwright 的 `testDir` / `globalSetup` / `webServer.cwd` 都相对配置文件所在目录解析，放进 `.autocase/` 会让 `testDir: './tests'` 变成 `.autocase/tests`，一个用例都匹配不到（实测过）。产物 `--output` 放仓库外临时目录。
+  - 判失败要同时看 `stats.unexpected` 和**顶层 `errors`**：配置错时 stats 全是 0，只看 stats 会把「一个用例都没跑起来」误判成「跑通了」。
+  - `env_error`（`ERR_CONNECTION_REFUSED` 等）不自动修，只标注「站点不可达」；没有登录态时也必须在结果里说明「失败可能来自登录」，否则用户会去改本来正确的定位。
+  - Robot Framework 不跑：录制侧只有 Playwright，Selenium 环境在另一边，硬跑只会得到假失败。`run` 为 `null`，界面照旧只显示静态校验。
+  - 跑失败**不算生成失败**：文件保留、记录照建，结果里 `run.ok=false`，界面用琥珀色标出来。校验失败才走 `EmitError`。
+- **项目记忆 = 项目地图**（`services/recording/projectmap.py` + `services/recording/memory.py` + 表 `project_memories`，agent `recording-profiler`）：录制一开始后台读一遍项目，产出一份 markdown「项目地图」（整个仓库的目录职责 + 用例写法 + 现成封装），之后每次规划和写入直接注入，不再现场读项目。
+  - **不记「坑」**：`pitfalls` 字段已删除（schema / 提示词 / 地图 / 卡片都不再有）。让模型自己判断「哪里容易写错」，产出的常是项目里并不存在的绕行做法，写手会当成项目惯例照抄，反而把代码带偏。要描述项目**是什么**，不是「可能会踩什么」。
+  - **结构先由脚本扫，再让模型标**：`projectmap.scan()` 走三层目录（跳过 node_modules / 构建与测试产物 / 隐藏目录），拿到目录树、每个目录的直接子文件数和值得打开的文件清单，作为客观事实塞进提示词；模型只在树上写 `areas`（path/kind/role/use），不再自己 ls/glob。不先扫的话模型会漏目录、会按通用习惯编。
+  - 地图落两处：`<workspace>/.autocase/project-map.md`（给人看、能 diff；`guard.FRAMEWORK_ARTIFACT_PREFIXES` 已排除 `.autocase/`，不算 agent 改文件）和 `project_memories.map_md`（卡片显示，换机器也在）。写文件失败只记日志，不影响学习。
+  - `render()` 会**丢掉不在扫描结果里的 areas 路径**：模型偶尔自己拼一个看起来合理的路径，编出来的路径比没有更糟。超 `MAX_MAP_CHARS=8000` 截断。
+  - 记录口径：`workspace`（绝对路径，unique）是唯一 key；同一目录就是同一套写法。`fingerprint` = **git HEAD + 关键文件大小 + 用例数量/最新 mtime + 一级目录结构签名**，故意不用 mtime 判内容——切分支会把 mtime 全刷新，白白重学。
+  - 学习时机只有两个：`/recording/start` 触发 `start_background()`（延迟 6 秒，别和录制抢 CPU）、用户在卡片上点「重学」。**生成链路里不学**（`_memory_for` 纯读）：一次学习 1~2 分钟，塞进「点生成」等于让用户赌运气，还会和写手抢 CPU。
+  - 过期不阻塞：`load()` 返回 `stale=True` 仍注入（旧画像比没有强，提示词里让模型自己留意），下次开始录制时指纹对不上会自动重学。
+  - **刷新失败不能作废旧画像**：`learn()` 里 `had_profile` 为真时，except 分支把状态退回 `ready`（只写 `error`）。否则一次网络抖动就让下次生成退回「现场猜项目」。
+  - schema 白名单在 `_clean()`：只留 `PROFILE_KEYS`（含 `areas`）。模型爱塞 `best_practices` / `examples`，那些没人校验又会被当惯例注入，必须在入库这一步挡掉。`snippet.code` 不压空白（缩进是代码的一部分），其余文本 `' '.join(split())`。
+  - `parse()` 用 `JSONDecoder().raw_decode` **只取第一个完整 JSON 对象**：模型经常在 JSON 后面补一段「说明」，按「第一个 { 到最后一个 }」切会变成 `Extra data` 解析失败（真实踩过一次，白等三分钟）。
+  - `parse()` 认「没学到」：runner / layout / case_shape / helpers / snippet 全空就返回 None，不覆盖上一份。实测在只有一个空 `.robot` 的假工作区上，模型会老实回 `case_shape: "无法观察"` + `confidence: low`，这正是想要的。
+  - 注入：**有地图就只给地图**（`for_plan()` 返回 `{'map'}`，`for_writer()` 再补 `snippet`）。地图本身就是 layout / naming / helpers 的渲染结果，两份一起给等于同一段话说两遍，还会在截断边界上互相打架。没有地图（老记录、渲染失败）才退回结构化字段。
+  - `snippet` 仍然要经 `emit._payload` 顶掉 `detect.samples`：mtime 取的前 60 行常常只有 import 和 describe 开头，helper 与断言习惯全在后面。
+  - 优先级写进提示词：`plan`（本次任务书）> `project_memory`（项目地图）> 通用规则，冲突时以 plan 为准；地图是某个时间点的快照，和眼前文件冲突时以文件为准。
+  - `start_background()` 在 `app.config['TESTING']` 下直接返回：路由测试会走 `/start`，不拦的话后台线程会真调 provider、真往库里写临时工作区的画像（实测污染了 4 条）。
+  - 删画像走 `DELETE /api/automation/recording/memory`。**这条通道必须留着**：模型学歪了没有擦除手段，用户就只能关掉整个功能。
+
 
 ## 自动化脚本约定
 
@@ -152,6 +262,7 @@
 - 后端：`cd backend` 后执行 `python run.py`。
 - 前端开发：`cd frontend` 后执行 `npm run dev`。
 - 前端构建：`cd frontend` 后执行 `npm run build`。
+  - **必须用磁盘上的真实路径大小写**（本机是 `d:\autoproject\...`，小写 `autoproject`）。用 `D:\AutoProject\...` 这种"看着对但大小写不同"的写法进来，Vite 的 `html-inline-proxy` 会因为 `realpathSync.native` 解析出的小写路径和入口 id 对不上而报 `No matching HTML proxy module found`（`index.html` 里有内联 `<style>` 就必现）。这不是代码问题，换回真实大小写即可。
 - Python 语法检查：`cd backend` 后执行 `python -m compileall app`。
 - 差异检查：`git diff --check`。
 - 前端默认地址：`http://localhost:5173`；后端默认地址：`http://localhost:5000`。
@@ -177,5 +288,6 @@
 - API 改动验证状态码、项目隔离和错误分支。
 - 数据模型改动验证数据库初始化和已有数据兼容。
 - 前端改动至少运行 `npm run build`。
+- 加/改颜色必须同时验证两套主题：`localStorage.setItem('ac-theme','dark')` 后刷新，用脚本扫「背景亮度 > 0.72 的非图片元素」确认没有漏掉的白块（浅色下反过来扫 < 0.22）。
 - Python 改动至少运行 `python -m compileall app`。
 - 最终说明改动文件、验证命令、未解决限制，不提交未经请求的 commit。

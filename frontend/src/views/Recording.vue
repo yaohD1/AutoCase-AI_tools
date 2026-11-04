@@ -17,76 +17,145 @@
 
     <div v-if="embedMode && !panelCollapsed && !stepsCollapsed" class="embed-resizer" title="拖动调整面板宽度" @pointerdown="startResize"></div>
 
-    <!-- 定位待确认（录制当场弹）：不唯一的定位过后再选，页面早不是当时的样子了。
-         固定在右上角，不压住左边被测页面里那些带编号的框；放在 page-col 外面，
-         整块面板被收起时也不会跟着隐藏。 -->
-    <div v-if="locConfirm" class="loc-confirm" role="dialog" aria-live="polite" aria-label="定位待确认">
-      <div class="loc-head">
-        <span class="loc-tag">定位待确认</span>
-        <span class="loc-step" :title="locConfirm.label">第 {{ locConfirm.no }} 步 · {{ locConfirm.label }}</span>
-        <el-button class="loc-close" text size="small" :icon="Close" title="稍后再选：步骤保留「不唯一」标记" @click="deferLocConfirm" />
-      </div>
-      <p class="loc-lead">
-        <template v-if="locConfirm.loading">正在把匹配到的元素在页面上框出来…</template>
-        <template v-else-if="locConfirm.count > 1">
-          这一步在页面上匹配到 {{ locConfirm.count }} 个元素，已经按同样的顺序编号框出。
-          <b>现在选，页面还是录制时的样子</b>；过后再选就得靠你自己核对了。
-        </template>
-        <template v-else>当前页面上已经找不到这一步的元素了（点完页面跳走了）。</template>
-      </p>
-      <!-- 页面跑掉时唯一的补救：用录制时记下的地址把那一页重新打开。
-           浏览器后退在这里靠不住——实测会被登录跳转的历史条目带偏。 -->
-      <p v-if="locConfirm.gone && !locConfirm.returnUrl" class="loc-gone">
-        可以回到那一步的页面重新框选，也可以直接按下面的快照选。
-      </p>
-      <div v-if="locConfirm.items.length" class="loc-list">
-        <button
-          v-for="item in locConfirm.items"
-          :key="item.index"
-          type="button"
-          :class="['loc-item', { 'is-picked': locConfirm.picked === item.index }]"
-          @click="pickLocConfirm(item.index)"
-        >
-          <span class="loc-no">{{ item.index + 1 }}</span>
-          <span class="loc-text">{{ item.row || item.text || ('<' + item.tag + '>') }}</span>
-          <span v-if="locConfirm.active === item.index" class="loc-origin">录制时点的</span>
-          <span v-if="!item.visible" class="loc-hidden">不可见</span>
-        </button>
-      </div>
-      <p v-if="locConfirm.note" class="loc-note">{{ locConfirm.note }}</p>
-      <div class="loc-foot">
-        <span v-if="locQueue.length" class="loc-queue">还有 {{ locQueue.length }} 步待确认</span>
-        <div class="loc-actions">
-          <el-button
-            v-if="locConfirm.returnUrl"
-            size="small"
-            :loading="locConfirm.returning"
-            @click="returnFromStepPage"
-          >
-            回到刚才的页面
-          </el-button>
-          <el-button
-            v-else-if="locConfirm.gone"
-            size="small"
-            :loading="locConfirm.reopening"
-            @click="reopenStepPage"
-          >
-            回到这一步的页面
-          </el-button>
-          <el-button text size="small" @click="deferLocConfirm">稍后再选</el-button>
-          <el-button
-            v-if="locConfirm.items.length"
-            type="primary"
-            size="small"
-            :disabled="locConfirm.picked == null"
-            :loading="locPicking"
-            @click="acceptLocConfirm"
-          >
-            就这个，继续
-          </el-button>
+    <!-- 定位待确认（录制当场弹）：这是**必选**的，不是提醒。
+         不唯一的定位过后再选，页面早不是当时的样子了 —— 何况这一下点击本身就可能把页面带走。
+         所以按下鼠标那一刻就截了一张视口图，弹窗里直接在图上编号框出这几个，
+         选完立即落库，全程不用把被测页面翻回去。
+         版式复用 styles/dialog.css 的左右分栏：左边是图，右边是候选，窄窗口自动改成上下。 -->
+    <el-dialog
+      :model-value="!!locConfirm"
+      class="dlg loc-dialog"
+      width="min(900px, calc(100vw - 32px))"
+      modal-class="loc-overlay"
+      align-center
+      append-to-body
+      :show-close="false"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+    >
+      <template #header>
+        <div>选择这一步的目标元素</div>
+        <div v-if="locConfirm" class="dlg-sub" :title="locConfirm.label">
+          第 <b>{{ locConfirm.no }}</b> 步 · {{ locConfirm.label }}
+        </div>
+      </template>
+
+      <div v-if="locConfirm" class="dlg-split">
+        <div :class="['dlg-viewer', { 'is-empty': !locConfirm.shotUrl || locConfirm.shotMissing }]">
+          <div class="dlg-stage">
+            <!-- 两层：shot-inner 就是「整张图按原比例放大后的那块」，用百分比撑开，
+                 所以弹窗宽度怎么变都不用重新量。聚焦到哪一块由 focusRect 决定。 -->
+            <div
+              v-if="locConfirm.shotUrl && !locConfirm.shotMissing"
+              class="shot-stage"
+              :class="{ 'is-hovering': hoverLoc != null }"
+              :style="shotStageStyle"
+            >
+              <div class="shot-inner" :style="shotInnerStyle">
+                <img
+                  :src="locConfirm.shotUrl"
+                  alt="按下鼠标那一刻的页面"
+                  @error="locConfirm.shotMissing = true"
+                />
+                <button
+                  v-for="item in locConfirm.items"
+                  :key="item.index"
+                  type="button"
+                  :class="['shot-box', {
+                    'is-picked': locConfirm.picked === item.index,
+                    'is-origin': locConfirm.active === item.index,
+                    'is-hover': hoverLoc === item.index,
+                    'is-dim': hoverLoc != null && hoverLoc !== item.index,
+                    'is-tag-out': shotTagOutside(item)
+                  }]"
+                  :style="shotBoxStyle(item)"
+                  :title="item.row || item.text || item.tag"
+                  @mouseenter="hoverLoc = item.index"
+                  @mouseleave="hoverLoc = null"
+                  @focus="hoverLoc = item.index"
+                  @blur="hoverLoc = null"
+                  @click="pickLocConfirm(item.index)"
+                ><span class="shot-no">{{ locTag(item.index) }}</span></button>
+              </div>
+            </div>
+            <span v-else-if="locConfirm.loading" class="dlg-stage-empty">正在取按下那一刻的页面…</span>
+            <span v-else class="dlg-stage-empty">{{ locConfirm.shotError || '这一页没截到图' }}</span>
+          </div>
+          <p v-if="locConfirm.shotUrl && !locConfirm.shotMissing" class="shot-tip">
+            图是<b>按下鼠标那一刻</b>的页面，已自动放大到候选所在区域；字母和右侧一致，点框也能直接选。
+          </p>
+        </div>
+
+        <div class="dlg-panel">
+          <div class="dlg-bar">
+            <span class="dlg-bar-text">匹配到 <b>{{ locConfirm.count }}</b> 个</span>
+            <span v-if="locConfirm.count > locConfirm.items.length" class="dlg-bar-note">
+              只列前 {{ locConfirm.items.length }} 个
+            </span>
+          </div>
+          <div class="dlg-scroll">
+            <div v-if="locConfirm.items.length" class="loc-list">
+              <button
+                v-for="item in locConfirm.items"
+                :key="item.index"
+                type="button"
+                :class="['loc-item', {
+                  'is-picked': locConfirm.picked === item.index,
+                  'is-hover': hoverLoc === item.index
+                }]"
+                @click="pickLocConfirm(item.index)"
+                @mouseenter="hoverLoc = item.index"
+                @mouseleave="hoverLoc = null"
+                @focus="hoverLoc = item.index"
+                @blur="hoverLoc = null"
+              >
+                <span class="loc-no">{{ locTag(item.index) }}</span>
+                <!-- 证件照：同一张截图按元素位置裁出来的小窗，A 和 B 在这里不可能看混。
+                     元素在录制时就在视口外的话没有像素可裁，直接标「屏外」。 -->
+                <span
+                  v-if="locConfirm.shotUrl && !locConfirm.shotMissing"
+                  :class="['loc-thumb', { 'is-off': !thumbable(item), 'is-origin': locConfirm.active === item.index }]"
+                >
+                  <template v-if="thumbable(item)">
+                    <img :src="locConfirm.shotUrl" :style="thumbImgStyle(item)" alt="" />
+                    <b class="loc-thumb-ring" :style="thumbRingStyle(item)"></b>
+                  </template>
+                  <span v-else class="loc-thumb-off">屏外</span>
+                </span>
+                <span class="loc-main">
+                  <span class="loc-text">{{ item.row || item.text || ('<' + item.tag + '>') }}</span>
+                  <span class="loc-meta">
+                    <span v-if="item.tag">&lt;{{ item.tag }}&gt;</span>
+                    <span v-if="locConfirm.active === item.index" class="loc-origin">录制时点的</span>
+                    <span v-if="!item.visible" class="loc-hidden">不在视口里</span>
+                  </span>
+                </span>
+              </button>
+            </div>
+            <p v-else class="dlg-empty">没有可选的候选了</p>
+            <p v-if="locConfirm.note" class="loc-note">{{ locConfirm.note }}</p>
+          </div>
         </div>
       </div>
-    </div>
+
+      <template #footer>
+        <div class="dlg-foot">
+          <span class="dlg-foot-note">
+            {{ locQueue.length ? `还有 ${locQueue.length} 步待确认` : '必须选一个才能继续' }}
+          </span>
+          <div class="dlg-foot-actions">
+            <el-button size="small" :loading="locDegrading" @click="degradeLocConfirm">不看这个，允许降级</el-button>
+            <el-button
+              type="primary"
+              size="small"
+              :disabled="!locConfirm || locConfirm.picked == null"
+              :loading="locPicking"
+              @click="acceptLocConfirm"
+            >就这个，继续</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
 
     <div
       v-show="!embedMode || !panelCollapsed"
@@ -99,9 +168,7 @@
         <span :class="['panel-dot', session && session.status === 'recording' ? (paused ? 'is-paused' : 'is-live') : '']"></span>
         <span class="panel-title">{{ panelTitle }}</span>
         <span v-if="steps.length" class="panel-count">{{ steps.length }} 步</span>
-        <span v-if="blockers.length" class="panel-warn">{{ blockers.length }} 处定位待确认</span>
         <div class="panel-actions">
-          <el-button v-if="session?.panel" text size="small" :icon="Connection" @click="relayoutPanel">并排</el-button>
           <el-button text size="small" @click="configExpanded = !configExpanded">{{ configExpanded ? '收起配置' : '配置' }}</el-button>
           <button v-if="embedMode" type="button" class="panel-collapse" title="收起面板，把宽度还给页面" @click="panelCollapsed = true">
             <span class="collapse-arrow">›</span>
@@ -187,6 +254,35 @@
               </div>
             </details>
           </div>
+        </div>
+
+        <!-- 项目记忆：录制一开始后台读的那份「这个项目怎么写测试」。
+             放在工作区下面是因为它跟着工作区走；默认只露一行状态，
+             展开才看细节——用户要的是「凭什么这么写」，不是一个新的配置项。 -->
+        <div v-if="config.workspace" :class="['cfg-field', 'cfg-memory', { 'is-busy': memoryPolling }]">
+          <div class="cfg-label">
+            项目记忆
+            <span class="cfg-acts">
+              <button type="button" class="cfg-act" :disabled="memoryPolling || !config.model" @click="refreshMemory">
+                {{ memoryBusy ? '学习中' : '重学' }}
+              </button>
+            </span>
+          </div>
+          <div class="cfg-view is-static">
+            <span :class="['cfg-chip', memoryChip.tone]">{{ memoryChip.text }}</span>
+            <span class="cfg-mem-hint">{{ memoryChip.hint }}</span>
+          </div>
+          <details v-if="memoryMap || memoryFacts.length" class="cfg-details">
+            <summary>{{ memoryMap ? '项目地图' : '已经学到什么' }}</summary>
+            <pre v-if="memoryMap" class="cfg-map">{{ memoryMap }}</pre>
+            <template v-else>
+              <div v-for="item in memoryFacts" :key="item.key" class="cfg-mem-line" :class="{ 'is-warn': item.warn }">
+                <span class="cfg-mem-key">{{ item.label }}</span>
+                <span class="cfg-mem-text">{{ item.text }}</span>
+              </div>
+            </template>
+            <button type="button" class="cfg-act cfg-mem-forget" @click="forgetMemory">删掉这份记忆</button>
+          </details>
         </div>
 
         <!-- 只有两个取值，分段比下拉少一次点击，也让「当前用哪套」永远可见 -->
@@ -377,7 +473,8 @@
               刷新页面
             </el-button>
             <el-button :icon="CircleCheck" :disabled="!canEdit" title="插入一步：判断页面上的某个状态是否成立（需要等它慢慢成立时，在表单里展开「等到成立」）" @click="openDraft('assert')">添加断言</el-button>
-            <el-button :icon="Clock" :disabled="!canEdit" title="插入一步：不管条件，先干等指定秒数" @click="openDraft('sleep')">固定等待</el-button>
+            <el-button :icon="Loading" :disabled="!canEdit" title="插入一步：等页面加载到指定状态。点击后页面跳转、站点又慢的时候用它，比固定等待可靠" @click="openDraft('ready')">等待加载</el-button>
+            <el-button :icon="Clock" :disabled="!canEdit" title="插入一步：不管条件，先干等指定秒数。等页面加载请用左边的「等待加载」——固定等待既慢又不可靠" @click="openDraft('sleep')">固定等待</el-button>
           </div>
         </div>
 
@@ -512,6 +609,12 @@
                   <span class="step-text">{{ stepDescription(step) }}</span>
                 </div>
                 <div v-if="step.text" class="step-note">{{ step.text }}</div>
+                <!-- 点击引起的跳转：脚本里会在这一步后补一句「等跳转落地」，
+                     这里把落点标出来，否则生成的那行 waitForURL 看起来像凭空多出来的 -->
+                <div v-if="step.nav_to" class="step-nav" :title="step.nav_to">
+                  <span class="step-nav-arrow">→</span>
+                  <span class="step-nav-url">{{ navPath(step.nav_to) }}</span>
+                </div>
                 <div v-if="step.target" class="step-locator">
                   <span class="step-alias">{{ step.target.alias || '未命名元素' }}</span>
                   <code class="locator-code">{{ locatorText(step.target) }}</code>
@@ -535,6 +638,16 @@
                     :disabled="!canInspect"
                     :title="canInspect ? '在浏览器里框出这条定位匹配到的元素，确认是不是这一个' : '浏览器已关闭，无法框出元素'"
                     @click.stop="peekTarget(step)"
+                  />
+                  <!-- 定位详情：采用的到底是哪一条、此刻页面上还在不在、唯不唯一。
+                       和准星分工：准星是「圈出来我自己看」，这里是「给我一个结论 + 逐条候选」。 -->
+                  <el-button
+                    class="loc-detail-btn"
+                    text
+                    :icon="Search"
+                    :disabled="!canInspect"
+                    :title="canInspect ? '查看采用的定位，并在当前页面上校验它还在不在、唯不唯一' : '浏览器已关闭，无法校验当前页面'"
+                    @click.stop="openLocDetail(step)"
                   />
                 </div>
                 <div v-if="peek.no === step.no" class="peek-panel">
@@ -576,10 +689,11 @@
                 placement="bottom-end"
                 @command="kind => onInsertCommand(kind, step.no)"
               >
-                <el-button text :icon="Plus" title="在这一步之后插入断言 / 固定等待 / 刷新" />
+                <el-button text :icon="Plus" title="在这一步之后插入断言 / 等待加载 / 固定等待 / 刷新" />
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="assert">插入断言</el-dropdown-item>
+                    <el-dropdown-item command="ready">插入等待加载</el-dropdown-item>
                     <el-dropdown-item command="sleep">插入固定等待</el-dropdown-item>
                     <el-dropdown-item command="reload" divided>插入刷新页面</el-dropdown-item>
                   </el-dropdown-menu>
@@ -635,7 +749,36 @@
             <span class="sleep-hint">不看页面状态，直接等这么久</span>
           </div>
 
-          <div v-if="draft.kind !== 'sleep'" class="draft-nl">
+          <!-- 等待加载：只有两个控件（等哪一档 + 最多等多久），没有自然语言可解析。
+               默认 load —— 用户说的「页面加载完」就是它。 -->
+          <div v-if="draft.kind === 'ready'" class="ready-body">
+            <div class="cfg-seg ready-seg" role="radiogroup" aria-label="等待加载的状态">
+              <button
+                v-for="item in READY_STATES"
+                :key="item.value"
+                type="button"
+                role="radio"
+                :aria-checked="draft.state === item.value"
+                :class="['cfg-seg-item', { 'is-on': draft.state === item.value }]"
+                :title="item.note"
+                @click="draft.state = item.value"
+              >{{ item.label }}</button>
+            </div>
+            <div class="sleep-row">
+              <span class="sleep-label">最多等</span>
+              <el-input-number
+                v-model="draft.readyTimeout"
+                :min="1"
+                :max="MAX_WAIT_SECONDS"
+                :step="5"
+                controls-position="right"
+              />
+              <span class="sleep-unit">秒</span>
+            </div>
+            <div class="ready-note">{{ readyNote }}</div>
+          </div>
+
+          <div v-if="draft.kind === 'assert'" class="draft-nl">
             <el-input
               v-model="draft.text"
               type="textarea"
@@ -647,7 +790,7 @@
               解析
             </el-button>
           </div>
-          <div v-if="draft.kind !== 'sleep'" class="field-hint">
+          <div v-if="draft.kind === 'assert'" class="field-hint">
             {{ config.model ? '解析结果会填进下面的表单，改完再插入；插入的永远是表单里的内容。' : '未选择模型：直接在下面的表单里填写。' }}
           </div>
 
@@ -659,8 +802,8 @@
             </div>
           </div>
 
-          <el-divider v-if="draft.kind !== 'sleep'" content-position="left">断言内容（可修改）</el-divider>
-          <div v-if="draft.kind !== 'sleep'" class="form-grid">
+          <el-divider v-if="draft.kind === 'assert'" content-position="left">断言内容（可修改）</el-divider>
+          <div v-if="draft.kind === 'assert'" class="form-grid">
             <el-select v-model="draft.intentType" placeholder="意图类型">
               <el-option
                 v-for="type in draftTypes"
@@ -709,7 +852,7 @@
           <!-- 高级：把「等待」收进断言。断言与等待本来就只差「容不容忍此刻还没成立」，
                所以不再单开一个按钮，默认不勾就是立即判定，勾上才变成轮询。 -->
           <div
-            v-if="draft.intentType !== 'sleep'"
+            v-if="draft.kind === 'assert'"
             :class="['advanced-box', { 'is-open': draft.pollOpen, 'is-on': draft.allowWait }]"
           >
             <div class="advanced-head" @click="draft.pollOpen = !draft.pollOpen">
@@ -787,7 +930,7 @@
 
           <div class="draft-actions">
             <el-button
-              v-if="draft.intentType !== 'sleep'"
+              v-if="draft.kind === 'assert'"
               :loading="draft.verifying"
               :disabled="!canInspect"
               :title="canInspect ? '在浏览器当前页面上判断这条断言现在成不成立' : '浏览器已关闭，无法再看当前页面'"
@@ -819,7 +962,7 @@
             <span class="check-dot"></span>
             <span class="check-text">
               {{ blockers.length
-                ? `第 ${blockers.join('、')} 步定位待确认，将按「最窄候选 + 录制时的序号」生成`
+                ? `第 ${blockers.join('、')} 步定位待确认，选定之后才能生成`
                 : (pageGoneCount ? '当前页面上的步骤都有唯一定位' : '所有步骤都有唯一定位') }}
             </span>
             <!-- 页面跑掉的步骤当场框不出来，停在这里还能一条条回去看 -->
@@ -903,10 +1046,12 @@
             <span class="gen-progress-label">{{ emitLabel }}</span>
             <span class="gen-progress-pct">{{ emitPercent }}%</span>
           </div>
-          <el-progress :percentage="emitPercent" :show-text="false" :stroke-width="6" color="#0071e3" />
+          <el-progress :percentage="emitPercent" :show-text="false" :stroke-width="6" class="emit-progress" />
           <div class="gen-progress-foot">
             <span class="gen-progress-detail">{{ emitDetail }}</span>
             <span class="gen-progress-time">已用 {{ elapsedText }}</span>
+            <!-- 规划轮最长 15 分钟，没有取消入口用户只能等或者杀后端 -->
+            <el-button v-if="emitRunning" class="gen-cancel" text size="small" @click="cancelEmit">取消</el-button>
           </div>
         </div>
         <!-- 写入的唯一入口在任务书里（「按此执行」）。这里只负责出任务书，
@@ -963,7 +1108,26 @@
         <div v-if="shownResult" class="gen-result">
           <div class="gen-result-title">已写入 {{ shownResult.path }}</div>
           <div class="field-hint">
-            {{ shownResult.validated ? '校验通过' : '未校验' }} · 框架 {{ frameworkName(shownResult.framework) }}
+            {{ shownResult.validated ? '校验通过' : '未校验' }}
+            <template v-if="shownResult.run && shownResult.run.ran">
+              · {{ shownResult.run.ok ? `已跑通 ${shownResult.run.total || 1} 个用例` : '但真跑没过' }}
+              <template v-if="shownResult.run.ok && shownResult.run.duration_ms">
+                · {{ (shownResult.run.duration_ms / 1000).toFixed(1) }}s
+              </template>
+            </template>
+            <template v-else-if="shownResult.run"> · 未执行</template>
+            · 框架 {{ frameworkName(shownResult.framework) }}
+          </div>
+          <div v-if="shownResult.run && !shownResult.run.ok" class="gen-degraded">
+            <div class="gen-degraded-title">
+              {{ shownResult.run.ran ? '类型检查过了，但真跑没过' : `没能执行验证：${shownResult.run.reason || '未知原因'}` }}
+            </div>
+            <ul v-if="shownResult.run.errors && shownResult.run.errors.length">
+              <li v-for="(item, idx) in shownResult.run.errors" :key="idx">{{ item }}</li>
+            </ul>
+            <div v-if="shownResult.run.note" class="field-hint">{{ shownResult.run.note }}</div>
+            <pre v-if="!shownResult.run.ran && shownResult.run.tail" class="gen-run-tail">{{ shownResult.run.tail }}</pre>
+            <div class="field-hint">文件已保留，可以直接改，或撤销这次写入。</div>
           </div>
           <div v-if="shownResult.degraded && shownResult.degraded.length" class="gen-degraded">
             <div class="gen-degraded-title">{{ shownResult.degraded.length }} 步使用了降级定位，请回放确认</div>
@@ -975,12 +1139,32 @@
           </div>
           <div v-if="shownResult.outside && shownResult.outside.length" class="gen-degraded">
             <div class="gen-degraded-title">
-              目标文件以外还有 {{ shownResult.outside.length }} 个文件被改动，已保留在工作区（未自动还原）
+              目标文件以外还有 {{ shownResult.outside.length }} 个文件被改动（已保留，可逐个还原）
             </div>
-            <ul>
-              <li v-for="item in shownResult.outside" :key="item">{{ item }}</li>
+            <ul class="gen-outside-list">
+              <li v-for="item in shownResult.outside" :key="item">
+                <code>{{ item }}</code>
+                <el-button
+                  text
+                  size="small"
+                  :loading="reverting === item"
+                  :disabled="!shownResult.backup_id || !!reverting"
+                  @click="revertOutside([item])"
+                >还原</el-button>
+              </li>
             </ul>
-            <div class="field-hint">确认不是你要的改动，可用 git checkout -- &lt;路径&gt; 恢复。</div>
+            <div class="field-hint">
+              脚本需要的辅助文件（helper / fixture）保留即可；还原会把这次改动之前的内容写回去。
+            </div>
+            <div class="gen-outside-actions">
+              <el-button
+                size="small"
+                :loading="reverting === '__all__'"
+                :disabled="!shownResult.backup_id || !!reverting"
+                @click="revertOutside(shownResult.outside)"
+              >全部还原</el-button>
+              <span v-if="!shownResult.backup_id" class="field-hint">这份结果没有可还原的备份</span>
+            </div>
           </div>
           <div class="gen-result-actions">
             <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: shownResult.generation_id } })">
@@ -1204,6 +1388,77 @@
         </template>
       </el-dialog>
 
+      <!-- 定位详情：这一步采用的定位 + 它此刻在当前页面上的状态。
+           打开时后端会把匹配元素框出来（只给数字不画框，等于没验证），关掉即撤。 -->
+      <el-dialog
+        v-model="locDetail.open"
+        class="loc-detail-dialog"
+        width="min(520px, calc(100vw - 24px))"
+        append-to-body
+        @closed="onLocDetailClosed"
+      >
+        <template #header>
+          <div class="ld-head">
+            <span class="ld-title">定位详情</span>
+            <span class="ld-step">第 {{ locDetail.no }} 步</span>
+            <span v-if="locDetail.data && locDetail.data.alias" class="ld-alias">{{ locDetail.data.alias }}</span>
+          </div>
+        </template>
+
+        <div v-if="locDetail.loading" class="ld-loading">正在当前页面上校验…</div>
+
+        <div v-else-if="locDetail.error" class="ld-error">{{ locDetail.error }}</div>
+
+        <div v-else-if="locDetail.data" class="ld-body">
+          <div :class="['ld-verdict', locVerdict.tone]">
+            <span class="ld-verdict-title">{{ locVerdict.title }}</span>
+            <span class="ld-verdict-sub">{{ locVerdict.sub }}</span>
+          </div>
+
+          <div class="ld-block">
+            <div class="ld-label">采用的定位</div>
+            <code class="ld-code">{{ locDetail.data.code || '无唯一定位' }}</code>
+            <div class="ld-meta">
+              <span>{{ frameworkShort(locDetail.data.framework) }}</span>
+              <span v-if="locDetail.data.kind"> · {{ locDetail.data.kind }}</span>
+              <span v-if="locDetail.data.recorded_count !== null && locDetail.data.recorded_count !== undefined">
+                · 录制时命中 {{ locDetail.data.recorded_count }} 个
+              </span>
+              <span v-if="locCheckedAt"> · 校验于 {{ locCheckedAt }}</span>
+            </div>
+          </div>
+
+          <div v-if="locDetail.data.candidates && locDetail.data.candidates.length" class="ld-block">
+            <button type="button" class="ld-toggle" @click="locShowCandidates = !locShowCandidates">
+              <span class="ld-caret">{{ locShowCandidates ? '▾' : '▸' }}</span>
+              <span>{{ locShowCandidates ? '收起' : '查看' }}全部候选（{{ locDetail.data.candidates.length }} 条）</span>
+            </button>
+            <div v-if="locShowCandidates" class="ld-cands">
+              <div v-for="(row, i) in locDetail.data.candidates" :key="i" :class="['ld-cand', { 'is-adopted': row.adopted }]">
+                <span class="ld-cand-kind">{{ row.kind }}</span>
+                <code class="ld-cand-desc">{{ row.desc }}</code>
+                <span v-if="row.adopted" class="ld-cand-adopted">采用</span>
+                <span :class="['ld-cand-count', { 'is-multi': row.count > 1, 'is-zero': !row.count }]">{{ row.count }} 个</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="ld-note">
+            <template v-if="locDetail.data.page_gone">
+              这一步录制时页面就已经翻走了，这里的结论只代表当前页面，不代表流程走到这一步时的状态。
+            </template>
+            <template v-else>
+              校验的是<b>此刻</b>的页面<span v-if="locDetail.data.page_url">：{{ locDetail.data.page_url }}</span>
+            </template>
+          </div>
+        </div>
+
+        <template #footer>
+          <el-button size="small" :loading="locDetail.loading" @click="runLocDetail(locDetail.no)">重新校验</el-button>
+          <el-button size="small" type="primary" @click="locDetail.open = false">关闭</el-button>
+        </template>
+      </el-dialog>
+
       <PathPickerDialog
         v-model="picker.visible"
         :mode="picker.mode"
@@ -1222,7 +1477,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Aim, ArrowUp, ArrowDown, CircleCheck, Clock, Close, Connection, Delete, Document, EditPen, Expand, Fold, FolderOpened, Plus, Refresh, Tickets, Timer, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowUp, ArrowDown, CircleCheck, Clock, Close, Delete, Document, EditPen, Expand, Fold, FolderOpened, Loading, Plus, Refresh, Search, Tickets, Timer, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -1246,8 +1501,19 @@ const MAX_SLEEP_SECONDS = 60
 const INTENT_LABELS = {
   visible: '元素可见', hidden: '元素隐藏', text_contains: '文字包含', text_equals: '文字等于',
   value_equals: '值等于', enabled: '元素可用', url_contains: '地址包含',
-  page_text_contains: '页面包含文字', wait_visible: '等待出现', wait_hidden: '等待消失', sleep: '固定等待'
+  page_text_contains: '页面包含文字', wait_visible: '等待出现', wait_hidden: '等待消失', sleep: '固定等待',
+  page_ready: '等待加载'
 }
+// 「等待加载」的三档，与后端 ir.READY_STATES 一一对应。默认 load：
+// 用户说的「页面加载完」就是 window.onload，图片样式脚本都就绪那一档。
+// 分段里只放短名（面板只有 420~600px），全名和解释放在下面那行 note 里。
+const READY_STATES = [
+  { value: 'load', label: 'load', note: 'load：等 onload，图片、样式、脚本全部就绪' },
+  { value: 'domcontentloaded', label: 'DOM', note: 'domcontentloaded：只等 HTML 解析完，不等图片等资源' },
+  { value: 'networkidle', label: 'idle', note: 'networkidle：等网络空闲 500ms，有轮询接口的页面容易等满超时' }
+]
+const READY_LABELS = { load: '整页加载完', domcontentloaded: 'HTML 解析完', networkidle: '网络空闲' }
+const READY_TIMEOUT_DEFAULT = 15
 const STEP_LABELS = {
   goto: '打开页面', reload: '刷新', click: '点击', fill: '输入', select: '选择', press: '按键',
   dialog: '弹窗', new_page: '新标签页',
@@ -1297,6 +1563,12 @@ const route = useRoute()
 const panelMode = computed(() => route.query.panel === '1')
 const embedMode = computed(() => route.query.embed === '1')
 const compactMode = computed(() => panelMode.value || embedMode.value)
+// 并排时两个窗口的标题栏是唯一能分清「哪扇是面板」的地方：被测那扇叫目标站的名字，
+// 长得又都是 Chromium，不区分的话 Alt+Tab 全靠猜。
+watch([panelMode, embedMode], ([panel, embed]) => {
+  document.title = panel ? 'AutoCase 录制面板'
+    : (embed ? 'AutoCase 录制' : 'AutoCase - AI测试用例生成工具')
+}, { immediate: true })
 const targetUrl = computed(() => (typeof route.query.target === 'string' ? route.query.target : ''))
 const configExpanded = ref(false)
 const panelTitle = computed(() => {
@@ -1435,6 +1707,8 @@ let flashTimer = 0
 const localPending = ref(false)
 const genError = ref(null)
 const genResult = ref(null)
+// 正在还原的越界文件：单条时是路径，全部还原时是 '__all__'。
+const reverting = ref('')
 // 任务书：规划是独立的一次请求，结果留在页面上。写脚本必须从这里点「按此执行」，
 // 界面上不再提供「不规划直接写」的入口。
 const planState = ref(null)      // { result, sig, at }
@@ -1572,7 +1846,7 @@ const stateLabel = computed(() => {
 })
 
 const blockers = computed(() => steps.value
-  .filter(s => s.target && ['ambiguous', 'invalid'].includes(effectiveStatus(s)))
+  .filter(s => s.target && !s.target.degraded && ['ambiguous', 'invalid'].includes(effectiveStatus(s)))
   .map(s => s.no))
 const fragileCount = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'fragile').length)
 // 看着唯一、其实指向了别的元素：这类步骤生成时拿不到定位，必须让用户先看见再处理。
@@ -1585,12 +1859,14 @@ const pageGoneCount = computed(() => steps.value.filter(s => s.target && s.targe
 // 这两种恰恰是「页面跑掉了」，正是要能回去看的。
 function reviewable(step) {
   const target = step.target
-  if (!target) return false
+  if (!target || target.degraded) return false
   // 亲手确认过的不用再看
   if (target.chosen && target.chosen.desc) return false
-  // 点完自己就没了的（下拉项、菜单项）：那一页回去也没有这个元素
-  if (target.vanished_after) return false
-  return needsLocConfirm(step) || !!target.page_gone || !!target.unverified
+  // 没有截图、页面又已经翻走：弹出来也只能干看，选不了，不进队列。
+  if (!target.shot && (target.page_gone || target.unverified)) return false
+  // 点完自己就没了的（下拉项、菜单项）：有截图照样能选，没图就跳过。
+  if (target.vanished_after && !target.shot) return false
+  return needsLocConfirm(step)
 }
 const reviewCount = computed(() => steps.value.filter(reviewable).length)
 
@@ -1621,7 +1897,7 @@ const emitDetail = computed(() => {
   if (!emitRunning.value && generating.value) {
     return planRunning.value ? '正在提交规划请求' : '正在提交写入请求'
   }
-  if (emit.value.mode === 'plan') return emit.value.detail || '只读项目，通常需要 1~2 分钟'
+  if (emit.value.mode === 'plan') return emit.value.detail || '正在读项目（不设上限，最多 15 分钟）'
   return emit.value.detail || '写入的只有目标文件；校验失败会保留文件'
 })
 const elapsedText = computed(() => {
@@ -1766,6 +2042,12 @@ function applySession(data) {
   // 新步骤落地的那一轮就检查定位：录得快时，等回到列表再点准星，页面早不是当时的样子了。
   const fresh = freshSteps(data.steps)
   session.value = data
+  // 任务书存在服务端（随 /current 一起回来）：刷新页面、换到另一个窗口都能接着执行，
+  // 不用重新规划——重规划意味着模型要重新读一遍项目。本地已有就不覆盖（可能刚改过路径）。
+  const savedPlan = data.emit && data.emit.plan
+  if (!planState.value && savedPlan && savedPlan.result) {
+    planState.value = { result: savedPlan.result, sig: savedPlan.sig, at: savedPlan.at }
+  }
   // 拾取模式下，新出现的拾取元素会被草稿自动选中，然后关闭拾取。
   if (draft.value && draft.value.picking && data.picks && data.picks.length > draft.value.pickBaseline) {
     const latest = data.picks[data.picks.length - 1]
@@ -1863,6 +2145,93 @@ async function closePeek() {
   }
 }
 
+// ---- 定位详情：采用的到底是哪一条、此刻页面上还在不在、唯不唯一 ----
+// 和准星的分工：准星是「把匹配圈出来我自己看」，这里是「给我一个结论 + 逐条候选」。
+// 结论口径由后端和生成脚本共用（emit._locator_info），这里只负责翻译成人话。
+const locDetail = ref({ open: false, loading: false, no: 0, error: '', data: null })
+const locShowCandidates = ref(false)
+
+async function openLocDetail(step) {
+  // 和行内 peek 共用页面上同一块浮层：先把 peek 收掉，否则关弹窗那一下会把它的框一起清掉。
+  if (peek.value.no) await closePeek()
+  locShowCandidates.value = false
+  locDetail.value = { open: true, loading: true, no: step.no, error: '', data: null }
+  await runLocDetail(step.no)
+}
+
+async function runLocDetail(no) {
+  if (!no) return
+  locDetail.value.loading = true
+  try {
+    const { data } = await api.locateRecordingStep(no, config.framework)
+    locDetail.value.data = data
+    locDetail.value.error = ''
+  } catch (error) {
+    locDetail.value.data = null
+    locDetail.value.error = errorText(error)
+  } finally {
+    locDetail.value.loading = false
+  }
+}
+
+async function onLocDetailClosed() {
+  locDetail.value.data = null
+  // 框是为这一次检查画的，关掉就撤掉，别在页面上留一堆编号。
+  try {
+    await api.clearRecordingHighlight()
+  } catch {
+    // 浏览器可能已经关了，撤不掉也无所谓。
+  }
+}
+
+function frameworkShort(value) {
+  // 弹窗那一行还要塞 kind / 命中数 / 校验时间，用 short 全称会把整行撑到换行。
+  const hit = FRAMEWORKS.find(item => item.value === value)
+  return hit ? hit.short : (value || '')
+}
+
+const locCheckedAt = computed(() => {
+  const at = locDetail.value.data && locDetail.value.data.checked_at
+  if (!at) return ''
+  try {
+    return new Date(at * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+  } catch {
+    return ''
+  }
+})
+
+const locVerdict = computed(() => {
+  const data = locDetail.value.data
+  if (!data) return { tone: '', title: '', sub: '' }
+  if (!data.ok) {
+    // 每种失败都要说清「为什么没结论」，否则用户会以为是定位坏了。
+    const reasons = {
+      no_target: ['这一步没有目标元素', '只有指向元素的步骤才带定位，断言和等待没有'],
+      no_frame: ['看不到页面', '浏览器已经关了，或者这一步所在的标签页被关掉了'],
+      no_candidate: ['录制时就没数到元素', '页面当时已经翻走，留下的候选在当前页面上都是 0 个'],
+      frame_lost: ['这一步的页面已经不在了', '所在的 frame 被销毁，没法在当前页面上校验'],
+      overlay_failed: ['定位到了，但画框失败', '元素还在，只是页面正在变化，重试一次通常就好']
+    }
+    const hit = reasons[data.reason] || ['无法校验', String(data.reason || '')]
+    return { tone: 'is-bad', title: hit[0], sub: hit[1] }
+  }
+  if (!data.count) {
+    return { tone: 'is-bad', title: '当前页面上找不到它', sub: '定位没变，但此刻在页面里数到 0 个' }
+  }
+  if (data.count === 1) {
+    return {
+      tone: 'is-ok',
+      title: '存在 · 唯一',
+      sub: data.visible ? '此刻可见' : '此刻不可见（被折叠、滚出视口，或还在加载）'
+    }
+  }
+  return {
+    tone: 'is-warn',
+    title: `存在，但匹配到 ${data.count} 个`,
+    sub: `生成时会取第 ${(data.index || 0) + 1} 个`
+  }
+})
+
 // ---- 定位待确认：不唯一就当场选，别留到「回列表再点准星」 ----
 // 实测痛点：录得快时来不及选，等事后回到步骤列表再点准星，被测页面已经走远，
 // 框出来的根本不是当时那几个元素，选了也是瞎选。所以新步骤一落地就弹这张卡，
@@ -1873,6 +2242,9 @@ async function closePeek() {
 const locConfirm = ref(null)     // { no, label, desc, count, items, picked, note, loading, gone, returnUrl }
 const locQueue = ref([])         // 等待确认的步骤号，录得快时会排队
 const locPicking = ref(false)
+const locDegrading = ref(false)
+// 鼠标停在哪个候选上：图上和列表里的 A/B/C 要能互相指认，光靠字母还是容易看串行。
+const hoverLoc = ref(null)
 const GOTO_STEP_REASONS = {
   no_url: '这一步没有记下页面地址，翻不回去',
   no_frame: '找不到可操作的页面，浏览器可能已经关了',
@@ -1888,21 +2260,15 @@ function freshSteps(list) {
 
 function needsLocConfirm(step) {
   const target = step.target
-  // 页面已翻走 / 录制时元素就没了：当前页面框不出东西，弹了也只能瞎选，留给步骤列表里的「待确认」。
-  if (!target || target.page_gone || target.unverified) return false
-  // 点完元素已经被这一次点击带走（下拉收起、列表删行）：计数取自按下的那一刻，
-  // 但现在页面上只剩别的同名元素，再框就是张冠李戴，不如不弹。
-  if (target.vanished_after) return false
+  if (!target || target.degraded) return false
   // 已经亲手确认过的步骤不再打扰。
   if (target.chosen && target.chosen.desc) return false
-  // 真·不唯一：当前框架下没有任何唯一候选，生成只能按录制时的序号取。
-  if (effectiveStatus(step) === 'ambiguous') return true
-  // 看着唯一、其实指向了别的元素：写进脚本必点错，比不唯一更需要当场重选。
-  if (effectiveStatus(step) === 'suspect') return true
-  // 页面上有多个同名元素、只是靠结构路径（css）碰巧唯一的，也弹：
-  // 生成出来是一长串 div > div:nth-of-type()，而人其实想选的是「列表里的这一行」。
-  // 这正是事后回列表看不清、页面又已经变了的场景。
-  return (target.matches?.count || 0) > 1
+  const status = effectiveStatus(step)
+  if (status !== 'ambiguous' && status !== 'suspect') return false
+  // 有「按下鼠标那一刻」的截图：页面跑没跑、元素有没有被这一下点击带走，都不影响在图上选。
+  if (target.shot) return true
+  // 没图就只能靠实时框选，那几种情况框出来是错的（页面已翻走 / 元素已被点走），不弹。
+  return !(target.page_gone || target.unverified || target.vanished_after)
 }
 
 // 快照里的候选（target.matches.items）没带序号，只有框出来的那份才带：
@@ -1942,24 +2308,35 @@ async function openNextLocConfirm() {
     return
   }
   const snap = step.target?.matches
+  // 按下鼠标那一刻的截图：有它就不再去动真实页面（highlight 会 scrollIntoView，
+  // 等于替用户把页面滚了），弹窗自己就能说清楚。
+  const shot = step.target?.shot
+  hoverLoc.value = null
   locConfirm.value = {
     no,
     label: stepDescription(step),
-    loading: true,
+    loading: !shot,
     // 先用录制时存的快照垫底：浏览器那边框不出来时，列表至少还是当时那几个。
     desc: snap?.desc || '',
     count: snap?.count || 0,
     items: withIndex(snap?.items),
-    active: null,
+    // 录制时点的是第几个：用来在图上把「原来那一下」标出来。没选过就取主候选的序号。
+    active: step.target?.chosen?.index ?? step.target?.primary?.index ?? null,
     picked: null,
     note: '',
-    // 页面跑掉不是死路：这一步录制时的地址记着，能把那一页重新打开再选。
+    shot,
+    shotUrl: shot?.id ? api.recordingStepShotUrl(no, shot.id) : '',
+    // 截图失败的原因：后端现在会把「页面跳走了 / 截图超时 / 浏览器关了」带上来。
+    shotError: shot?.error || '',
+    shotMissing: false,
+    // 页面跑掉时的兜底入口；有截图这条路径根本不走它。
     gone: false,
     returnUrl: '',
     reopening: false,
     returning: false
   }
-  // 行内准星和这张卡共用页面上的同一层框，先收掉，免得框和列表说的是两回事。
+  if (shot) return
+  // 没有截图（按下时页面已在变）：退回让浏览器重新框一次，至少还能看实时的那几个。
   if (peek.value.no) await closePeek()
   await refreshLocConfirm(no)
 }
@@ -2042,6 +2419,169 @@ async function returnFromStepPage() {
   }
 }
 
+// 图的宽高比交给 CSS：弹窗宽高怎么变，图都按原比例缩放，框的百分比定位依然对得上。
+// 不写死宽高是因为面板窗口可能只有 600px，硬撑会把图拉变形。
+const shotStageStyle = computed(() => {
+  const shot = locConfirm.value?.shot
+  if (!shot?.w || !shot?.h) return {}
+  const rect = focusRect.value
+  return { '--shot-ratio': String((rect?.w || shot.w) / (rect?.h || shot.h)) }
+})
+
+// ---- 聚焦：整页图直接缩进 500px 的框里是 0.26 倍，字糊、框叠 ----
+// 所以按候选的外接矩形裁一块出来放大，其余部分留在画布外（overflow:hidden 裁掉）。
+// 数值都是**截图像素**（跟 shot.w/h 同一套坐标），百分比换算交给 CSS。
+const FOCUS_PAD = 44          // 框外留多少上下文：太少认不出在哪，太多又白占地方
+const FOCUS_COVER = 0.9       // 聚焦区占满整图就别放大了，放大反而看不出两者关系
+const FOCUS_RATIO_MIN = 1.15  // 画面比例下限：窄成一条竖缝没法看
+const FOCUS_RATIO_MAX = 3.0   // 上限：一行表格压成一条横缝也一样
+// 窗口最窄留多少页面像素。这个数直接决定放大倍数：画布约 460 宽，460/150 ≈ 3 倍。
+// 再窄就是拿几十个像素硬撑，糊得认不出；再宽又回到「18px 的图标只有 29px」。
+const FOCUS_MIN_PX = 150
+
+// 元素落在截图里的那一块；完全在图外（滚动出视口）返回 null。
+function visibleBox(item, shot) {
+  const left = Math.max(0, item.x || 0)
+  const top = Math.max(0, item.y || 0)
+  const right = Math.min(shot.w, (item.x || 0) + (item.w || 0))
+  const bottom = Math.min(shot.h, (item.y || 0) + (item.h || 0))
+  if (right - left < 1 || bottom - top < 1) return null
+  return { left, top, right, bottom }
+}
+
+const focusRect = computed(() => {
+  const shot = locConfirm.value?.shot
+  if (!shot?.w || !shot?.h) return null
+  const full = { x: 0, y: 0, w: shot.w, h: shot.h }
+  const boxes = (locConfirm.value.items || []).map(it => visibleBox(it, shot)).filter(Boolean)
+  if (!boxes.length) return full
+  let left = Math.min(...boxes.map(b => b.left)) - FOCUS_PAD
+  let top = Math.min(...boxes.map(b => b.top)) - FOCUS_PAD
+  let right = Math.max(...boxes.map(b => b.right)) + FOCUS_PAD
+  let bottom = Math.max(...boxes.map(b => b.bottom)) + FOCUS_PAD
+  const cx = (left + right) / 2
+  const cy = (top + bottom) / 2
+  let w = Math.max(right - left, 1)
+  let h = Math.max(bottom - top, 1)
+  // 只有宽度要设下限：高度靠下面的比例钳制就够，硬给它兜个「至少四分之一屏」
+  // 反而会把一行按钮压成半屏白。
+  w = Math.max(w, Math.min(FOCUS_MIN_PX, shot.w))
+  // 先按中心把比例拉进可看的区间，再夹回图内（夹完可能比例略变，无所谓，本来就只是观感）
+  if (w / h > FOCUS_RATIO_MAX) h = w / FOCUS_RATIO_MAX
+  else if (w / h < FOCUS_RATIO_MIN) w = h * FOCUS_RATIO_MIN
+  w = Math.min(w, shot.w)
+  h = Math.min(h, shot.h)
+  const x = Math.min(Math.max(cx - w / 2, 0), shot.w - w)
+  const y = Math.min(Math.max(cy - h / 2, 0), shot.h - h)
+  // 候选散在整页四角时（占九成以上）退回整页：放大也框不住「它们在哪」
+  if (w >= shot.w * FOCUS_COVER && h >= shot.h * FOCUS_COVER) return full
+  return { x, y, w, h }
+})
+
+// 整张图放在「聚焦框」坐标系里的位置：负偏移 + 按比例撑大。
+// 用百分比而不是 px，是因为画布宽度由 CSS 决定（面板 600 和弹窗 900 算不出来同一个值）。
+const shotInnerStyle = computed(() => {
+  const shot = locConfirm.value?.shot
+  const rect = focusRect.value
+  if (!shot?.w || !shot?.h || !rect) return {}
+  return {
+    left: (-rect.x / rect.w) * 100 + '%',
+    top: (-rect.y / rect.h) * 100 + '%',
+    width: (shot.w / rect.w) * 100 + '%',
+    height: (shot.h / rect.h) * 100 + '%'
+  }
+})
+
+// 截图里的框：百分比相对整张图（shot-inner 就是整张图），聚焦与否都一样，不用改。
+// 完全在视口外的元素（截图里根本没有它）不画框，只在下面对应那条上标「不可见」。
+function shotBoxStyle(item) {
+  const shot = locConfirm.value?.shot
+  if (!shot || !shot.w || !shot.h) return { display: 'none' }
+  const box = visibleBox(item, shot)
+  if (!box) return { display: 'none' }
+  return {
+    left: (box.left / shot.w) * 100 + '%',
+    top: (box.top / shot.h) * 100 + '%',
+    width: ((box.right - box.left) / shot.w) * 100 + '%',
+    height: ((box.bottom - box.top) / shot.h) * 100 + '%'
+  }
+}
+
+// 字母徽标压在框的左上角会盖住元素开头的字，上方有地方就挪到框外面去。
+// 截图坐标和渲染尺寸基本是 1:1（聚焦就是为了这个），所以直接按截图像素判断。
+const TAG_OUT_SPACE = 20
+function shotTagOutside(item) {
+  const shot = locConfirm.value?.shot
+  const rect = focusRect.value
+  if (!shot || !rect) return false
+  const box = visibleBox(item, shot)
+  return !!box && box.top - rect.y >= TAG_OUT_SPACE
+}
+
+// ---- 候选证件照：把同一张截图当放大镜用 ----// 不走 background-size 是因为元素宽高差太多（图标 16、容器 400），
+// 直接摆一张按比例缩放、按元素中心对齐的 img 更稳，还能顺手在里面画个圈。
+const THUMB_W = 46
+const THUMB_H = 30
+const THUMB_FILL = 0.78       // 元素最多占缩略图多宽，剩下的留作上下文
+const LOC_TAGS = 'ABCDEFGHIJ' // 只列前 10 个，字母够用
+
+function locTag(index) {
+  return LOC_TAGS[index] || String((index || 0) + 1)
+}
+
+function thumbable(item) {
+  const shot = locConfirm.value?.shot
+  if (!shot?.w || !shot?.h || !item.w || !item.h) return false
+  return !!visibleBox(item, shot)
+}
+
+// 最多 1:1：放大只会把本来就几十像素的区域插值成一团糊，不如按原尺寸给个窗口。
+function thumbScale(item) {
+  return Math.min(1, (THUMB_W * THUMB_FILL) / Math.max(item.w || 1, 1))
+}
+
+function thumbImgStyle(item) {
+  const shot = locConfirm.value?.shot
+  if (!shot) return { display: 'none' }
+  const scale = thumbScale(item)
+  const cx = (item.x || 0) + (item.w || 0) / 2
+  const cy = (item.y || 0) + (item.h || 0) / 2
+  return {
+    width: shot.w * scale + 'px',
+    height: shot.h * scale + 'px',
+    left: Math.round((THUMB_W / 2 - cx * scale) * 10) / 10 + 'px',
+    top: Math.round((THUMB_H / 2 - cy * scale) * 10) / 10 + 'px'
+  }
+}
+
+function thumbRingStyle(item) {
+  const scale = thumbScale(item)
+  const w = Math.max((item.w || 0) * scale, 6)
+  const h = Math.max((item.h || 0) * scale, 6)
+  return {
+    width: w + 'px',
+    height: h + 'px',
+    left: (THUMB_W - w) / 2 + 'px',
+    top: (THUMB_H - h) / 2 + 'px'
+  }
+}
+
+// 「允许降级」：不看这个，生成时按最窄候选 + 录制时的序号写。落库之后这条不再追问。
+async function degradeLocConfirm() {
+  const current = locConfirm.value
+  if (!current || locDegrading.value) return
+  locDegrading.value = true
+  try {
+    const { data } = await api.degradeRecordingTarget(current.no)
+    applySession(data)
+    closeLocConfirm()
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    locDegrading.value = false
+  }
+}
+
 async function pickLocConfirm(index) {
   const current = locConfirm.value
   if (!current || current.loading || locPicking.value || !current.desc) return
@@ -2054,7 +2594,7 @@ async function pickLocConfirm(index) {
     locConfirm.value = {
       ...locConfirm.value,
       picked: index,
-      note: `已记下：生成时取第 ${index + 1} 个`
+      note: `已记下：生成时用 ${locTag(index)}`
     }
     // 页面上把红框挪到选中的那个，「就是它」这件事用眼睛再确认一次。
     await api.highlightRecordingStep(current.no, index, config.framework)
@@ -2415,12 +2955,20 @@ function initSortable() {
 // 断言与等待共用一个入口：draft.kind 只剩 assert / sleep，等待变成 assert 上的一个开关。
 function draftKindTypes(kind) {
   if (kind === 'sleep') return SLEEP_TYPES
+  if (kind === 'ready') return ['page_ready']
   return ASSERT_TYPES
 }
 
 const draftTypes = computed(() => draft.value ? draftKindTypes(draft.value.kind) : [])
-const draftTitle = computed(() => ({ assert: '添加断言', sleep: '固定等待' })[draft.value?.kind] || '添加断言')
-const insertLabel = computed(() => ({ sleep: '插入固定等待' })[draft.value?.kind] || '插入断言')
+const draftTitle = computed(() => ({ assert: '添加断言', sleep: '固定等待', ready: '等待加载' })[draft.value?.kind] || '添加断言')
+const insertLabel = computed(() => ({ sleep: '插入固定等待', ready: '插入等待' })[draft.value?.kind] || '插入断言')
+
+// 三档的差别只在一句话里，选哪档要能立刻看懂在等什么。
+const readyNote = computed(() => {
+  const state = READY_STATES.find(item => item.value === draft.value?.state) || READY_STATES[0]
+  // 已经到这个状态的文档会立刻返回（Playwright 的语义），说清楚免得以为它一定会等满。
+  return state.note + '；已经加载完的页面会立刻通过'
+})
 
 // 收起时也要一眼看出这条会不会等，否则得展开才知道。
 const pollSummary = computed(() => {
@@ -2471,6 +3019,9 @@ function openDraft(kind, afterNo = null) {
     target: null,
     value: '',
     seconds: 1,
+    // 「等待加载」：默认就是用户嘴里说的「页面加载完」（load），超时 15 秒。
+    state: 'load',
+    readyTimeout: READY_TIMEOUT_DEFAULT,
     // 高级默认收起，不勾就是立即断言。默认 30 秒比框架默认的 5 秒实用；
     // 刷新默认不勾——刷新会重置表单和登录态，只会让条件更难成立。
     allowWait: false,
@@ -2675,6 +3226,15 @@ function revealInserted(afterNo) {
 }
 
 function buildFormIntent(current) {
+  // 「等待加载」只有两个参数，不参与断言那套目标 / 文字 / 轮询字段。
+  if (current.kind === 'ready') {
+    const timeout = Number(current.readyTimeout)
+    if (!(timeout > 0 && timeout <= MAX_WAIT_SECONDS)) {
+      throw new Error(`最多等需在 1 到 ${MAX_WAIT_SECONDS} 秒之间`)
+    }
+    return { type: 'page_ready', target: null, value: null, seconds: null,
+      timeout, interval: null, reload: false, state: current.state || 'load' }
+  }
   const type = current.intentType
   const intent = { type, target: null, value: null, seconds: null,
     timeout: null, interval: null, reload: false }
@@ -2749,6 +3309,11 @@ function intentLabel(type) { return INTENT_LABELS[type] || type }
 
 function intentDescription(intent, target) {
   if (!intent) return ''
+  // 等页面加载没有目标元素，套用下面那套「类型 + 别名」会读成「等待加载 ，最多 15 秒」。
+  if (intent.type === 'page_ready') {
+    const state = READY_LABELS[intent.state] || intent.state || '整页加载完'
+    return `等待加载：${state}${intent.timeout ? `，最多 ${intent.timeout} 秒` : ''}`
+  }
   const parts = [intentLabel(intent.type)]
   const alias = intent.target || (target && target.alias)
   if (alias) parts.push(`「${alias}」`)
@@ -2767,6 +3332,16 @@ function intentDescription(intent, target) {
 
 function stepKindLabel(type) { return STEP_LABELS[type] || type }
 function stepTone(type) { return STEP_TONES[type] || 'info' }
+
+// 步骤行里只放路径：完整 URL 一半是同一个 origin，挤掉真正有区分度的部分。
+function navPath(url) {
+  try {
+    const parsed = new URL(url)
+    return parsed.pathname + parsed.search + parsed.hash
+  } catch {
+    return url || ''
+  }
+}
 
 function stepDescription(step) {
   switch (step.type) {
@@ -2943,6 +3518,112 @@ function statusTone(status) {
 }
 
 // ---- 工作区检测 ----
+// ---- 项目记忆 ----
+// 后端在录制一开始就在后台读一遍项目（见 backend/.../recording/memory.py），
+// 这里只做三件事：显示它学到了什么、准不准、学歪了能删掉。
+// 「能删」不是装饰：模型把某个写法记错时，没有擦除通道就等于这个工作区废了。
+const projectMemory = ref(null)
+const memoryPolling = ref(false)
+let memoryTimer = null
+
+const memoryBusy = computed(() => (projectMemory.value?.status || '') === 'learning')
+
+const memoryChip = computed(() => {
+  const data = projectMemory.value
+  const summary = data?.summary || {}
+  if (!data || data.status === 'missing') {
+    return { text: '还没学', tone: 'is-warn', hint: '开始录制后会在后台读一遍项目' }
+  }
+  if (data.status === 'learning') {
+    return { text: '学习中', tone: '', hint: '正在读项目，通常录完就绪' }
+  }
+  if (data.status === 'failed') {
+    return { text: '没学成', tone: 'is-warn', hint: (data.error || '').slice(0, 48) || '这次先按老路生成' }
+  }
+  const counts = `${summary.areas || 0} 处结构 · ${(summary.helpers || []).length} 个封装`
+  return data.stale
+    ? { text: '已过期', tone: 'is-warn', hint: `${counts}；项目改过，下次生成仍用这份` }
+    : { text: '已学', tone: 'is-ok', hint: counts }
+})
+
+// 项目地图：一份 markdown（目录职责 + 写法 + 封装）。
+// 有地图就只显示地图——旧的 details 列表是地图渲染不出来时的兜底。
+const memoryMap = computed(() => (projectMemory.value?.map || '').trim())
+
+const memoryFacts = computed(() => {
+  const summary = projectMemory.value?.summary || {}
+  const out = []
+  if (summary.test_dir) out.push({ key: 'dir', label: '用例目录', text: summary.test_dir })
+  if (summary.layout) out.push({ key: 'layout', label: '目录布局', text: summary.layout })
+  if (summary.naming) out.push({ key: 'naming', label: '命名', text: summary.naming })
+  for (const name of summary.helpers || []) {
+    out.push({ key: 'h-' + name, label: '封装', text: name })
+  }
+  if (summary.files) out.push({ key: 'files', label: '读过', text: summary.files + ' 个文件' })
+  return out
+})
+
+async function loadMemory(silent = true) {
+  clearTimeout(memoryTimer)
+  const workspace = (config.workspace || '').trim()
+  if (!workspace) {
+    projectMemory.value = null
+    return
+  }
+  try {
+    const { data } = await api.getRecordingMemory(workspace, config.framework)
+    projectMemory.value = data
+    // 学习在后台跑：learning 时过一会儿再看一眼，学完就自然停下，不做无限轮询。
+    if (data.status === 'learning') {
+      memoryTimer = setTimeout(() => loadMemory(true), 12000)
+    }
+  } catch (error) {
+    if (!silent) ElMessage.warning(errorText(error))
+  }
+}
+
+async function refreshMemory() {
+  if (!config.model) {
+    ElMessage.warning('先选模型：学画像是模型在读项目')
+    return
+  }
+  memoryPolling.value = true
+  try {
+    await api.refreshRecordingMemory({
+      workspace_path: config.workspace,
+      model: config.model,
+      framework: config.framework
+    })
+    projectMemory.value = { ...(projectMemory.value || {}), status: 'learning' }
+    memoryTimer = setTimeout(() => loadMemory(true), 6000)
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    memoryPolling.value = false
+  }
+}
+
+async function forgetMemory() {
+  try {
+    await ElMessageBox.confirm(
+      '删掉之后，下一次生成不再带项目画像，会重新现场读项目。确定删掉吗？',
+      '删掉项目记忆',
+      { type: 'warning', confirmButtonText: '删掉', cancelButtonText: '留着' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await api.forgetRecordingMemory(config.workspace)
+    projectMemory.value = { status: 'missing' }
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  }
+}
+
+// 换工作区 = 换一套写法，画像必须重新读；换框架同理（Playwright 和 Robot 的约定不通用）。
+watch(() => [config.workspace, config.framework], () => loadMemory(true))
+
 async function detectWorkspace() {
   const workspace = (config.workspace || '').trim()
   if (!workspace) return
@@ -3157,39 +3838,26 @@ async function runPlan(replan) {
 }
 
 // ---- 写入：只从任务书的「按此执行」进来 ----
+// 取消当前规划 / 生成：后端 abort 会话并杀掉 serve，进度条随即落定。
+// 兜底路径（会话已失效、退回一次性生成）收不到取消信号，如实告诉用户。
+async function cancelEmit() {
+  try {
+    const { data } = await api.cancelRecordingEmit()
+    if (data.cancelled) ElMessage.info('已取消')
+    else ElMessage.info('这一轮走的是兜底路径，没法中途取消，请稍等它结束')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
 async function executePlan(overwrite) {
   // 没有确认过的写入位置就不写：任务书的「按此执行」本身就是授权动作。
   if (!planData.value || !planTarget.value || planStale.value || generating.value) return
-  if (!overwrite && blockers.value.length) {
-    // 不唯一不再阻断生成，但要让用户知道哪几步会降级、降到什么程度。
-    const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
-    const lines = blockers.value.map((no) => {
-      const step = steps.value.find(s => s.no === no)
-      const plan = degradePlan(step)
-      const alias = esc(step?.target?.alias || `第 ${no} 步`)
-      if (step?.target?.chosen?.index_invalid) {
-        // 你选过、但停止时元素少了：别只说「取第 3 个」，要点明它已经不存在。
-        const total = plan ? plan.count : 0
-        return `第 ${no} 步「${alias}」：你选的是第 ${step.target.chosen.index + 1} 个，`
-          + `但页面上现在只有 ${total} 个，需要重新选`
-      }
-      if (!plan) return `第 ${no} 步「${alias}」：页面上已匹配不到，将写 TODO 注释`
-      const nth = plan.index != null ? `取第 ${plan.index + 1} 个` : '取第 1 个'
-      return `第 ${no} 步「${alias}」：匹配 ${plan.count} 个，${nth}`
-    })
-    const html = `${lines.join('<br>')}<br><br>`
-      + '这几步会按「最窄候选 + 录制时的序号」生成，页面结构变了可能指错元素。'
-      + '生成前可以先点步骤右侧的准星，在浏览器里把元素框出来确认。是否继续？'
-    try {
-      await ElMessageBox.confirm(html, '有步骤定位待确认', {
-        dangerouslyUseHTMLString: true,
-        confirmButtonText: '仍然执行',
-        cancelButtonText: '取消',
-        type: 'warning'
-      })
-    } catch {
-      return
-    }
+  // 待确认不再是「提醒一下再放行」：直接把那几步排队弹出来，选完或明确降级之后才能写。
+  if (blockers.value.length) {
+    ElMessage.warning(`还有 ${blockers.value.length} 步定位待确认，先选完再生成`)
+    startLocReview()
+    return
   }
   localPending.value = true
   // 点击到服务端任务起来之间有最多一次轮询的间隔，先把节奏提上来，进度条立刻有反应。
@@ -3215,8 +3883,12 @@ async function executePlan(overwrite) {
     planNotes.value = []
     // 写完了：任务书这一版的任务也结束了，别让它继续盖在结果上（结果卡片在面板里）。
     closePlanSheet()
-    if (data.outside && data.outside.length) {
-      ElMessage.warning(`已写入 ${data.path}，但有 ${data.outside.length} 个目标以外的文件被改动`)
+    // 降级要说出来：用户看到「重新读了项目」才知道这一轮不是复用上下文写的。
+    const sessionInfo = data.session || {}
+    if (sessionInfo.reused === false) {
+      ElMessage.warning(`已写入 ${data.path}，但上一轮的阅读上下文已失效，本次重新读了项目`)
+    } else if (data.outside && data.outside.length) {
+      ElMessage.warning(`已写入 ${data.path}，另有 ${data.outside.length} 个文件被改动，可在结果里逐个还原`)
     } else {
       ElMessage.success(`已写入 ${data.path}`)
     }
@@ -3227,6 +3899,16 @@ async function executePlan(overwrite) {
       // 后端判定任务书与录制对不上：强制重新规划，别拿旧任务书硬写。
       if (planState.value) planState.value = { ...planState.value, stale: true }
       ElMessage.warning('录制步骤变过了，请重新规划任务书')
+      return
+    }
+    if (details.includes('workspace_changed')) {
+      // 换了工作区/框架：旧任务书里的写法是另一个仓库的，不能硬套。
+      planState.value = null
+      ElMessage.warning('工作区或框架变了，请重新生成任务书')
+      return
+    }
+    if (details.includes('cancelled')) {
+      ElMessage.info('已取消本次生成')
       return
     }
     const isConflict = status === 409 && details.some(d => String(d).startsWith('conflict:'))
@@ -3256,6 +3938,35 @@ async function executePlan(overwrite) {
     localPending.value = false
     // 请求回来时服务端状态已经落定，立刻刷一次，别让按钮在这 1 秒里又变回可点。
     loadCurrent()
+  }
+}
+
+// 越界改动不自动还原：模型确实可能需要写 helper，删掉不如让用户看一眼再决定。
+async function revertOutside(paths) {
+  const result = shownResult.value
+  if (!result || !result.backup_id || !paths || !paths.length) return
+  reverting.value = paths.length === 1 ? paths[0] : '__all__'
+  try {
+    const { data } = await api.revertRecordingBackup(
+      result.backup_id, paths, config.workspace.trim())
+    const done = new Set((data.reverted || []).map(row => row.path))
+    // 两个来源都要改：本地这份是优先显示源，服务端那份不改的话，轮询一秒后又冒出来。
+    for (const holder of [genResult.value, emit.value.result]) {
+      if (holder && holder.outside) holder.outside = holder.outside.filter(p => !done.has(p))
+    }
+    const failed = data.failed || []
+    const skipped = data.skipped || []
+    if (failed.length) {
+      ElMessage.error(`有 ${failed.length} 个文件没还原成功：${failed[0].reason || '未知原因'}`)
+    } else if (skipped.length) {
+      ElMessage.warning(`已还原 ${done.size} 个；${skipped.length} 个没有原始内容可还原`)
+    } else {
+      ElMessage.success(`已还原 ${done.size} 个文件`)
+    }
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    reverting.value = ''
   }
 }
 
@@ -3326,17 +4037,6 @@ function errorText(error) {
   return (error && error.message) || '操作失败'
 }
 
-// 用户把两个窗口挪乱后，点「并排」重新摆一次。
-async function relayoutPanel() {
-  try {
-    const { data } = await api.relayoutRecordingPanel()
-    if (data.laid_out) ElMessage.success('已重新并排')
-    else ElMessage.warning('无法调整窗口位置（可能已被关闭或系统拒绝）')
-  } catch (error) {
-    ElMessage.error(errorText(error))
-  }
-}
-
 // ---- 生命周期 ----
 // 窗口变窄（多屏切换、退出全屏）时收一下面板，别把被测页面挤没。
 function clampPanelWidth() {
@@ -3362,6 +4062,7 @@ onMounted(async () => {
     modelOptions.value = []
   }
   if (config.workspace) detectWorkspace()
+  loadMemory(true)
 })
 
 // 页面被 keep-alive 缓存：回到页面时刷新会话状态，离开时停止轮询。
@@ -3379,6 +4080,7 @@ onDeactivated(() => {
 onUnmounted(() => {
   stopPolling()
   stopEventStream()
+  clearTimeout(memoryTimer)
   clearInterval(tickTimer)
   window.removeEventListener('resize', clampPanelWidth)
   window.removeEventListener('keydown', onSheetKeydown, true)
@@ -3401,22 +4103,21 @@ watch(steps, (list) => {
 </script>
 
 <style scoped>
-.recording-page { max-width:1440px; margin:0 auto; animation: page-enter .32s ease both; }
+.recording-page { max-width:1440px; margin:0 auto; }
 
 /* 按钮的基础规范见 styles/buttons.css（本页根元素挂了 ui-buttons 类）；
    下面只放本页特有的按钮形态。 */
 
 /* 卡片头两侧的轻量按钮（面板模式的「并排 / 配置」） */
 .is-panel .panel-head :deep(.el-button.is-text) { height: 26px; padding: 0 8px; font-size: 12.5px; }
-@keyframes page-enter { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
 
 /* ===== 嵌入模式：单窗口，左边被测系统、右边可收起的编排面板 ===== */
 .recording-page.is-embed {
   max-width:none; padding:0; height:100vh; display:flex; flex-direction:row;
-  animation:none; background:#eef1f5; overflow:hidden;
+  background:var(--bg-sunken); overflow:hidden;
 }
-.embed-frame { flex:1; min-width:0; height:100vh; border:0; background:#fff; display:block; }
-.is-embed .page-col { flex:none; height:100vh; overflow:hidden; background:#f5f7fa; border-left:1px solid #e2e6ec;
+.embed-frame { flex:1; min-width:0; height:100vh; border:0; background:var(--bg-card); display:block; }
+.is-embed .page-col { flex:none; height:100vh; overflow:hidden; background:var(--bg-sunken); border-left:1px solid var(--line-soft);
   /* 「收起 / 展开」时面板宽度平滑过渡，iframe 跟着一起伸缩；拖动分栏时必须关掉，否则手感发飘 */
   transition:width .26s cubic-bezier(.4,0,.2,1); }
 .is-embed.is-resizing .page-col { transition:none; }
@@ -3424,38 +4125,42 @@ watch(steps, (list) => {
 /* 拖拽手柄要 position: relative，否则 z-index 不生效、会被 iframe 盖住点不到 */
 .embed-resizer { flex:none; position:relative; width:6px; margin-left:-4px; z-index:6; cursor:col-resize; }
 .embed-resizer::after { content:''; position:absolute; inset:0 2px; border-radius:2px; background:transparent; transition:background .15s ease; }
-.embed-resizer:hover::after { background:#9fc0ee; }
+.embed-resizer:hover::after { background:var(--accent-soft); }
 /* 拖动期间让 iframe 不参与命中测试，避免 pointermove 被 iframe 吃掉 */
 .is-embed.is-resizing .embed-frame { pointer-events:none; }
 .is-embed.is-resizing .embed-resizer { cursor:col-resize; }
 .embed-rail {
-  flex:none; width:36px; height:100vh; border:0; border-left:1px solid #e2e6ec; background:#fff;
-  display:flex; flex-direction:column; align-items:center; gap:12px; padding:14px 0; cursor:pointer; color:#6e6e73;
+  flex:none; width:36px; height:100vh; border:0; border-left:1px solid var(--line-soft); background:var(--bg-card);
+  display:flex; flex-direction:column; align-items:center; gap:12px; padding:14px 0; cursor:pointer; color:var(--muted);
 }
-.embed-rail:hover { background:#f4f8ff; color:#0071e3; }
+.embed-rail:hover { background:var(--bg-card); color:var(--accent); }
 .rail-caret { font-size:16px; line-height:1; }
-.rail-count { font-size:11.5px; font-weight:700; font-variant-numeric:tabular-nums; color:#8a8f99; }
-.rail-dot { width:7px; height:7px; border-radius:50%; background:#c7ccd6; margin-top:auto; }
-.rail-dot.live { background:#34c759; box-shadow:0 0 0 3px rgba(52,199,89,.18); }
-.panel-collapse { border:0; background:transparent; color:#8a8f99; cursor:pointer; padding:2px 4px; border-radius:6px; line-height:1; }
-.panel-collapse:hover { background:#eef1f5; color:#0071e3; }
+.rail-count { font-size:11.5px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--muted); }
+.rail-dot { width:7px; height:7px; border-radius:50%; background:var(--bg-active); margin-top:auto; }
+.rail-dot.live { background:var(--ok); box-shadow:0 0 0 3px rgba(52,199,89,.18); }
+.panel-collapse { border:0; background:transparent; color:var(--muted); cursor:pointer; padding:2px 4px; border-radius:6px; line-height:1; }
+.panel-collapse:hover { background:var(--bg-sunken); color:var(--accent); }
 .collapse-arrow { font-size:16px; }
 
 /* 面板模式：录制时并排的右侧编排栏 =====
    只有一列，步骤列表吃掉剩余高度；配置默认收起，靠顶部「配置」按钮展开。 */
 .recording-page.is-panel {
   max-width:none; height:100vh; padding:10px 12px 12px; display:flex; flex-direction:column; gap:10px;
-  animation:none; box-sizing:border-box;
+  box-sizing:border-box;
 }
-.panel-head { flex:none; display:flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid #e6e9ef; border-radius:10px; background:#fff; box-shadow:0 1px 2px rgba(16,24,40,.05); }
-.panel-dot { width:8px; height:8px; border-radius:50%; background:#c7ccd6; flex:none; }
-.panel-dot.is-live { background:#34c759; box-shadow:0 0 0 3px rgba(52,199,89,.18); animation:panel-pulse 1.8s ease-in-out infinite; }
-.panel-dot.is-paused { background:#ff9f0a; box-shadow:0 0 0 3px rgba(255,159,10,.2); }
+.panel-head { flex:none; display:flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid var(--line-soft); border-radius:10px; background:var(--bg-card); box-shadow:0 1px 2px rgba(16,24,40,.05); }
+.panel-dot { width:8px; height:8px; border-radius:50%; background:var(--bg-active); flex:none; }
+.panel-dot.is-live { background:var(--ok); box-shadow:0 0 0 3px rgba(52,199,89,.18); animation:panel-pulse 1.8s ease-in-out infinite; }
+.panel-dot.is-paused { background:var(--warn); box-shadow:0 0 0 3px rgba(255,159,10,.2); }
 @keyframes panel-pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
-.panel-title { font-size:13px; font-weight:700; color:#1d1d1f; }
-.panel-count { font-size:11.5px; color:#6e6e73; background:#f2f4f7; border-radius:999px; padding:1px 8px; }
-.panel-warn { font-size:11.5px; color:#b45309; background:#fff4e6; border-radius:999px; padding:1px 8px; }
+.panel-title { font-size:13px; font-weight:700; color:var(--ink); }
+.panel-count { font-size:11.5px; color:var(--muted); background:var(--bg-sunken); border-radius:999px; padding:1px 8px; }
 .panel-actions { margin-left:auto; display:flex; gap:2px; }
+/* 独立面板窗口（被测系统禁止 iframe 时的 split 布局）里，page-col 必须是这一列的
+   弹性容器：以前它保持块级、内容高度自适应，下面几层 flex:1 / min-height:0 全都无处可依，
+   步骤多起来整列被撑出 100vh，再被 #app.is-panel-mode .el-main 的 overflow:hidden 裁掉
+   —— 表现就是「步骤列表滚不动」。嵌入模式有自己的 .page-col 规则，不受影响。 */
+.recording-page.is-panel .page-col { flex:1; min-height:0; display:flex; flex-direction:column; }
 .is-panel .recording-body, .is-embed .page-col .recording-body { display:flex; flex-direction:column; gap:10px; flex:1; min-height:0; }
 .is-panel .main-layout { display:flex; flex-direction:column; gap:10px; flex:1; min-height:0; }
 .is-panel .panel-card { margin-bottom:0; border-radius:10px; }
@@ -3472,7 +4177,7 @@ watch(steps, (list) => {
 /* 工具栏在窄栏里收小一号，尽量一行放完；滚动时吸顶 */
 .is-panel .toolbar {
   flex-wrap:wrap; gap:6px; position:sticky; top:-12px; z-index:2;
-  background:#fff; padding:12px 0 8px; margin:-12px 0 0;
+  background:var(--bg-card); padding:12px 0 8px; margin:-12px 0 0;
 }
 .is-panel .toolbar :deep(.el-button) { padding:6px 10px; font-size:12.5px; height:30px; }
 .is-panel .config-card :deep(.el-card__body) { padding:14px; }
@@ -3482,15 +4187,15 @@ watch(steps, (list) => {
 /* 页头收一档：小字从蓝色大写标签改成灰色注脚，标题靠字重而不是字号抢视线 */
 .page-header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:20px; }
 .eyebrow { color:var(--muted); font-size:10.5px; font-weight:600; letter-spacing:.09em; margin-bottom:6px; text-transform:uppercase; }
-h1 { margin:0; color:#15181d; font-size:22px; font-weight:600; letter-spacing:-.02em; }
-.page-header p { margin:6px 0 0; color:#7a8494; font-size:12.5px; line-height:1.6; max-width:820px; }
+h1 { margin:0; color:var(--ink); font-size:22px; font-weight:600; letter-spacing:-.02em; }
+.page-header p { margin:6px 0 0; color:var(--muted); font-size:12.5px; line-height:1.6; max-width:820px; }
 .page-intro { min-width:0; }
 .page-actions { display:flex; align-items:center; gap:8px; flex:none; padding-top:2px; }
-.hint-dot { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; margin-left:3px; border-radius:50%; background:#eef1f6; color:#86909c; font-size:10px; font-weight:700; cursor:help; vertical-align:1px; }
+.hint-dot { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px; margin-left:3px; border-radius:50%; background:var(--bg-sunken); color:var(--muted); font-size:10px; font-weight:700; cursor:help; vertical-align:1px; }
 
 /* 卡片 */
-.panel-card { border:1px solid #ebedf0; border-radius:14px; overflow:hidden; box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 30px rgba(16,24,40,.05); margin-bottom:20px; }
-.panel-card :deep(.el-card__header) { padding:11px 16px; border-bottom:1px solid #f0f2f5; background:linear-gradient(180deg,#fcfdff,#f7f9fc); }
+.panel-card { border:1px solid var(--line-soft); border-radius:14px; overflow:hidden; box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 30px rgba(16,24,40,.05); margin-bottom:20px; }
+.panel-card :deep(.el-card__header) { padding:11px 16px; border-bottom:1px solid var(--line-soft); background:linear-gradient(180deg,var(--bg-card),var(--bg-card)); }
 .panel-card :deep(.el-card__body) { padding:14px 16px; }
 .section-header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
 .steps-head-right { display:flex; align-items:center; gap:8px; flex:none; }
@@ -3500,15 +4205,15 @@ h1 { margin:0; color:#15181d; font-size:22px; font-weight:600; letter-spacing:-.
   padding:0 6px;
   margin-right:-6px;
   border-radius:6px;
-  color:#6e6e73;
+  color:var(--muted);
   font-size:12px;
   font-weight:500;
 }
-.recording-page :deep(.el-button.steps-collapse-btn.is-text:hover) { background:#f2f7ff; color:#0071e3; }
-.card-title { position:relative; padding-left:12px; font-size:15px; font-weight:700; color:#1d1d1f; }
-.card-title::before { content:''; position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:15px; border-radius:3px; background:linear-gradient(180deg,#0a84ff,#0071e3); }
-.field-hint { color:#909399; font-size:12px; line-height:1.5; margin-top:6px; }
-.root-hint { margin-left:6px; color:#a8abb2; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11.5px; }
+.recording-page :deep(.el-button.steps-collapse-btn.is-text:hover) { background:var(--bg-card); color:var(--accent); }
+.card-title { position:relative; padding-left:12px; font-size:15px; font-weight:700; color:var(--ink); }
+.card-title::before { content:''; position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:15px; border-radius:3px; background:linear-gradient(180deg,var(--accent),var(--accent)); }
+.field-hint { color:var(--muted); font-size:12px; line-height:1.5; margin-top:6px; }
+.root-hint { margin-left:6px; color:var(--faint); font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11.5px; }
 
 /* ===== 配置区（静物）=====
    默认是一排「标签 + 值」，点开才换成输入框。整块只有两种分隔线：行与行之间的细线、
@@ -3524,7 +4229,7 @@ h1 { margin:0; color:#15181d; font-size:22px; font-weight:600; letter-spacing:-.
 }
 /* 卡片撑满左列：主行动要贴住卡片底边，否则下面会空出一大块白 */
 .config-card { display:flex; flex-direction:column; }
-.config-card :deep(.el-card__header) { flex:none; padding:14px 20px; background:#fff; }
+.config-card :deep(.el-card__header) { flex:none; padding:14px 20px; background:var(--bg-card); }
 .config-card :deep(.el-card__body) { flex:1; display:flex; flex-direction:column; padding:2px 20px 18px; }
 .config-card .card-title { font-size:14px; font-weight:600; }
 .config-card .card-title::before { display:none; }
@@ -3537,20 +4242,20 @@ h1 { margin:0; color:#15181d; font-size:22px; font-weight:600; letter-spacing:-.
 .cfg-label { font-size:11.5px; color:var(--cfg-muted); letter-spacing:.01em; }
 .cfg-view { display:flex; align-items:center; gap:10px; height:32px; cursor:text; }
 .cfg-text { flex:1; min-width:0; font-size:13px; color:var(--cfg-ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; transition:color .14s ease; }
-.cfg-view:hover .cfg-text { color:#000; }
+.cfg-view:hover .cfg-text { color:var(--ink); }
 /* 工作区只能通过「更换」选目录，这一行本身不可编辑：光标和悬停态都不能骗人 */
 .cfg-view.is-static { cursor:default; }
 .cfg-view.is-static:hover .cfg-text { color:var(--cfg-ink); }
-.cfg-text.is-empty { color:#b3bac5; }
+.cfg-text.is-empty { color:var(--faint); }
 .cfg-field--hero .cfg-text { font-size:14px; }
 .cfg-mono { font-family:var(--cfg-mono); font-size:12.5px; letter-spacing:-.01em; }
 /* 「编辑」只在悬停时出现：默认状态是一张摘要，不该有七个提示在喊 */
-.cfg-hint { flex:none; font-size:11.5px; color:#c2c8d2; opacity:0; transition:opacity .14s ease, color .14s ease; }
+.cfg-hint { flex:none; font-size:11.5px; color:var(--faint); opacity:0; transition:opacity .14s ease, color .14s ease; }
 .cfg-view:hover .cfg-hint { opacity:1; color:var(--cfg-accent); }
 .cfg-acts { display:flex; gap:12px; flex:none; }
-.cfg-act { border:0; background:none; padding:0; font-size:11.5px; color:#9aa3b1; cursor:pointer; transition:color .14s ease; }
+.cfg-act { border:0; background:none; padding:0; font-size:11.5px; color:var(--muted); cursor:pointer; transition:color .14s ease; }
 .cfg-act:not(:disabled):hover { color:var(--cfg-accent); }
-.cfg-act:disabled { color:#d3d8e0; cursor:default; }
+.cfg-act:disabled { color:var(--faint); cursor:default; }
 
 /* 编辑态：只剩一条下划线，聚焦时变蓝加粗 */
 /* 与只读行同高（32px）：切换编辑时下面的行不能跳一下 */
@@ -3563,7 +4268,7 @@ h1 { margin:0; color:#15181d; font-size:22px; font-weight:600; letter-spacing:-.
   border-bottom:1.5px solid var(--cfg-accent); padding-bottom:4.5px;
 }
 .cfg-input :deep(.el-input__inner) { font-family:var(--cfg-mono); font-size:12.5px; color:var(--cfg-ink); }
-.cfg-input :deep(.el-input__inner::placeholder) { font-family:var(--cfg-mono); color:#b3bac5; }
+.cfg-input :deep(.el-input__inner::placeholder) { font-family:var(--cfg-mono); color:var(--faint); }
 .cfg-select { width:100%; height:32px; }
 .cfg-select :deep(.el-select__wrapper) {
   min-height:32px; height:32px; padding:0 0 5px; background:transparent; box-shadow:none; border-radius:0;
@@ -3571,34 +4276,57 @@ h1 { margin:0; color:#15181d; font-size:22px; font-weight:600; letter-spacing:-.
 }
 
 /* 框架：只有两个取值，分段控制器比下拉少一次点击，也让「当前用哪套」一直可见 */
-.cfg-seg { display:inline-flex; gap:2px; margin:8px 0 10px; padding:2px; border-radius:9px; background:#f2f4f7; }
-.cfg-seg-item { border:0; background:transparent; padding:6px 12px; border-radius:7px; font-size:12px; color:#7a8494; cursor:pointer; transition:background .14s ease, color .14s ease; }
+.cfg-seg { display:inline-flex; gap:2px; margin:8px 0 10px; padding:2px; border-radius:9px; background:var(--bg-sunken); }
+.cfg-seg-item { border:0; background:transparent; padding:6px 12px; border-radius:7px; font-size:12px; color:var(--muted); cursor:pointer; transition:background .14s ease, color .14s ease; }
 .cfg-seg-item:hover { color:var(--cfg-ink); }
-.cfg-seg-item.is-on { background:#fff; color:var(--cfg-ink); box-shadow:0 1px 2px rgba(16,24,40,.09); }
+.cfg-seg-item.is-on { background:var(--bg-card); color:var(--cfg-ink); box-shadow:0 1px 2px rgba(16,24,40,.09); }
 
 /* 检测结果：小方片而不是药丸——药丸太像标签，杂在表单里更吵 */
 .cfg-detect { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:0 0 10px; }
-.cfg-chip { display:inline-flex; align-items:center; height:20px; padding:0 7px; border-radius:5px; background:#f4f6f9; color:#5b6472; font-size:11px; font-family:var(--cfg-mono); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.cfg-chip.is-ok { background:#edf7f1; color:#1e7a46; }
-.cfg-chip.is-warn { background:#fdf6ea; color:#ad6800; }
-.cfg-details { flex-basis:100%; margin-top:4px; font-size:11.5px; color:#7a8494; }
-.cfg-details summary { cursor:pointer; color:#98a1b0; }
+.cfg-chip { display:inline-flex; align-items:center; height:20px; padding:0 7px; border-radius:5px; background:var(--bg-sunken); color:var(--muted); font-size:11px; font-family:var(--cfg-mono); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cfg-chip.is-ok { background:var(--ok-soft); color:var(--ok); }
+.cfg-chip.is-warn { background:var(--warn-soft); color:var(--warn); }
+.cfg-details { flex-basis:100%; margin-top:4px; font-size:11.5px; color:var(--muted); }
+.cfg-details summary { cursor:pointer; color:var(--muted); }
+
+/* 项目记忆：一行状态 + 展开清单。它是「凭什么这么写」的解释，不是必填项，
+   所以文字压到 11.5px、只在展开时才占高度。 */
+.cfg-memory .cfg-label { display:flex; align-items:center; justify-content:space-between; }
+.cfg-memory .cfg-view { gap:8px; }
+.cfg-mem-hint { color:var(--faint); font-size:11.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cfg-memory.is-busy .cfg-chip { animation:cfg-pulse 1.6s ease-in-out infinite; }
+@keyframes cfg-pulse { 0%,100% { opacity:1 } 50% { opacity:.55 } }
+.cfg-mem-line { display:flex; gap:8px; padding:3px 0; line-height:1.6; }
+.cfg-mem-key { flex:none; min-width:52px; color:var(--faint); }
+.cfg-mem-text { color:var(--ink); overflow-wrap:anywhere; }
+.cfg-mem-line.is-warn .cfg-mem-key { color:var(--warn); }
+.cfg-mem-forget { margin-top:6px; color:var(--faint); }
+.cfg-mem-forget:hover { color:var(--danger, #d9534f); }
+/* 项目地图：整份是等宽排版的文档，保留原有换行与缩进（white-space:pre），
+   高度封顶后内部滚动——不然一份地图能把整个配置区顶到屏幕外。 */
+.cfg-map {
+  margin:8px 0 4px; padding:10px 12px; max-height:340px; overflow:auto;
+  background:var(--bg-sunken); border:1px solid var(--line-soft); border-radius:8px;
+  font-family:var(--mono); font-size:11.5px; line-height:1.7; color:var(--ink);
+  white-space:pre; tab-size:2;
+}
+@media (prefers-reduced-motion: reduce) { .cfg-memory.is-busy .cfg-chip { animation:none; } }
 
 /* 高级项：折成一行，右侧直接写当前值，不展开也知道用的是哪个解释器 */
-.cfg-adv { display:flex; align-items:center; gap:6px; width:100%; margin-top:12px; padding:10px 0 2px; border:0; background:none; font-size:11.5px; color:#98a1b0; cursor:pointer; text-align:left; }
+.cfg-adv { display:flex; align-items:center; gap:6px; width:100%; margin-top:12px; padding:10px 0 2px; border:0; background:none; font-size:11.5px; color:var(--muted); cursor:pointer; text-align:left; }
 .cfg-adv:hover { color:var(--cfg-accent); }
 .cfg-caret { display:inline-flex; transform:rotate(-90deg); transition:transform .16s ease; }
 .cfg-caret.is-open { transform:rotate(0deg); }
-.cfg-adv-value { margin-left:auto; font-family:var(--cfg-mono); color:#b3bac5; }
+.cfg-adv-value { margin-left:auto; font-family:var(--cfg-mono); color:var(--faint); }
 
 /* 主行动：整宽收在配置末尾，它是上面这些设置的出口 */
 .cfg-foot { margin-top:auto; padding-top:16px; border-top:1px solid var(--cfg-line-soft); }
 .config-card .el-button.cfg-start { width:100%; height:38px; border-radius:9px; font-size:13px; letter-spacing:0; }
 code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size:12px; }
-.detect-sample { color:#1d1d1f; font-family: ui-monospace, Consolas, monospace; font-size:12px; line-height:1.7; }
+.detect-sample { color:var(--ink); font-family: ui-monospace, Consolas, monospace; font-size:12px; line-height:1.7; }
 .evidence-line { display:flex; gap:8px; padding:3px 0; }
-.evidence-kind { color:#303133; font-weight:600; min-width:110px; }
-.evidence-source { color:#a1a1a6; margin-left:auto; }
+.evidence-kind { color:var(--ink-2); font-weight:600; min-width:110px; }
+.evidence-source { color:var(--faint); margin-left:auto; }
 
 /* 主布局 */
 .main-layout { display:flex; flex-direction:column; gap:16px; min-width:0; }
@@ -3621,41 +4349,41 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .gen-result-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px; }
 .gen-result-actions .field-hint { margin-top:0; }
 /* 回放校验：和生成无关，停止录制后就摆在这里，别让它看起来像生成的附属动作。 */
-.replay-block { margin-top:12px; padding-top:12px; border-top:1px dashed #e6ebf2; }
+.replay-block { margin-top:12px; padding-top:12px; border-top:1px dashed var(--line-soft); }
 .replay-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .replay-row .field-hint { margin-top:0; }
 /* 回放后又接着录了：结论变旧，别让它继续冒充整段录制的结果 */
-.replay-stale { margin:6px 0 0; font-size:12px; color:#b45309; }
+.replay-stale { margin:6px 0 0; font-size:12px; color:var(--warn); }
 
 /* 状态 */
-.state-pill { display:inline-flex; align-items:center; height:24px; padding:0 10px; border-radius:999px; font-size:12px; font-weight:700; background:#f2f4f7; color:#6e6e73; }
-.state-recording { background:#fff1f0; color:#e5484d; }
-.state-stopped, .state-idle_timeout, .state-closed { background:#eaf7ef; color:#1e7a46; }
-.state-failed, .state-cancelled { background:#fff7e6; color:#ad6800; }
+.state-pill { display:inline-flex; align-items:center; height:24px; padding:0 10px; border-radius:999px; font-size:12px; font-weight:700; background:var(--bg-sunken); color:var(--muted); }
+.state-recording { background:var(--danger-soft); color:var(--danger); }
+.state-stopped, .state-idle_timeout, .state-closed { background:var(--ok-soft); color:var(--ok); }
+.state-failed, .state-cancelled { background:var(--warn-soft); color:var(--warn); }
 
 /* 工具栏：两个浅色底分组（浏览器控制 / 插入步骤）。
    组内按钮常态无边框无底色，悬停才浮起白底——样式只留两档（实心 + ghost），
    比原来「八个同权重描边按钮」干净。 */
 .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; transition:gap .2s ease; }
-.toolbar-group { display:flex; flex-wrap:wrap; align-items:center; gap:2px; padding:4px; border-radius:10px; background:#f5f6f9; border:1px solid #edeff3; }
-.toolbar-group :deep(.el-button) { margin-left:0; height:32px; padding:0 10px; background:transparent; border-color:transparent; box-shadow:none; color:#3c4450; }
+.toolbar-group { display:flex; flex-wrap:wrap; align-items:center; gap:2px; padding:4px; border-radius:10px; background:var(--bg-sunken); border:1px solid var(--line-soft); }
+.toolbar-group :deep(.el-button) { margin-left:0; height:32px; padding:0 10px; background:transparent; border-color:transparent; box-shadow:none; color:var(--ink-2); }
 .toolbar-group :deep(.el-button + .el-button) { margin-left:0; }
 /* 图标与文字统一 5px：Element Plus 默认给 icon+span 加 6px margin，和 flex gap 会叠成 11px */
 .toolbar-group :deep(.el-button) { display:inline-flex; align-items:center; justify-content:center; gap:5px; }
 .toolbar-group :deep(.el-button .el-icon + span) { margin-left:0; }
 .toolbar-group :deep(.el-button .el-icon) { font-size:15px; flex:none; }
-.toolbar-group :deep(.el-button:not(.is-disabled):hover) { background:#fff; border-color:#e1e6ef; color:#1d1d1f; box-shadow:0 1px 2px rgba(16,24,40,.08); }
-.toolbar-group :deep(.el-button.is-disabled) { background:transparent; border-color:transparent; color:#b5bcc7; }
+.toolbar-group :deep(.el-button:not(.is-disabled):hover) { background:var(--bg-card); border-color:var(--line-soft); color:var(--ink); box-shadow:0 1px 2px rgba(16,24,40,.08); }
+.toolbar-group :deep(.el-button.is-disabled) { background:transparent; border-color:transparent; color:var(--faint); }
 /* 实心按钮和激活态必须写在 ghost 悬停之后：选择器权重相同，靠顺序取胜 */
-.toolbar-group :deep(.el-button--primary) { background:#0071e3; border-color:#0071e3; color:#fff; }
-.toolbar-group :deep(.el-button--primary:not(.is-disabled):hover) { background:#0060c8; border-color:#0060c8; color:#fff; }
-.toolbar-group :deep(.el-button--danger) { background:#e5484d; border-color:#e5484d; color:#fff; }
-.toolbar-group :deep(.el-button--danger:not(.is-disabled):hover) { background:#d33a3f; border-color:#d33a3f; color:#fff; }
+.toolbar-group :deep(.el-button--primary) { background:var(--accent); border-color:var(--accent); color:#fff; }
+.toolbar-group :deep(.el-button--primary:not(.is-disabled):hover) { background:var(--accent); border-color:var(--accent-hover); color:#fff; }
+.toolbar-group :deep(.el-button--danger) { background:var(--danger); border-color:var(--danger); color:#fff; }
+.toolbar-group :deep(.el-button--danger:not(.is-disabled):hover) { background:var(--danger); border-color:var(--danger); color:#fff; }
 /* 激活态（正在拾取 / 已暂停）用浅色底，不用实心：否则一排里会出现三个重色块 */
-.toolbar-group :deep(.el-button--warning.is-plain) { background:#fff7e6; border-color:#f3c98b; color:#b45309; }
-.toolbar-group :deep(.el-button--warning.is-plain:not(.is-disabled):hover) { background:#fff2d9; border-color:#eebf74; color:#a15c07; }
-.toolbar-group :deep(.el-button--success.is-plain) { background:#eaf7ef; border-color:#bfe3ce; color:#1e7a46; }
-.toolbar-group :deep(.el-button--success.is-plain:not(.is-disabled):hover) { background:#e2f4ea; border-color:#a9dbc0; color:#196b3d; }
+.toolbar-group :deep(.el-button--warning.is-plain) { background:var(--warn-soft); border-color:var(--warn-line); color:var(--warn); }
+.toolbar-group :deep(.el-button--warning.is-plain:not(.is-disabled):hover) { background:var(--warn-soft); border-color:var(--warn-line); color:var(--warn); }
+.toolbar-group :deep(.el-button--success.is-plain) { background:var(--ok-soft); border-color:var(--ok-line); color:var(--ok); }
+.toolbar-group :deep(.el-button--success.is-plain:not(.is-disabled):hover) { background:var(--ok-soft); border-color:var(--ok-line); color:var(--ok); }
 /* 停止录制里的白色方块：录制的通用记号，比再找一个图标更容易认 */
 .rec-stop { width:8px; height:8px; border-radius:2px; background:currentColor; flex:none; }
 /* 分组底块本身就是分隔，展开状态不再画竖线 */
@@ -3683,137 +4411,285 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
   padding:0 5px;
   font-size:12.5px;
   overflow:hidden;
-  background:#fff;
-  border-color:#e4e7ed;
+  background:var(--bg-card);
+  border-color:var(--line-soft);
 }
-.toolbar.is-lean :deep(.el-button:not(.is-disabled):hover) { background:#f7f9fc; border-color:#d8dde6; }
+.toolbar.is-lean :deep(.el-button:not(.is-disabled):hover) { background:var(--bg-card); border-color:var(--line-field); }
 /* 收起态也要留住实心 / 激活态的底色，否则实心按钮被刷成白底白字 */
-.toolbar.is-lean :deep(.el-button--primary) { background:#0071e3; border-color:#0071e3; color:#fff; }
-.toolbar.is-lean :deep(.el-button--primary:not(.is-disabled):hover) { background:#0060c8; border-color:#0060c8; color:#fff; }
-.toolbar.is-lean :deep(.el-button--danger) { background:#e5484d; border-color:#e5484d; color:#fff; }
-.toolbar.is-lean :deep(.el-button--danger:not(.is-disabled):hover) { background:#d33a3f; border-color:#d33a3f; color:#fff; }
-.toolbar.is-lean :deep(.el-button--warning.is-plain) { background:#fff7e6; border-color:#f3c98b; color:#b45309; }
-.toolbar.is-lean :deep(.el-button--success.is-plain) { background:#eaf7ef; border-color:#bfe3ce; color:#1e7a46; }
+.toolbar.is-lean :deep(.el-button--primary) { background:var(--accent); border-color:var(--accent); color:#fff; }
+.toolbar.is-lean :deep(.el-button--primary:not(.is-disabled):hover) { background:var(--accent); border-color:var(--accent-hover); color:#fff; }
+.toolbar.is-lean :deep(.el-button--danger) { background:var(--danger); border-color:var(--danger); color:#fff; }
+.toolbar.is-lean :deep(.el-button--danger:not(.is-disabled):hover) { background:var(--danger); border-color:var(--danger); color:#fff; }
+.toolbar.is-lean :deep(.el-button--warning.is-plain) { background:var(--warn-soft); border-color:var(--warn-line); color:var(--warn); }
+.toolbar.is-lean :deep(.el-button--success.is-plain) { background:var(--ok-soft); border-color:var(--ok-line); color:var(--ok); }
 .toolbar.is-lean :deep(.el-button > span) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
-.toolbar.is-lean .toolbar-sep { display:block; grid-column:1 / -1; width:100%; height:1px; margin:2px 0; background:#e6e9ee; }
+.toolbar.is-lean .toolbar-sep { display:block; grid-column:1 / -1; width:100%; height:1px; margin:2px 0; background:var(--bg-sunken); }
 /* 未录制时这一组只有两个按钮：主按钮占两列补齐整行，右边界正好和下面「添加等待」对齐 */
 .toolbar.is-lean :deep(.lean-wide) { grid-column:span 2; }
-.pick-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff7e6; color:#ad6800; font-size:12.5px; line-height:1.5; }
+.pick-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:var(--warn-soft); color:var(--warn); font-size:12.5px; line-height:1.5; }
 /* 停止后浏览器还开着：这条提示必须常驻，否则用户会以为窗口是遗留的、直接关掉 */
-.keep-open-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#eef6ff; color:#175cd3; font-size:12.5px; line-height:1.5; }
-.pause-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:#fff4e6; color:#b45309; border:1px dashed #f3c98b; font-size:12.5px; line-height:1.5; }
+.keep-open-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:var(--accent-soft); color:var(--accent); font-size:12.5px; line-height:1.5; }
+.pause-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:var(--warn-soft); color:var(--warn); border:1px dashed var(--warn-soft); font-size:12.5px; line-height:1.5; }
 /* 解析器状态：一行 16px 的小字，就绪时几乎是背景音，只有启动中/不可用时才显眼 */
-.ask-hint { display:flex; align-items:center; gap:6px; margin-top:7px; font-size:11.5px; color:#9aa1ab; line-height:1.4; }
-.ask-hint .ask-dot { flex:none; width:6px; height:6px; border-radius:50%; background:#c6ccd6; }
-.ask-hint.ready .ask-dot { background:#34a853; }
-.ask-hint.starting .ask-dot, .ask-hint.warming .ask-dot { background:#ef9f1e; animation:ask-pulse 1.2s ease-in-out infinite; }
-.ask-hint.failed { color:#b45309; }
-.ask-hint.failed .ask-dot { background:#e5484d; }
+.ask-hint { display:flex; align-items:center; gap:6px; margin-top:7px; font-size:11.5px; color:var(--muted); line-height:1.4; }
+.ask-hint .ask-dot { flex:none; width:6px; height:6px; border-radius:50%; background:var(--bg-active); }
+.ask-hint.ready .ask-dot { background:var(--ok); }
+.ask-hint.starting .ask-dot, .ask-hint.warming .ask-dot { background:var(--warn); animation:ask-pulse 1.2s ease-in-out infinite; }
+.ask-hint.failed { color:var(--warn); }
+.ask-hint.failed .ask-dot { background:var(--danger); }
 @keyframes ask-pulse { 0%, 100% { opacity:.35; } 50% { opacity:1; } }
 .session-error { margin-top:12px; }
 
 /* 空状态：一行提示，别用 el-empty 那张大插画占半屏 */
-.steps-empty { display:flex; align-items:center; gap:8px; margin-top:14px; padding:12px 14px; border:1px dashed #e4e7ed; border-radius:10px; background:#fbfcfe; color:#909399; font-size:13px; }
-.steps-empty-dot { flex:none; width:7px; height:7px; border-radius:50%; background:#c9d6ea; }
+.steps-empty { display:flex; align-items:center; gap:8px; margin-top:14px; padding:12px 14px; border:1px dashed var(--line-soft); border-radius:10px; background:var(--bg-card); color:var(--muted); font-size:13px; }
+.steps-empty-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--accent-soft); }
 /* 宽屏首屏右侧本来就空：给一句说明，而不是一条空横线 */
 .steps-empty.is-roomy { flex-direction:column; align-items:center; gap:8px; margin-top:0; padding:72px 24px; border:0; background:transparent; text-align:center; }
-.steps-empty.is-roomy .steps-empty-dot { width:9px; height:9px; margin-bottom:6px; background:#dbe4f2; box-shadow:0 0 0 6px rgba(201,214,234,.22); }
-.steps-empty-title { font-size:13px; color:#5d6675; }
-.steps-empty-sub { font-size:12px; color:#9aa3b1; line-height:1.75; max-width:330px; }
+.steps-empty.is-roomy .steps-empty-dot { width:9px; height:9px; margin-bottom:6px; background:var(--accent-soft); box-shadow:0 0 0 6px rgba(201,214,234,.22); }
+.steps-empty-title { font-size:13px; color:var(--muted); }
+.steps-empty-sub { font-size:12px; color:var(--muted); line-height:1.75; max-width:330px; }
 
 /* 时间线 */
 .timeline { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:8px; }
-.step { display:flex; gap:10px; align-items:flex-start; padding:10px 10px 10px 9px; border:1px solid #ebedf0; border-radius:12px; background:#fff; transition:border-color .18s ease, box-shadow .18s ease, padding .22s ease, gap .22s ease; }
-.step:hover { border-color:#dce7fb; box-shadow:0 4px 14px rgba(16,24,40,.06); }
+.step { display:flex; gap:10px; align-items:flex-start; padding:10px 10px 10px 9px; border:1px solid var(--line-soft); border-radius:12px; background:var(--bg-card); transition:border-color .18s ease, box-shadow .18s ease, padding .22s ease, gap .22s ease; }
+.step:hover { border-color:var(--accent-line); box-shadow:0 4px 14px rgba(16,24,40,.06); }
 /* 不唯一现在是「可降级生成」，用琥珀色提示而不是红色阻断 */
-.step.is-blocked { border-color:#f3d8a8; background:#fffdf6; }
-.step-no { flex-shrink:0; width:24px; height:24px; border-radius:50%; background:#eef4ff; color:#0071e3; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums; }
+.step.is-blocked { border-color:var(--warn-line); background:var(--bg-card); }
+.step-no { flex-shrink:0; width:24px; height:24px; border-radius:50%; background:var(--accent-soft); color:var(--accent); font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums; }
 .step-body { flex:1; min-width:0; }
 .step-main { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-.step-text { color:#1d1d1f; font-size:14px; line-height:1.5; word-break:break-word; }
-.step-note { margin-top:4px; color:#6e6e73; font-size:12.5px; }
+.step-text { color:var(--ink); font-size:14px; line-height:1.5; word-break:break-word; }
+.step-note { margin-top:4px; color:var(--muted); font-size:12.5px; }
+/* 点击引起的跳转落点：一行等宽小字，比正文更弱，只解释「为什么会多一行等待」 */
+.step-nav { display:flex; align-items:center; gap:5px; margin-top:5px; font-family:var(--mono); font-size:11.5px; color:var(--muted); }
+.step-nav-arrow { flex:none; color:var(--faint); }
+.step-nav-url { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .step-locator { margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.step-alias { color:#303133; font-size:12.5px; font-weight:600; }
-.locator-code { color:#6e6e73; font-size:11.5px; background:#f7f9fc; border:1px solid #eef0f4; border-radius:6px; padding:2px 6px; word-break:break-all; }
+.step-alias { color:var(--ink-2); font-size:12.5px; font-weight:600; }
+.locator-code { color:var(--muted); font-size:11.5px; background:var(--bg-card); border:1px solid var(--line-soft); border-radius:6px; padding:2px 6px; word-break:break-all; }
 .step-actions { display:flex; flex-direction:row; align-items:center; gap:2px; flex-shrink:0; }
 /* 定位预览：行内小准星，点一下在浏览器里把匹配元素全框出来并编号 */
-.peek-btn { height:22px; width:22px; padding:0; margin-left:-2px; color:#8e8e93; }
-.peek-btn:hover { color:#0071e3; background:#eaf3ff; }
-.chosen-warn { color:#b45309; font-size:11.5px; font-weight:600; }
+.peek-btn { height:22px; width:22px; padding:0; margin-left:-2px; color:var(--muted); }
+.peek-btn:hover { color:var(--accent); background:var(--accent-soft); }
+/* 定位详情入口：紧挨着准星。准星=圈出来自己看，放大镜=给结论 + 逐条候选。 */
+.loc-detail-btn { height:22px; width:22px; padding:0; margin-left:-4px; color:var(--muted); }
+.loc-detail-btn:hover { color:var(--accent); background:var(--accent-soft); }
+.chosen-warn { color:var(--warn); font-size:11.5px; font-weight:600; }
 /* 中心被遮挡后自动上提过目标：不是错误，但用户该知道定位换了元素，否则看脚本会对不上。 */
-.lifted-hint { color:#6b7280; font-size:11.5px; font-weight:600; border-bottom:1px dashed #c3c9d4; cursor:help; }
+.lifted-hint { color:var(--muted); font-size:11.5px; font-weight:600; border-bottom:1px dashed var(--line-ctl); cursor:help; }
 .peek-panel {
   margin-top:8px; padding:9px 10px; border-radius:9px;
-  background:#f7f9fc; border:1px solid #e6ebf2;
+  background:var(--bg-card); border:1px solid var(--line-soft);
 }
 .peek-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.peek-title { font-size:12.5px; color:#303133; }
+.peek-title { font-size:12.5px; color:var(--ink-2); }
 .peek-desc {
-  font-size:11px; color:#6e6e73; background:#fff; border:1px solid #eef0f4;
+  font-size:11px; color:var(--muted); background:var(--bg-card); border:1px solid var(--line-soft);
   border-radius:5px; padding:1px 5px; word-break:break-all;
 }
 .peek-close { margin-left:auto; height:20px; padding:0 4px; }
 .peek-items { margin-top:7px; display:flex; flex-direction:column; gap:4px; }
 .peek-item {
   display:flex; align-items:center; gap:8px; width:100%; text-align:left;
-  padding:4px 8px; border-radius:7px; border:1px solid #e6ebf2; background:#fff;
-  cursor:pointer; font-size:12px; color:#3c4048; font-family:inherit;
+  padding:4px 8px; border-radius:7px; border:1px solid var(--line-soft); background:var(--bg-card);
+  cursor:pointer; font-size:12px; color:var(--ink-2); font-family:inherit;
 }
-.peek-item:hover { border-color:#b9d6f7; background:#f4f9ff; }
-.peek-item.is-active { border-color:#ff3b30; background:#fff1f0; color:#b42318; }
+.peek-item:hover { border-color:var(--accent-line); background:var(--bg-card); }
+.peek-item.is-active { border-color:var(--danger); background:var(--danger-soft); color:var(--danger); }
 .peek-no {
-  flex:none; width:16px; height:16px; border-radius:4px; background:#e8eaed; color:#5f6368;
+  flex:none; width:16px; height:16px; border-radius:4px; background:var(--bg-sunken); color:var(--muted);
   font-size:10.5px; line-height:16px; text-align:center; font-weight:600;
 }
-.peek-item.is-active .peek-no { background:#ff3b30; color:#fff; }
+.peek-item.is-active .peek-no { background:var(--danger); color:#fff; }
 .peek-text { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.peek-hidden { flex:none; font-size:10.5px; color:#9aa0a6; }
-.peek-more { margin-top:6px; font-size:11.5px; color:#8e8e93; }
+.peek-hidden { flex:none; font-size:10.5px; color:var(--muted); }
+.peek-more { margin-top:6px; font-size:11.5px; color:var(--muted); }
+
+/* ===== 定位详情弹窗 =====
+   单栏 520：结论一句话放最上面，下面是「采用的是哪条」，候选默认折叠。
+   面板窗口常常只有 400~800px，两栏排版在这里会被挤成一条，所以不做左右分栏。
+   宽度用 min(520px, 100vw - 24px) 写在 el-dialog 的 width 上——
+   面板被拖到 460 时，弹窗得跟着收窄，不能横向溢出。 */
+.ld-head { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+.ld-title { font-size:14px; font-weight:600; color:var(--ink); }
+.ld-step { font-size:11.5px; color:var(--muted); }
+.ld-alias { font-size:12px; color:var(--ink-2); }
+.ld-loading, .ld-error { padding:20px 0; text-align:center; font-size:12.5px; color:var(--muted); }
+.ld-error { color:var(--danger); }
+.ld-body { display:flex; flex-direction:column; gap:12px; }
+.ld-verdict {
+  display:flex; flex-direction:column; gap:3px; padding:9px 11px;
+  border-radius:8px; border:1px solid var(--line-soft); background:var(--bg-sunken);
+}
+.ld-verdict-title { font-size:13px; font-weight:600; color:var(--ink); }
+.ld-verdict-sub { font-size:11.5px; color:var(--muted); line-height:1.6; }
+.ld-verdict.is-ok { border-color:color-mix(in srgb, var(--ok) 40%, transparent); background:var(--ok-soft); }
+.ld-verdict.is-ok .ld-verdict-title { color:var(--ok); }
+.ld-verdict.is-warn { border-color:color-mix(in srgb, var(--warn) 40%, transparent); background:var(--warn-soft); }
+.ld-verdict.is-warn .ld-verdict-title { color:var(--warn); }
+.ld-verdict.is-bad { border-color:color-mix(in srgb, var(--danger) 36%, transparent); background:var(--danger-soft); }
+.ld-verdict.is-bad .ld-verdict-title { color:var(--danger); }
+.ld-block { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.ld-label { font-size:11px; color:var(--faint); letter-spacing:.4px; }
+.ld-code {
+  font-family:var(--mono); font-size:11.5px; color:var(--ink-2);
+  background:var(--bg-sunken); border:1px solid var(--line-soft); border-radius:6px;
+  padding:7px 9px; word-break:break-all;
+}
+.ld-meta { font-size:11px; color:var(--muted); word-break:break-all; }
+.ld-toggle {
+  display:inline-flex; align-items:center; gap:6px; align-self:flex-start;
+  padding:0; border:0; background:none; color:var(--muted); font-size:11.5px;
+  cursor:pointer; font-family:inherit;
+}
+.ld-toggle:hover { color:var(--accent); }
+.ld-caret { font-size:10px; }
+.ld-cands { display:flex; flex-direction:column; gap:4px; max-height:210px; overflow-y:auto; }
+.ld-cand {
+  display:flex; align-items:center; gap:7px; padding:5px 8px;
+  border-radius:6px; border:1px solid var(--line-soft); background:var(--bg-card);
+}
+.ld-cand-kind {
+  flex:none; font-size:10.5px; color:var(--muted);
+  background:var(--bg-sunken); border-radius:4px; padding:1px 5px;
+}
+/* 生成时到底用哪条——这一列整张表的意义所在，必须一眼能挑出来 */
+.ld-cand.is-adopted { border-color:color-mix(in srgb, var(--accent) 45%, transparent); background:var(--accent-soft); }
+.ld-cand-adopted {
+  flex:none; font-size:10px; line-height:16px; padding:0 6px;
+  color:var(--accent); border:1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius:999px;
+}
+.ld-cand-desc { flex:1; min-width:0; font-size:11px; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ld-cand-count { flex:none; font-size:10.5px; color:var(--muted); }
+.ld-cand-count.is-multi { color:var(--warn); font-weight:600; }
+.ld-cand-count.is-zero { color:var(--faint); }
+.ld-note {
+  font-size:11.5px; color:var(--muted); line-height:1.7;
+  border-top:1px solid var(--line-soft); padding-top:9px; word-break:break-all;
+}
+.ld-note b { color:var(--ink-2); font-weight:600; }
 
 /* ===== 定位待确认卡片 =====
    固定在右上角：嵌入模式下正好压在编排栏上，被测页面里那些带编号的框一个都不挡。
    高度封顶 + 列表自己滚，匹配到几十个也不会把整屏吃掉。 */
-.loc-confirm {
-  position:fixed; top:12px; right:12px; z-index:60; box-sizing:border-box;
-  width:min(400px, calc(100vw - 24px)); max-height:min(70vh, 520px);
-  display:flex; flex-direction:column; gap:7px; padding:12px 13px; overflow:hidden;
-  background:#fff; border:1px solid #f0c987; border-radius:14px;
-  box-shadow:0 16px 40px rgba(16,24,40,.18), 0 2px 6px rgba(16,24,40,.06);
-  animation:loc-confirm-in .18s ease both;
+/* 「定位待确认」弹窗：按下那一刻的截图 + 编号框。
+   它是必选弹窗（没有关闭按钮、点遮罩和 Esc 都不关），所以标题区不需要 ×。 */
+/* 「定位待确认」弹窗：左边是按下那一刻的截图，右边是候选列表。
+   外壳用 styles/dialog.css 的 .dlg-split / .dlg-viewer / .dlg-panel，
+   这里只管图和框，别另造一套边距。 */
+/* 居中规则在 styles/dialog.css：遮罩层不是本组件的元素，
+   scoped 选择器加不上 data-v，写在这里不会生效。 */
+/* 高度跟着图走，不用 dialog.css 那个固定视口高度：
+   横屏截图在固定 660 高的画布里只占 270，上下会空出两大块。 */
+.loc-dialog .dlg-split { height: auto; }
+/* 宽窗里给图多一点：候选文字短，图大一点才看得清位置。
+   写进 min-width 里，否则会盖掉 dialog.css 在 900 以下改成单列的那条。 */
+@media (min-width: 901px) {
+  .loc-dialog .dlg-split { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
 }
-@keyframes loc-confirm-in { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:none; } }
-.loc-head { display:flex; align-items:center; gap:8px; min-width:0; }
-.loc-tag { flex:none; font-size:11px; font-weight:700; color:#b42318; background:#fff1f0; border-radius:6px; padding:2px 7px; }
-.loc-step { min-width:0; font-size:12.5px; font-weight:600; color:#1d1d1f; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.loc-close { margin-left:auto; flex:none; }
-.loc-lead { margin:0; font-size:12px; line-height:1.55; color:#6e6e73; }
-.loc-lead b { color:#b42318; font-weight:600; }
-.loc-list { display:flex; flex-direction:column; gap:4px; flex:1 1 auto; min-height:0; overflow-y:auto; max-height:34vh; padding-right:2px; }
+.loc-dialog .dlg-panel { max-height: min(620px, calc(100dvh - 220px)); }
+/* 没图时只剩一句原因：给点内边距，否则窄屏下文字会贴着框线 */
+.loc-dialog .dlg-stage-empty { padding: 18px; text-align: center; }
+
+/* 图的宽高比由 --shot-ratio 决定（focusRect 的宽高比，不是整页的）。
+   宽度同时受「可用宽度」和「高度预算」约束：取小的那个，图既不会被拉变形，也不会顶破弹窗。 */
+.shot-stage {
+  position: relative;
+  width: 100%;
+  max-width: calc((100dvh - 300px) * var(--shot-ratio, 1.6));
+  aspect-ratio: var(--shot-ratio, 1.6);
+  border: 1px solid var(--line-faint);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-card);
+}
+/* 整张图放大后的那块，坐标系还是「整张图」：框的百分比定位一个字都不用改。
+   百分比而不是 px，是因为画布宽度由 CSS 算，面板 600 和弹窗 900 拿不到同一个值。 */
+.shot-inner { position: absolute; }
+.shot-stage img { display: block; width: 100%; height: 100%; user-select: none; }
+/* 框按百分比定位，所以弹窗宽度变了、图片缩放变了都对得上 */
+.shot-box {
+  position:absolute; box-sizing:border-box; margin:0; padding:0;
+  border:1.5px solid var(--accent); border-radius:5px; background:transparent;
+  cursor:pointer; transition:background .14s ease, border-color .14s ease, opacity .14s ease;
+}
+.shot-box:hover { background:color-mix(in srgb, var(--accent) 18%, transparent); }
+/* 悬停联动：指到哪个，其余的淡下去，A/B 两个框挨在一起时也不会看串 */
+.shot-box.is-dim { opacity:.3; }
+.shot-box.is-hover {
+  border-width:2.5px; z-index:2;
+  background:color-mix(in srgb, var(--accent) 16%, transparent);
+}
+/* 字母压在框的左上角做成实心小方块：细框在浅色页面上几乎看不见，
+   有个实心块才能一眼数清「一共几个」 */
+.shot-no {
+  position:absolute; left:-1px; top:-1px; min-width:16px; height:16px;
+  display:flex; align-items:center; justify-content:center;
+  padding:0 4px; border-radius:4px 0 4px 0;
+  background:var(--accent); color:var(--ink-inverse);
+  font-family:var(--mono); font-size:10.5px; font-weight:600; line-height:1;
+}
+/* 上方有空位就把徽标挪到框外：压在框里那 16px 正好盖住元素开头的字 */
+.shot-box.is-tag-out .shot-no { top:-17px; border-radius:4px 4px 4px 0; }
+/* 录制时真正点的那一个：琥珀色，和「已选中」的实心蓝分开。
+   底色只铺一层很淡的：铺满了会把元素本身的文字盖掉，那就等于没截。 */
+.shot-box.is-origin { border-color:var(--warn); border-width:2px; background:color-mix(in srgb, var(--warn) 7%, transparent); }
+.shot-box.is-origin .shot-no { background:var(--warn); }
+.shot-box.is-picked { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 22%, transparent); }
+.shot-box.is-picked .shot-no { background:var(--accent); }
+
+.shot-tip { margin:0; font-size:11.5px; line-height:1.6; color:var(--faint); }
+.shot-tip b { color:var(--muted); font-weight:600; }
+
+/* 候选：一行一张卡。字母 → 证件照 → 说明，三列对得齐齐的，扫一眼就能对上。 */
+.loc-list { display:flex; flex-direction:column; gap:6px; }
 .loc-item {
-  display:flex; align-items:center; gap:8px; width:100%; text-align:left; flex:none;
-  padding:6px 8px; border-radius:8px; border:1px solid #e6ebf2; background:#fff;
-  cursor:pointer; font-size:12.5px; color:#3c4048; font-family:inherit;
+  display:flex; align-items:center; gap:8px; width:100%; flex:none;
+  padding:7px 10px 7px 9px; border-radius:9px; border:1px solid var(--line-soft);
+  background:var(--bg-card); text-align:left; font-family:inherit; cursor:pointer;
+  transition:border-color .14s ease, background .14s ease;
 }
-.loc-item:hover { border-color:#b9d6f7; background:#f4f9ff; }
-.loc-item.is-picked { border-color:#ff3b30; background:#fff1f0; color:#b42318; }
+.loc-item:hover, .loc-item.is-hover { border-color:var(--accent-line); }
+.loc-item.is-picked {
+  border-color:var(--accent); background:var(--accent-soft);
+  box-shadow:inset 2px 0 0 var(--accent);
+}
 .loc-no {
-  flex:none; width:18px; height:18px; border-radius:5px; background:#e8eaed; color:#5f6368;
-  font-size:10.5px; line-height:18px; text-align:center; font-weight:600;
+  flex:none; width:20px; height:20px; border-radius:6px;
+  background:var(--bg-sunken); color:var(--muted);
+  font:600 11px/20px var(--mono); text-align:center;
 }
-.loc-item.is-picked .loc-no { background:#ff3b30; color:#fff; }
-.loc-text { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.loc-origin { flex:none; font-size:10.5px; color:#8a8f99; background:#f2f4f7; border-radius:4px; padding:1px 5px; }
-.loc-hidden { flex:none; font-size:10.5px; color:#9aa0a6; }
-.loc-note { margin:0; font-size:11.5px; line-height:1.5; color:#1e7a46; }
-/* 页面跑掉了：不是错误，是「有补救办法」，用提示色而不是错误红 */
-.loc-gone {
-  margin:0; padding:6px 8px; border-radius:7px;
-  background:#fff9ea; border:1px solid #f1ddb0; color:#7a5a12;
-  font-size:11.5px; line-height:1.6;
+.loc-item.is-picked .loc-no { background:var(--accent); color:#fff; }
+/* 证件照：同一张截图按元素位置裁出来的小窗。元素在视口外就没有像素可裁，标「屏外」。 */
+.loc-thumb {
+  position:relative; flex:none; width:46px; height:30px; overflow:hidden;
+  border-radius:6px; border:1px solid var(--line-soft); background:var(--bg-sunken);
 }
-.loc-foot { display:flex; align-items:center; gap:6px; }
-.loc-queue { margin-right:auto; font-size:11.5px; color:#b45309; }
-.loc-actions { margin-left:auto; display:flex; align-items:center; gap:6px; }
+.loc-thumb img { position:absolute; max-width:none; max-height:none; user-select:none; }
+.loc-thumb-ring {
+  position:absolute; box-sizing:border-box;
+  border:1.5px solid var(--accent); border-radius:3px;
+  /* 只描边不填色：填了就把缩略图里那点本来就不大的字盖住了 */
+  background:transparent;
+}
+.loc-thumb.is-origin .loc-thumb-ring { border-color:var(--warn); }
+.loc-thumb.is-off { display:flex; align-items:center; justify-content:center; border-style:dashed; }
+.loc-thumb-off { font-size:10.5px; color:var(--faint); letter-spacing:.5px; }
+.loc-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.loc-text { font-size:13px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.loc-meta { display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--faint); }
+.loc-origin { color:var(--warn); }
+.loc-hidden { color:var(--muted); }
+.loc-note { margin:6px 0 0; font-size:11.5px; line-height:1.5; color:var(--ok); }
+
+/* 面板窗口窄的时候 dialog.css 会把左右改成上下，画布固定 280px。
+   这里不能让画布撑满固定高度：聚焦后的截图是一条横带，撑满就会上下各留一大块灰。
+   改成跟着图走，弹窗自己长高。 */
+@media (max-width: 900px) {
+  .loc-dialog .dlg-viewer { height: auto; }
+  .loc-dialog .dlg-stage { flex: none; }
+  .shot-stage { max-width: calc(320px * var(--shot-ratio, 1.6)); }
+}
 
 /* 次要操作组（上移 / 下移）：收起时用 max-width 收进去，文字跟着回流而不是瞬移。
    两个 30px 按钮之间还有 Element Plus 的 12px 相邻间距，实测 72px，上限给 84px 留余量。 */
@@ -3825,8 +4701,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .step-actions-extra :deep(.el-button) { flex:none; }
 .step-actions-extra.is-off { max-width:0; opacity:0; margin-left:-2px; pointer-events:none; }
 /* 删除在收起态也常驻：常态灰色，悬停才转红——每行一个红图标太吵，但得随手能删 */
-.recording-page .step-actions .step-delete-btn:not(.is-disabled) { color:#a5abb6; }
-.recording-page .step-actions .step-delete-btn:not(.is-disabled):hover { color:#e5484d; background:#fff1f0; }
+.recording-page .step-actions .step-delete-btn:not(.is-disabled) { color:var(--faint); }
+.recording-page .step-actions .step-delete-btn:not(.is-disabled):hover { color:var(--danger); background:var(--danger-soft); }
 /* 「在这步之后插入」：位置常驻（避免 hover 时整行文字回流），只有图标淡入 */
 .step-insert-btn { opacity:0; transition:opacity .15s ease; }
 .step:hover .step-insert-btn, .step-insert-btn:focus-within { opacity:1; }
@@ -3834,8 +4710,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 插入成功后闪一下，指认新步骤落在哪 */
 .step.is-flash { animation:step-flash 1.1s ease; }
 @keyframes step-flash {
-  0%, 55% { background:#fff7e0; border-color:#f0d99b; }
-  100% { background:#fff; border-color:#ebedf0; }
+  0%, 55% { background:var(--warn-soft); border-color:var(--warn-line); }
+  100% { background:var(--bg-card); border-color:var(--line-soft); }
 }
 /* 收起后只剩铅笔与删除：行内边距收紧，省出的宽度都给步骤文字 */
 .is-lean .step { gap:8px; padding:8px; }
@@ -3846,7 +4722,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 拖拽排序（sortablejs）：按住编号拖动 */
 .step-no { cursor:grab; }
 .step-no:active { cursor:grabbing; }
-.step-ghost { opacity:.45; background:#f5f9ff; border-style:dashed; border-color:#9fc0ee; }
+.step-ghost { opacity:.45; background:var(--bg-card); border-style:dashed; border-color:var(--accent-line); }
 .step-chosen { box-shadow:0 8px 22px rgba(16,24,40,.12); }
 .step-drag { opacity:.95; }
 
@@ -3858,172 +4734,190 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .step-editor-poll :deep(.el-input-number) { width:92px; }
 .kind-tag { flex-shrink:0; display:inline-flex; align-items:center; gap:3px; height:22px; padding:0 9px; border-radius:6px; font-size:12px; font-weight:700; }
 .kind-icon { font-size:12px; }
-.kind-primary { background:#eaf3ff; color:#0071e3; }
-.kind-success { background:#eaf7ef; color:#1e7a46; }
-.kind-warning { background:#fff7e6; color:#ad6800; }
-.kind-danger { background:#fff1f0; color:#e5484d; }
-.kind-info { background:#f2f4f7; color:#6e6e73; }
+.kind-primary { background:var(--accent-soft); color:var(--accent); }
+.kind-success { background:var(--ok-soft); color:var(--ok); }
+.kind-warning { background:var(--warn-soft); color:var(--warn); }
+.kind-danger { background:var(--danger-soft); color:var(--danger); }
+.kind-info { background:var(--bg-sunken); color:var(--muted); }
 
 /* 断言 / 等待 模板 */
-.draft-card { margin-top:16px; border:1.5px dashed #c9d6ea; border-radius:14px; padding:16px; background:#fbfdff; }
+.draft-card { margin-top:16px; border:1.5px dashed var(--accent-line); border-radius:14px; padding:16px; background:var(--bg-card); }
 .draft-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px; }
 /* 从行内「+」进来时标明锚点，和工具栏那三个按钮打开时的区别一眼可见 */
-.draft-anchor { margin-right:auto; font-size:11.5px; color:#0071e3; background:#eaf3ff; border-radius:999px; padding:2px 9px; white-space:nowrap; }
-.draft-title { font-size:14px; font-weight:700; color:#1d1d1f; }
+.draft-anchor { margin-right:auto; font-size:11.5px; color:var(--accent); background:var(--accent-soft); border-radius:999px; padding:2px 9px; white-space:nowrap; }
+.draft-title { font-size:14px; font-weight:700; color:var(--ink); }
 .draft-nl { display:flex; gap:10px; align-items:flex-start; }
 .draft-nl .el-textarea { flex:1; }
 /* 固定等待没有可解析的内容：一行秒数，不占地方也不用解释 */
 .sleep-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.sleep-label { font-size:13px; color:#303133; }
-.sleep-unit { font-size:13px; color:#606266; }
-.sleep-hint { margin-left:4px; font-size:12px; color:#909399; }
-.parsed-preview { margin-top:12px; padding:12px; border-radius:10px; background:#f0faf4; border:1px solid #d6f0df; }
-.parsed-line { display:flex; gap:10px; align-items:flex-start; font-size:13.5px; color:#1d1d1f; flex-wrap:wrap; }
-.parsed-label { color:#1e7a46; font-weight:700; flex-shrink:0; }
+.sleep-label { font-size:13px; color:var(--ink-2); }
+.sleep-unit { font-size:13px; color:var(--muted); }
+.sleep-hint { margin-left:4px; font-size:12px; color:var(--muted); }
+/* 等待加载：三档 + 一个超时。分段沿用配置卡的 cfg-seg，只是不再吃满整行 */
+.ready-body { display:flex; flex-direction:column; gap:10px; }
+.ready-seg { margin:0; align-self:flex-start; }
+.ready-note { font-size:11.5px; line-height:1.6; color:var(--muted); }
+.parsed-preview { margin-top:12px; padding:12px; border-radius:10px; background:var(--ok-soft); border:1px solid var(--ok-line); }
+.parsed-line { display:flex; gap:10px; align-items:flex-start; font-size:13.5px; color:var(--ink); flex-wrap:wrap; }
+.parsed-label { color:var(--ok); font-weight:700; flex-shrink:0; }
 .parsed-text { min-width:0; word-break:break-word; }
 /* 解析结果只是「填表来源」：用户改过表单就以表单为准，标签要说清楚，否则会以为插入的还是预览那条 */
-.parsed-tag { flex-shrink:0; margin-left:auto; font-size:11.5px; color:#1e7a46; background:#e2f5e9; border-radius:999px; padding:2px 9px; }
-.parsed-tag.dirty { color:#a15c07; background:#fff4e2; }
+.parsed-tag { flex-shrink:0; margin-left:auto; font-size:11.5px; color:var(--ok); background:var(--ok-soft); border-radius:999px; padding:2px 9px; }
+.parsed-tag.dirty { color:var(--warn); background:var(--warn-soft); }
 .form-grid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:10px; }
 .alias-option { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
 .alias-option-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.alias-option-hint { flex:none; color:#a8abb2; font-size:11.5px; }
+.alias-option-hint { flex:none; color:var(--faint); font-size:11.5px; }
 .draft-actions { margin-top:12px; display:flex; justify-content:flex-end; }
 
 /* 插入前验证：结论用「当前页面状态」这个词，避免和回放校验混为一谈 */
-.verify-box { margin-top:12px; padding:10px 12px; border-radius:10px; background:#f6f9ff; border:1px solid #dbe7fa; }
-.verify-box.ok { background:#f2fbf5; border-color:#cdebd8; }
-.verify-box.bad { background:#fff8f0; border-color:#f3ddc2; }
+.verify-box { margin-top:12px; padding:10px 12px; border-radius:10px; background:var(--bg-card); border:1px solid var(--accent-line); }
+.verify-box.ok { background:var(--ok-soft); border-color:var(--ok-line); }
+.verify-box.bad { background:var(--warn-soft); border-color:var(--warn-line); }
 /* 轮询等待既不是通过也不是失败：此刻不成立是它的常态，单独一档中性色 */
-.verify-box.neutral { background:#f6f9ff; border-color:#dbe7fa; }
-.verify-box.neutral .verify-dot { background:#3b82f6; }
-.verify-box.neutral .verify-title { color:#1d4f9a; }
-.verify-box.neutral .verify-detail { color:#5c6675; }
+.verify-box.neutral { background:var(--bg-card); border-color:var(--accent-line); }
+.verify-box.neutral .verify-dot { background:var(--accent); }
+.verify-box.neutral .verify-title { color:var(--accent); }
+.verify-box.neutral .verify-detail { color:var(--muted); }
 
 /* 轮询等待参数 */
 /* 高级区：默认收起，收起时靠右侧摘要说明「会不会等」 */
-.advanced-box { margin-top:10px; border-radius:10px; border:1px solid #e6e9ef; background:#fcfdff; transition:border-color .18s ease, background .18s ease; }
-.advanced-box.is-on { border-color:#c9dcf5; background:#f7fbff; }
+.advanced-box { margin-top:10px; border-radius:10px; border:1px solid var(--line-soft); background:var(--bg-card); transition:border-color .18s ease, background .18s ease; }
+.advanced-box.is-on { border-color:var(--accent-line); background:var(--bg-card); }
 .advanced-head { display:flex; align-items:center; gap:6px; padding:8px 10px; cursor:pointer; user-select:none; border-radius:10px; }
-.advanced-head:hover { background:rgba(0,113,227,.035); }
+.advanced-head:hover { background:var(--bg-hover); }
 /* 三角用边框画，不用 ▸ 字符：小字号下中文字体会把它渲染成一个点 */
-.advanced-caret { flex:none; width:0; height:0; border-left:5px solid #9aa3b2; border-top:4px solid transparent; border-bottom:4px solid transparent; transition:transform .16s ease; }
+.advanced-caret { flex:none; width:0; height:0; border-left:5px solid var(--faint); border-top:4px solid transparent; border-bottom:4px solid transparent; transition:transform .16s ease; }
 .advanced-caret.is-open { transform:rotate(90deg); }
-.advanced-title { font-size:12.5px; color:#3c4655; }
-.advanced-box.is-on .advanced-title { color:#0b6bcb; font-weight:600; }
-.advanced-summary { margin-left:auto; font-size:12px; color:#9aa3b2; }
-.advanced-box.is-on .advanced-summary { color:#2f7fd0; }
-.advanced-help { flex:none; display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px; border-radius:50%; border:1px solid #cdd5e0; color:#9aa3b2; font-size:10px; line-height:1; cursor:help; }
-.advanced-help:hover { border-color:#8fb8e6; color:#2f7fd0; }
+.advanced-title { font-size:12.5px; color:var(--ink-2); }
+.advanced-box.is-on .advanced-title { color:var(--accent); font-weight:600; }
+.advanced-summary { margin-left:auto; font-size:12px; color:var(--muted); }
+.advanced-box.is-on .advanced-summary { color:var(--accent); }
+.advanced-help { flex:none; display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px; border-radius:50%; border:1px solid var(--line-field); color:var(--muted); font-size:10px; line-height:1; cursor:help; }
+.advanced-help:hover { border-color:var(--accent); color:var(--accent); }
 .advanced-body { padding:0 10px 10px; }
 .advanced-tip { max-width:250px; line-height:1.65; }
 .poll-row { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
 .poll-row + .poll-row { margin-top:8px; }
 .poll-row :deep(.el-checkbox) { margin-right:0; }
 .poll-row :deep(.el-input-number) { width:92px; }
-.poll-label { font-size:12px; color:#5c6675; }
-.poll-unit { font-size:12px; color:#5c6675; }
+.poll-label { font-size:12px; color:var(--muted); }
+.poll-unit { font-size:12px; color:var(--muted); }
 .verify-head { display:flex; align-items:center; gap:8px; min-width:0; }
-.verify-dot { flex:none; width:8px; height:8px; border-radius:50%; background:#e0a03a; }
-.verify-box.ok .verify-dot { background:#12a150; }
-.verify-title { flex:none; font-size:12.5px; font-weight:700; color:#1f2d3d; }
-.verify-box.ok .verify-title { color:#14713c; }
-.verify-box.bad .verify-title { color:#a15c07; }
+.verify-dot { flex:none; width:8px; height:8px; border-radius:50%; background:var(--warn); }
+.verify-box.ok .verify-dot { background:var(--ok); }
+.verify-title { flex:none; font-size:12.5px; font-weight:700; color:var(--ink-2); }
+.verify-box.ok .verify-title { color:var(--ok); }
+.verify-box.bad .verify-title { color:var(--warn); }
 .verify-loc {
   flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  font-size:11px; color:#5c6675; background:#fff; border:1px solid #e7edf6; border-radius:4px; padding:1px 5px;
+  font-size:11px; color:var(--muted); background:var(--bg-card); border:1px solid var(--line-soft); border-radius:4px; padding:1px 5px;
 }
-.verify-close { flex:none; margin-left:auto; border:0; background:none; color:#96a0b0; font-size:15px; line-height:1; cursor:pointer; padding:0 2px; }
-.verify-close:hover { color:#4b5563; }
-.verify-row { display:flex; gap:8px; margin-top:6px; font-size:12px; line-height:1.5; color:#3d4657; }
-.verify-key { flex:none; width:30px; color:#8a94a6; }
+.verify-close { flex:none; margin-left:auto; border:0; background:none; color:var(--muted); font-size:15px; line-height:1; cursor:pointer; padding:0 2px; }
+.verify-close:hover { color:var(--ink-2); }
+.verify-row { display:flex; gap:8px; margin-top:6px; font-size:12px; line-height:1.5; color:var(--ink-2); }
+.verify-key { flex:none; width:30px; color:var(--muted); }
 .verify-val { min-width:0; word-break:break-word; }
-.verify-detail { margin-top:6px; font-size:12px; color:#8a5a12; line-height:1.5; }
-.verify-note { margin-top:8px; color:#8a94a6; font-size:11.5px; line-height:1.55; }
+.verify-detail { margin-top:6px; font-size:12px; color:var(--warn); line-height:1.5; }
+.verify-note { margin-top:8px; color:var(--muted); font-size:11.5px; line-height:1.55; }
 
 /* 生成 */
 .checklist { display:flex; flex-direction:column; gap:10px; margin-bottom:18px; }
 /* 未停止录制时只留一行，别让 4 条「未满足」把整张卡撑高 */
-.gen-compact { margin-bottom:14px; padding:10px 12px; border-radius:10px; background:#f7f9fc; color:#6e6e73; font-size:13px; line-height:1.5; }
-.gen-compact b { color:#0071e3; font-weight:700; }
-.gen-compact-bad { color:#d4380d; }
-.check { display:flex; align-items:flex-start; gap:10px; font-size:13px; color:#6e6e73; line-height:1.5; }
+.gen-compact { margin-bottom:14px; padding:10px 12px; border-radius:10px; background:var(--bg-card); color:var(--muted); font-size:13px; line-height:1.5; }
+.gen-compact b { color:var(--accent); font-weight:700; }
+.gen-compact-bad { color:var(--danger); }
+.check { display:flex; align-items:flex-start; gap:10px; font-size:13px; color:var(--muted); line-height:1.5; }
 .check-text { flex:1; min-width:0; }
 /* 行内补救入口：不抢主行动的注意力，但要在这一行里够得着 */
-.check-action { flex:none; margin:-4px -6px -4px 0; color:#0071e3; font-size:12px; }
-.check-dot { flex-shrink:0; width:9px; height:9px; margin-top:6px; border-radius:50%; background:#d0d5dd; }
-.check.ok { color:#1e7a46; }
-.check.ok .check-dot { background:#34c759; }
-.check.bad { color:#e5484d; }
-.check.bad .check-dot { background:#e5484d; }
-.check.warn { color:#ad6800; }
-.check.warn .check-dot { background:#ffb020; }
+.check-action { flex:none; margin:-4px -6px -4px 0; color:var(--accent); font-size:12px; }
+.check-dot { flex-shrink:0; width:9px; height:9px; margin-top:6px; border-radius:50%; background:var(--bg-active); }
+.check.ok { color:var(--ok); }
+.check.ok .check-dot { background:var(--ok); }
+.check.bad { color:var(--danger); }
+.check.bad .check-dot { background:var(--danger); }
+.check.warn { color:var(--warn); }
+.check.warn .check-dot { background:var(--warn); }
 /* 整宽主行动：唯一比标准按钮高的一处（独占一行，不与任何按钮并排），
    926px 宽下 36px 才有分量；32px 会显得像一条薄片。 */
 .recording-page :deep(.el-button.generate-btn) { width:100%; height:36px; font-size:13.5px; border-radius:9px; }
 /* 生成进度：占掉按钮那块位置，高度接近，切换时整张卡不跳 */
-.gen-progress { padding:10px 12px 11px; border:1px solid #e6e9ef; border-radius:9px; background:#fafbfc; }
+.gen-progress { padding:10px 12px 11px; border:1px solid var(--line-soft); border-radius:9px; background:var(--bg-card); }
 .gen-progress-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }
-.gen-progress-label { flex:1; min-width:0; font-size:13px; font-weight:600; color:#1f2530;
+.gen-progress-label { flex:1; min-width:0; font-size:13px; font-weight:600; color:var(--ink);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.gen-progress-pct { flex:none; font-size:12.5px; font-weight:600; color:#0071e3; font-variant-numeric:tabular-nums; }
-.gen-progress :deep(.el-progress-bar__outer) { background:#e9edf2; }
-.gen-progress-foot { display:flex; align-items:center; gap:8px; margin-top:8px; font-size:11.5px; color:#8a8f99; }
+.gen-progress-pct { flex:none; font-size:12.5px; font-weight:600; color:var(--accent); font-variant-numeric:tabular-nums; }
+.gen-progress :deep(.el-progress-bar__outer) { background:var(--bg-sunken); }
+.gen-progress-foot { display:flex; align-items:center; gap:8px; margin-top:8px; font-size:11.5px; color:var(--muted); }
 .gen-progress-detail { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .gen-progress-time { flex:none; font-variant-numeric:tabular-nums; }
-.gen-block-reason { display:flex; align-items:flex-start; gap:7px; margin-top:2px; color:#ad6800; font-size:12.5px; line-height:1.5; }
-.gen-block-dot { flex-shrink:0; width:7px; height:7px; border-radius:50%; background:#ffb020; margin-top:6px; }
-.gen-error { margin-top:14px; padding:12px; border-radius:10px; background:#fff1f0; color:#e5484d; font-size:13px; }
+.gen-cancel { flex:none; height:20px; padding:0 4px; margin-left:2px; font-size:11.5px; }
+.gen-block-reason { display:flex; align-items:flex-start; gap:7px; margin-top:2px; color:var(--warn); font-size:12.5px; line-height:1.5; }
+.gen-block-dot { flex-shrink:0; width:7px; height:7px; border-radius:50%; background:var(--warn); margin-top:6px; }
+.gen-error { margin-top:14px; padding:12px; border-radius:10px; background:var(--danger-soft); color:var(--danger); font-size:13px; }
 .gen-error-title { font-weight:700; }
 .gen-error-list { margin:8px 0 0; padding-left:18px; font-size:12.5px; line-height:1.6; }
-.gen-result { margin-top:14px; padding:12px; border-radius:10px; background:#f0faf4; }
-.gen-result-title { color:#1e7a46; font-weight:700; font-size:13.5px; }
+.gen-result { margin-top:14px; padding:12px; border-radius:10px; background:var(--ok-soft); }
+.gen-result-title { color:var(--ok); font-weight:700; font-size:13.5px; }
 /* 降级定位提示：绿底结果里嵌一块琥珀，别让「已写入」的绿色盖住风险 */
-.gen-degraded { margin-top:10px; padding:9px 11px; border-radius:8px; background:#fff7e6; border:1px solid #f3d8a8; }
-.gen-degraded-title { color:#a15c07; font-size:12.5px; font-weight:600; }
-.gen-degraded ul { margin:6px 0 0; padding-left:16px; color:#8a5a12; font-size:12px; line-height:1.65; }
+.gen-degraded { margin-top:10px; padding:9px 11px; border-radius:8px; background:var(--warn-soft); border:1px solid var(--warn-line); }
+.gen-degraded-title { color:var(--warn); font-size:12.5px; font-weight:600; }
+.gen-degraded ul { margin:6px 0 0; padding-left:16px; color:var(--warn); font-size:12px; line-height:1.65; }
+/* 越界清单：路径要能看清，还原按钮贴在行尾，不挤成一大块。 */
+.gen-outside-list { list-style:none; padding-left:0 !important; }
+.gen-outside-list li { display:flex; align-items:center; gap:8px; }
+.gen-outside-list code { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gen-outside-list .el-button { flex:none; height:20px; padding:0 4px; font-size:11.5px; }
+.gen-outside-actions { display:flex; align-items:center; gap:8px; margin-top:8px; }
+/* 跑不起来时把 Playwright 的原始输出露一截：多半是配置/依赖问题，藏起来反而没法自查 */
+.gen-run-tail {
+  margin:8px 0 0; padding:8px 10px; max-height:180px; overflow:auto;
+  border-radius:6px; background:var(--bg-sunken); color:var(--muted);
+  font:11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space:pre-wrap; word-break:break-all;
+}
 
 /* 回放校验结果：折叠时只占一行，结论先行 */
-.gen-replay { margin-top:10px; padding:9px 11px; border-radius:8px; background:#fafbfc; border:1px solid #e9edf2; }
+.gen-replay { margin-top:10px; padding:9px 11px; border-radius:8px; background:var(--bg-card); border:1px solid var(--line-soft); }
 .gen-replay-head {
   display:flex; align-items:center; gap:7px; width:100%; padding:0; border:0;
   background:none; cursor:pointer; text-align:left; font:inherit;
 }
 .gen-replay-head:hover .gen-replay-toggle { text-decoration:underline; }
-.gen-replay-dot { width:7px; height:7px; border-radius:50%; flex:none; background:#12a150; }
-.gen-replay-dot.bad { background:#e0352b; }
-.gen-replay-title { color:#1f2d3d; font-size:12.5px; font-weight:600; }
-.gen-replay-title.bad { color:#c0271d; }
-.gen-replay-toggle { margin-left:auto; color:#0071e3; font-size:12px; }
-.gen-replay-error { margin-top:6px; color:#c0271d; font-size:12px; line-height:1.6; word-break:break-all; }
-.gen-replay-note { margin-top:6px; color:#8a94a6; font-size:11.5px; line-height:1.55; }
+.gen-replay-dot { width:7px; height:7px; border-radius:50%; flex:none; background:var(--ok); }
+.gen-replay-dot.bad { background:var(--danger); }
+.gen-replay-title { color:var(--ink-2); font-size:12.5px; font-weight:600; }
+.gen-replay-title.bad { color:var(--danger); }
+.gen-replay-toggle { margin-left:auto; color:var(--accent); font-size:12px; }
+.gen-replay-error { margin-top:6px; color:var(--danger); font-size:12px; line-height:1.6; word-break:break-all; }
+.gen-replay-note { margin-top:6px; color:var(--muted); font-size:11.5px; line-height:1.55; }
 .gen-replay-steps { margin:8px 0 0; padding:0; list-style:none; max-height:220px; overflow-y:auto; }
 .gen-replay-steps li {
-  display:flex; align-items:center; gap:7px; padding:5px 0; border-top:1px dashed #eef0f3;
-  font-size:11.5px; color:#5c6675; min-width:0; flex-wrap:wrap;
+  display:flex; align-items:center; gap:7px; padding:5px 0; border-top:1px dashed var(--line-soft);
+  font-size:11.5px; color:var(--muted); min-width:0; flex-wrap:wrap;
 }
-.gen-replay-steps li.bad { color:#c0271d; }
-.gen-replay-no { flex:none; width:20px; color:#9aa4b2; font-variant-numeric:tabular-nums; }
-.gen-replay-type { flex:none; width:52px; color:#8892a0; }
+.gen-replay-steps li.bad { color:var(--danger); }
+.gen-replay-no { flex:none; width:20px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.gen-replay-type { flex:none; width:52px; color:var(--muted); }
 .gen-replay-alias { flex:none; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .gen-replay-loc {
   flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  color:#3d4657; font-size:11px; background:#f4f6f8; padding:1px 5px; border-radius:4px;
+  color:var(--ink-2); font-size:11px; background:var(--bg-sunken); padding:1px 5px; border-radius:4px;
 }
-.gen-replay-loc.is-empty { background:none; color:#b4bcc8; padding:1px 0; }
-.gen-replay-nth { flex:none; color:#a15c07; }
-.gen-replay-poll { flex:none; color:#1d4f9a; }
+.gen-replay-loc.is-empty { background:none; color:var(--faint); padding:1px 0; }
+.gen-replay-nth { flex:none; color:var(--warn); }
+.gen-replay-poll { flex:none; color:var(--accent); }
 /* 失败原因是整句，独占一行，否则会把定位挤成省略号 */
-.gen-replay-why { flex-basis:100%; padding-left:27px; color:#c0271d; font-size:11.5px; line-height:1.5; }
+.gen-replay-why { flex-basis:100%; padding-left:27px; color:var(--danger); font-size:11.5px; line-height:1.5; }
 
 /* ---- 任务书 ---- */
-.plan-head-meta { margin-left:auto; color:#8a94a6; font-size:11.5px; font-weight:400; }
+.plan-head-meta { margin-left:auto; color:var(--muted); font-size:11.5px; font-weight:400; }
 /* 任务书入口：生成卡里只留一行状态。正文在浮层里读，长表格不该挤进 420px 的侧栏。 */
 .plan-ready { display:flex; align-items:center; gap:10px; }
 .plan-ready-main { flex:1; min-width:0; }
-.plan-ready-title { color:#1f2530; font-size:12.5px; font-weight:600; }
+.plan-ready-title { color:var(--ink); font-size:12.5px; font-weight:600; }
 .plan-ready-sub {
-  margin-top:3px; color:#7a8494; font-size:11.5px; line-height:1.5;
+  margin-top:3px; color:var(--muted); font-size:11.5px; line-height:1.5;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 
@@ -4036,19 +4930,19 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 }
 .plan-sheet {
   display:flex; flex-direction:column; width:min(1120px,96vw); height:min(900px,92vh);
-  overflow:hidden; background:#fff; border-radius:16px;
+  overflow:hidden; background:var(--bg-card); border-radius:16px;
   box-shadow:0 24px 64px rgba(16,24,40,.26);
 }
 .plan-sheet-head {
   flex:none; display:flex; align-items:center; gap:10px; padding:12px 16px;
-  border-bottom:1px solid #eef0f3; background:linear-gradient(180deg,#fcfdff,#f7f9fc);
+  border-bottom:1px solid var(--line-soft); background:linear-gradient(180deg,var(--bg-card),var(--bg-card));
 }
-.plan-sheet-tip { margin-left:auto; color:#9aa4b2; font-size:11.5px; }
+.plan-sheet-tip { margin-left:auto; color:var(--muted); font-size:11.5px; }
 .plan-sheet-close {
   flex:none; width:28px; height:28px; padding:0; border:0; border-radius:8px;
-  background:transparent; color:#8a94a6; font-size:13px; line-height:1; cursor:pointer;
+  background:transparent; color:var(--muted); font-size:13px; line-height:1; cursor:pointer;
 }
-.plan-sheet-close:hover { background:#eef1f5; color:#1d1d1f; }
+.plan-sheet-close:hover { background:var(--bg-sunken); color:var(--ink); }
 .plan-sheet-body { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) 330px; }
 .plan-sheet-main { min-height:0; overflow-y:auto; padding:16px 24px 24px; }
 /* 大屏上把正文的行距和表格松一格：还是同一份内容，读起来不再是窄栏里的压缩版 */
@@ -4057,20 +4951,20 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .plan-sheet-main .plan-steps td { padding:7px 6px; }
 .plan-sheet-main .plan-step-no { width:26px; }
 .plan-sheet-main .plan-step-action { width:46px; }
-.plan-sheet-error { flex:none; overflow-y:auto; padding:18px 24px; border-bottom:1px solid #f6d5d1; background:#fff8f7; }
+.plan-sheet-error { flex:none; overflow-y:auto; padding:18px 24px; border-bottom:1px solid var(--danger-line); background:var(--danger-soft); }
 /* 没有旧任务书可看时，错误就是全部内容：占满并居中，别让它孤零零挂在顶上 */
 .plan-sheet-error.is-solo {
   flex:1; min-height:0; display:flex; flex-direction:column; justify-content:center;
-  padding:32px 40px; border-bottom:0; background:#fff;
+  padding:32px 40px; border-bottom:0; background:var(--bg-card);
 }
 .plan-sheet-error.is-solo .gen-error { max-width:720px; margin:0 auto; width:100%; }
 /* 右栏固定：读两步就能点执行，不用滚到第 12 步末尾才看见按钮 */
 .plan-sheet-side {
   min-height:0; display:flex; flex-direction:column;
-  border-left:1px solid #eef0f3; background:#fbfcfe;
+  border-left:1px solid var(--line-soft); background:var(--bg-card);
 }
 .plan-side-scroll { flex:1; min-height:0; overflow-y:auto; padding:14px 16px; }
-.plan-side-foot { flex:none; padding:12px 16px; border-top:1px solid #eef0f3; background:#fff; }
+.plan-side-foot { flex:none; padding:12px 16px; border-top:1px solid var(--line-soft); background:var(--bg-card); }
 .plan-side-foot .plan-actions { margin-top:0; }
 .plan-side-foot .plan-actions :deep(.el-button + .el-button) { margin-left:0; }
 .plan-side-foot .plan-actions :deep(.el-button) { flex:1; }
@@ -4079,7 +4973,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .plan-sheet-side .plan-target-edit { flex-wrap:wrap; }
 .plan-sheet-side .plan-target-edit :deep(.el-input) { flex:1 1 100%; }
 .plan-target-edit-btns { display:flex; gap:6px; }
-.plan-notes-count { margin-left:auto; color:#9aa4b2; font-size:11px; font-weight:400; }
+.plan-notes-count { margin-left:auto; color:var(--muted); font-size:11px; font-weight:400; }
 
 /* 窗口本身不够宽时（嵌入模式、或被并排挤窄）就单列：正文在上，右栏缩成底部操作区。
    按钮仍然常驻，这点不能在窄屏上退化。 */
@@ -4087,90 +4981,90 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
   .plan-sheet-mask { padding:10px; }
   .plan-sheet { width:96vw; height:96vh; border-radius:12px; }
   .plan-sheet-body { grid-template-columns:1fr; grid-template-rows:minmax(0,1fr) auto; }
-  .plan-sheet-side { border-left:0; border-top:1px solid #eef0f3; max-height:40vh; }
+  .plan-sheet-side { border-left:0; border-top:1px solid var(--line-soft); max-height:40vh; }
   .plan-sheet-tip { display:none; }
   .plan-sheet-head { padding:10px 12px; }
 }
-.plan-block { padding:10px 0; border-top:1px dashed #eef0f3; }
+.plan-block { padding:10px 0; border-top:1px dashed var(--line-soft); }
 .plan-block:first-child { border-top:0; padding-top:0; }
 .plan-block-title {
   display:flex; align-items:baseline; gap:6px;
-  margin-bottom:6px; color:#1f2530; font-size:12px; font-weight:600;
+  margin-bottom:6px; color:var(--ink); font-size:12px; font-weight:600;
 }
 .plan-kv { display:flex; gap:8px; font-size:11.5px; line-height:1.8; }
-.plan-kv > span { flex:none; width:44px; color:#8a94a6; }
-.plan-kv > b { color:#3d4657; font-weight:500; word-break:break-word; }
-.plan-style-note { margin-top:5px; color:#7a8494; font-size:11.5px; line-height:1.65; }
+.plan-kv > span { flex:none; width:44px; color:var(--muted); }
+.plan-kv > b { color:var(--ink-2); font-weight:500; word-break:break-word; }
+.plan-style-note { margin-top:5px; color:var(--muted); font-size:11.5px; line-height:1.65; }
 .plan-sheet code, .plan-ready code, .plan-target code, .plan-reuse code, .plan-suggest code {
-  background:#f4f6f8; color:#3d4657; padding:1px 5px; border-radius:4px;
+  background:var(--bg-sunken); color:var(--ink-2); padding:1px 5px; border-radius:4px;
   font-size:11px; word-break:break-all;
 }
 .plan-target { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.plan-path-ok { color:#12a150; font-size:11.5px; }
+.plan-path-ok { color:var(--ok); font-size:11.5px; }
 /* 「这是 AI 选的」标记：路径本身是重点，别做成彩色按钮抢注意力 */
 .plan-path-badge {
   margin-left:6px; padding:1px 6px; border-radius:4px;
-  background:#eef3fd; color:#2f6bd8; font-size:11px; font-weight:500;
+  background:var(--accent-soft); color:var(--accent); font-size:11px; font-weight:500;
 }
-.plan-target-edit-btn { color:#8e8e93; }
+.plan-target-edit-btn { color:var(--muted); }
 .plan-target-edit { display:flex; align-items:center; gap:6px; }
 .plan-target-edit :deep(.el-input) { flex:1; }
-.plan-target-error { margin-top:5px; color:#d93025; font-size:11.5px; }
+.plan-target-error { margin-top:5px; color:var(--danger); font-size:11.5px; }
 .plan-target-changed {
   margin-top:8px; padding:7px 9px; border-radius:7px;
-  background:#fff9ea; border:1px solid #f1ddb0; color:#7a5a12;
+  background:var(--warn-soft); border:1px solid var(--warn-line); color:var(--warn);
   font-size:11.5px; line-height:1.6;
 }
 .plan-suggest {
-  margin-top:8px; padding:9px 10px; border:1px solid #f1ddb0; border-radius:8px;
-  background:#fff9ea; font-size:11.5px; color:#7a5a12;
+  margin-top:8px; padding:9px 10px; border:1px solid var(--warn-line); border-radius:8px;
+  background:var(--warn-soft); font-size:11.5px; color:var(--warn);
 }
 .plan-suggest-title { font-weight:600; margin-bottom:3px; }
-.plan-suggest-reason { color:#94712c; line-height:1.65; }
+.plan-suggest-reason { color:var(--warn); line-height:1.65; }
 .plan-suggest .el-button { margin-top:7px; }
 .plan-reuse { margin:0; padding:0; list-style:none; }
-.plan-reuse li { padding:5px 0; border-top:1px dashed #eef0f3; font-size:11.5px; }
+.plan-reuse li { padding:5px 0; border-top:1px dashed var(--line-soft); font-size:11.5px; }
 .plan-reuse li:first-child { border-top:0; padding-top:0; }
-.plan-reuse-file { margin-left:6px; color:#8a94a6; font-size:11px; }
+.plan-reuse-file { margin-left:6px; color:var(--muted); font-size:11px; }
 .plan-reuse-use {
-  display:block; margin-top:3px; color:#5c6675; font-size:11px;
+  display:block; margin-top:3px; color:var(--muted); font-size:11px;
   line-height:1.6; white-space:pre-wrap; word-break:break-all;
 }
 .plan-steps { width:100%; border-collapse:collapse; font-size:11.5px; }
-.plan-steps td { padding:5px 4px; border-top:1px dashed #eef0f3; vertical-align:top; }
+.plan-steps td { padding:5px 4px; border-top:1px dashed var(--line-soft); vertical-align:top; }
 .plan-steps tr:first-child td { border-top:0; padding-top:0; }
-.plan-step-no { width:18px; color:#9aa4b2; font-variant-numeric:tabular-nums; }
-.plan-step-action { width:34px; color:#5c6675; white-space:nowrap; }
-.plan-step-action.reuse { color:#1d4f9a; font-weight:600; }
-.plan-step-note { color:#3d4657; line-height:1.65; word-break:break-word; }
-.plan-risks { margin:0; padding-left:16px; color:#7a5a12; font-size:11.5px; line-height:1.7; }
-.plan-notes { margin-top:10px; padding-top:10px; border-top:1px solid #eef0f3; }
-.plan-notes-hint { color:#9aa4b2; font-size:11px; font-weight:400; }
+.plan-step-no { width:18px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.plan-step-action { width:34px; color:var(--muted); white-space:nowrap; }
+.plan-step-action.reuse { color:var(--accent); font-weight:600; }
+.plan-step-note { color:var(--ink-2); line-height:1.65; word-break:break-word; }
+.plan-risks { margin:0; padding-left:16px; color:var(--warn); font-size:11.5px; line-height:1.7; }
+.plan-notes { margin-top:10px; padding-top:10px; border-top:1px solid var(--line-soft); }
+.plan-notes-hint { color:var(--muted); font-size:11px; font-weight:400; }
 .plan-note {
   position:relative; margin:6px 0; padding:7px 28px 7px 9px;
-  background:#f7f9fc; border-radius:7px;
+  background:var(--bg-card); border-radius:7px;
 }
 .plan-quote {
-  margin-bottom:4px; padding-left:6px; border-left:2px solid #cfd8e3;
-  color:#7a8494; font-size:11.5px; line-height:1.55; word-break:break-all;
+  margin-bottom:4px; padding-left:6px; border-left:2px solid var(--line-field);
+  color:var(--muted); font-size:11.5px; line-height:1.55; word-break:break-all;
 }
-.plan-note-body { color:#2f3a49; font-size:12px; line-height:1.6; white-space:pre-wrap; }
+.plan-note-body { color:var(--ink-2); font-size:12px; line-height:1.6; white-space:pre-wrap; }
 .plan-note-del {
   position:absolute; top:6px; right:6px; padding:0; border:0; background:none;
-  color:#a4adba; font-size:11px; cursor:pointer;
+  color:var(--faint); font-size:11px; cursor:pointer;
 }
-.plan-note-del:hover { color:#c0271d; }
+.plan-note-del:hover { color:var(--danger); }
 .plan-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
 .plan-stale {
-  margin-bottom:10px; padding:8px 10px; border:1px solid #f3c9c3; border-radius:8px;
-  background:#fff4f2; color:#c0271d; font-size:12px; line-height:1.6;
+  margin-bottom:10px; padding:8px 10px; border:1px solid var(--danger-line); border-radius:8px;
+  background:var(--danger-soft); color:var(--danger); font-size:12px; line-height:1.6;
 }
 .plan-sel-tip {
   position:fixed; z-index:3000; height:30px; padding:0 12px; border:0; border-radius:15px;
-  background:#1f2530; color:#fff; font-size:12px; line-height:30px; cursor:pointer;
+  background:var(--bg-code); color:#fff; font-size:12px; line-height:30px; cursor:pointer;
   box-shadow:0 6px 18px rgba(20, 26, 36, .22);
 }
-.plan-sel-tip:hover { background:#0071e3; }
+.plan-sel-tip:hover { background:var(--accent); }
 
 
 

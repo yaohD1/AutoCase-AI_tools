@@ -1318,26 +1318,39 @@ class OpenCodeRunner:
             self._terminate_process(process)
             shutil.rmtree(workdir, ignore_errors=True)
 
-    def _emit_config(self, writable, workspace):
-        """给 recording-emitter 生成一份临时配置：只允许写 writable 这一个文件。
+    # 宽写权限下仍然要挡的三类路径（规则是「最后命中者生效」，所以都排在 '*' 后面）：
+    # - `.git/`：能写 hooks 就等于能执行任意命令，比 bash 权限还绕过一层；
+    # - `.opencode/`：里面是插件和 agent 定义，改了等于改自己的权限规则；
+    # - `node_modules/`：不是源码，写进去只会把依赖树搞坏。
+    WRITE_EXCLUDE = ('.git', '.git/**', '.opencode/**', 'node_modules/**')
 
-        写权限交给 opencode 自己在工具调用前拦，比事后回滚可靠得多。四个细节（都是实测出来的）：
-        - 写文件权限匹配的是**相对工作区的路径**：opencode 调用的是
-          `ask({permission:"edit", patterns:[path.relative(worktree, filepath)]})`，
-          所以白名单的主规则必须是相对路径本身。绝对路径留给 external_directory 那种场景，
-          这里保留只是兜底。
-        - **不要加 `**/文件名`**：那条 glob 会匹配任意目录下的同名文件，等于把
-          「只允许写一个文件」变成「只允许写一个文件名」。上一版就是靠它，让模型把
-          `test-corekg.spec.ts` 写进了 `tests/ai-chat/`，然后验收按原路径找不到。
+    def _emit_config(self, writable, workspace, scope='workspace'):
+        """给 recording-emitter 生成一份临时配置。
+
+        两种范围：
+        - `workspace`（默认）：可写整个工作区，只排除 WRITE_EXCLUDE。这样一次生成可以
+          顺带写辅助文件（helper / fixture），不必为了「只准写一个文件」的硬约束重启一个
+          serve——越界改动由 guard 列出来，用户可以在界面上手动还原。
+        - `file`：只允许 writable 这一个文件。规划期会话不可复用时的保底路径。
+
+        细节（都是实测出来的）：
+        - 写权限匹配的是**相对工作区路径**：opencode 调用的是
+          `ask({permission:"edit", patterns:[path.relative(worktree, filepath)]})`。
+          file 模式的白名单必须写相对路径本身；只写 `**/x.spec.ts` 会变成
+          「只允许这个文件名」，模型能把它写进任意目录。工作区不是 git 仓库根时，
+          算出来的相对路径会带上临时目录名，一条都命中不了——真实流程由
+          `validate_workspace()` 强制 git 仓库根，所以只在自建脚本里踩得到。
         - 临时配置必须和原配置放在**同一目录**：配置里的 `{file:.opencode/prompts/...}`
           是按配置文件所在目录解析的，挪到别处会让 agent 的提示词全部加载失败。
-        - `edit` 权限覆盖 edit / write / apply_patch 三种写文件途径，`write` 再写一遍是冗余保险；
-          `*: deny` 必须排在最前，规则是最后命中者生效。
-        - `bash` 必须 deny，否则 `echo > file` 直接绕过 edit 权限；`task` 也要 deny，
-          子 agent 有自己的一套权限，等于开后门。
+        - `edit` 权限覆盖 edit / write / apply_patch 三种写文件途径（1.18.31 上模型
+          实际调用的是 `apply_patch`），所以 `write` 再写一遍是冗余保险。
+        - `bash` 必须 deny：`echo > file` 直接绕过 edit 权限。实测放行
+          `npx playwright test*` 也不划算——模型看输出必然加 `2>&1 | tail`，管道会被
+          整条拒掉，每拒一次浪费一轮；而验收本来就在后端跑。
+        - `task` 也要 deny：子 agent 有自己的一套权限，等于开后门。
         """
         base_path = self._config_path()
-        if not writable:
+        if scope == 'file' and not writable:
             return base_path, lambda: None
         try:
             data = json.loads(base_path.read_text(encoding='utf-8'))
@@ -1346,17 +1359,26 @@ class OpenCodeRunner:
         agent = (data.get('agent') or {}).get('recording-emitter')
         if not isinstance(agent, dict):
             raise RuntimeError('OpenCode 配置里缺少 recording-emitter agent，无法限定写权限')
-        rel = str(writable).replace('\\', '/')
-        absolute = Path(workspace).resolve() / rel
-        rule = {'*': 'deny'}
-        for pattern in (rel, './' + rel, absolute.as_posix()):
-            rule.setdefault(pattern, 'allow')
-        native = str(absolute)
-        if native != absolute.as_posix():
-            rule.setdefault(native, 'allow')
+
+        if scope == 'file':
+            rel = str(writable).replace('\\', '/')
+            absolute = Path(workspace).resolve() / rel
+            rule = {'*': 'deny'}
+            for pattern in (rel, './' + rel, absolute.as_posix()):
+                rule.setdefault(pattern, 'allow')
+            native = str(absolute)
+            if native != absolute.as_posix():
+                rule.setdefault(native, 'allow')
+            edit_rule = write_rule = rule
+        else:
+            edit_rule = {'*': 'allow'}
+            for pattern in self.WRITE_EXCLUDE:
+                edit_rule[pattern] = 'deny'
+            write_rule = dict(edit_rule)
+
         agent['permission'] = {
-            'edit': dict(rule),
-            'write': dict(rule),
+            'edit': dict(edit_rule),
+            'write': dict(write_rule),
             'bash': {'*': 'deny'},
             'task': 'deny',
         }
@@ -1391,6 +1413,17 @@ class OpenCodeRunner:
         return self.emit_recording(
             workspace, model, prompt, timeout=timeout, writable=None,
             agent='recording-planner', title='AutoCase recording plan',
+        )
+
+    def emit_profile(self, workspace, model, prompt, timeout=300):
+        """项目画像：只读 agent 扫一遍项目，产出一份「这个项目怎么写测试」的 JSON。
+
+        与规划的区别是它不带任何录制步骤、也不产出任务书，只描述项目本身，
+        所以结果可以存库、跨多次录制复用（见 services/recording/memory.py）。
+        """
+        return self.emit_recording(
+            workspace, model, prompt, timeout=timeout, writable=None,
+            agent='recording-profiler', title='AutoCase project profile',
         )
 
     def emit_recording(self, workspace, model, prompt, timeout=600, writable=None,

@@ -1,9 +1,13 @@
 <template>
-  <div class="upload-page">
+  <div
+    class="upload-page"
+    :class="{ 'is-enter': playEntry, 'is-boot-in': bootIn }"
+    :style="bootIn ? { '--boot-off': bootOff + 'ms' } : null"
+  >
 
     <!-- 页头：四个 KPI 原来是没有容器的一排 28px 裸数字，压在页面顶端比标题还响。
          收成右侧一行小字，数字留着重（.stat-num），标签退到 11px 灰。 -->
-    <header class="upload-head">
+    <header class="upload-head enter-item" style="--d: 0ms">
       <div class="upload-head-main">
         <div class="eyebrow">{{ headCopy.eyebrow }}</div>
         <h1 class="upload-title">{{ headCopy.title }}</h1>
@@ -30,7 +34,7 @@
     </header>
 
     <!-- 三个模式是同一层级的切换，用下划线 tab；「Agent 探索」是跳出去，靠在右边分开 -->
-    <nav class="mode-tabs">
+    <nav class="mode-tabs enter-rule">
       <button type="button" :class="['mode-tab', { 'is-on': uploadMode === 'image' }]" @click="switchMode('image')">原型图</button>
       <button type="button" :class="['mode-tab', { 'is-on': uploadMode === 'doc' }]" @click="switchMode('doc')">文档</button>
       <button type="button" :class="['mode-tab', { 'is-on': uploadMode === 'knowledge' }]" @click="switchMode('knowledge')">知识库</button>
@@ -40,7 +44,7 @@
 
     <!-- 自动化工具：从「渐变图标大卡」降成浅底一行。
          它仍然可点、仍然独占一行，但不再和上传卡片抢第一眼。 -->
-    <button type="button" class="tool-entry" @click="$router.push('/recording')">
+    <button type="button" class="tool-entry enter-item" style="--d: 480ms" @click="$router.push('/recording')">
       <span class="tool-entry-icon"><el-icon :size="15"><Operation /></el-icon></span>
       <span class="tool-entry-body">
         <span class="tool-entry-title">自动化工具</span>
@@ -49,7 +53,7 @@
       <span class="tool-entry-arrow">→</span>
     </button>
 
-    <el-card v-if="uploadMode !== 'knowledge'" class="upload-card">
+    <el-card v-if="uploadMode !== 'knowledge'" class="upload-card enter-item" style="--d: 560ms">
       <div class="card-body-layout">
         <div class="config-panel">
           <div class="section-title">配置</div>
@@ -245,7 +249,7 @@
       </div>
     </el-card>
 
-    <el-card v-if="uploadMode === 'knowledge'" class="knowledge-card">
+    <el-card v-if="uploadMode === 'knowledge'" class="knowledge-card enter-item" style="--d: 560ms">
       <div class="kb-toolbar">
         <el-select v-model="knowledgeProjectId" placeholder="选择项目" class="sel-project" @change="loadKnowledgeFiles">
           <el-option
@@ -508,7 +512,7 @@
             <el-button size="small" text class="ann-add-path" @click="addPath">＋ 添加路径</el-button>
           </div>
           <div class="annotation-image">
-            <div class="desc-image-viewer" style="flex:1;border-radius:10px;background:#fff"
+            <div class="desc-image-viewer" style="flex:1;border-radius:10px;background:var(--bg-card)"
                  @wheel="handleDescZoom"
                  @mousedown="startDescDrag"
                  @mousemove="onDescDrag"
@@ -660,9 +664,39 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, PictureFilled, Document, Loading, Delete, Close, Operation } from '@element-plus/icons-vue'
 import ModuleFields from '../components/ModuleFields.vue'
+import { bootDelay, bootPending } from '../composables/useBoot'
 import api from '../api'
 
 const router = useRouter()
+
+/* 首帧入场只在本会话第一次打开首页时演一次。
+   判定必须发生在首次渲染之前：如果等挂载后再加类，元素会实实在在地先显示一帧、
+   再被拉回 opacity:0 —— 看起来就是闪一下，比不做动画还差。
+   演完把类摘掉：keep-alive 把页面从缓存里搬回来时元素会重新插入 DOM，
+   CSS 动画会跟着从头开始，摘了类才不会在返回首页时重播。 */
+const playEntry = ref(false)
+// 冷启动有品牌启动幕：这一轮的表演交给幕布，首页只做一次整页淡入（is-boot-in），
+// 不再叠阶梯入场 —— 幕布自下而上让开、阶梯自上而下落，叠起来会露出空白，
+// 具体原因写在 motion.css 的 .is-boot-in 上面。
+const bootIn = ref(bootPending())
+const bootOff = bootDelay()
+// 演完必须把类摘掉：keep-alive 把首页搬回来时元素会重新插进 DOM，
+// 留着 is-boot-in 会在返回首页时重播一次「延迟 227ms + 淡入」。
+if (bootIn.value) onMounted(() => setTimeout(() => { bootIn.value = false }, bootOff + 900))
+let entrySeen = true
+try {
+  entrySeen = !!sessionStorage.getItem('ac-entered')
+} catch (e) {
+  entrySeen = false
+}
+if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches && !entrySeen) {
+  try { sessionStorage.setItem('ac-entered', '1') } catch (e) { /* 无痕模式下写不进去，最多每次多演一遍 */ }
+  if (!bootIn.value) {
+    playEntry.value = true
+    // 卡片最后一档是 560ms 起手 + 620ms 时长，全部落位在 1180ms 附近，留点余量再摘类
+    onMounted(() => setTimeout(() => { playEntry.value = false }, 1400))
+  }
+}
 
 const projects = ref([])
 const aiConfigs = ref([])
@@ -1759,8 +1793,21 @@ async function deleteKnowledgeFile(row) {
   display: flex;
   align-items: center;
   gap: 28px;
-  border-bottom: 1px solid var(--line-soft);
+  /* 那条 1px 横线从 border 换成伪元素：border 没法单独做 scaleX，
+     而首屏入场要让它先从左边抽出来（见 motion.css 的 .enter-rule）。
+     代价是激活 tab 的 2px 蓝条要跟着从 -1px 挪到 0，才能和线重合。 */
+  position: relative;
   margin-bottom: 18px;
+}
+.mode-tabs::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--line-soft);
+  transform-origin: left center;
 }
 .mode-tab {
   position: relative;
@@ -1779,7 +1826,7 @@ async function deleteKnowledgeFile(row) {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: -1px;
+  bottom: 0;
   height: 2px;
   border-radius: 2px 2px 0 0;
   background: var(--accent);
@@ -1809,15 +1856,15 @@ async function deleteKnowledgeFile(row) {
   width: 100%;
   margin: 0 0 16px;
   padding: 11px 14px;
-  background: #fafbfc;
+  background: var(--bg-sunken);
   border: 1px solid var(--line-soft);
   border-radius: 10px;
   text-align: left;
   cursor: pointer;
   transition: background .14s ease, border-color .14s ease;
 }
-.tool-entry:hover { background: #f5f7fa; border-color: #d9dfe7; }
-.tool-entry:focus-visible { outline: 2px solid rgba(0, 113, 227, .35); outline-offset: 1px; }
+.tool-entry:hover { background: var(--bg-hover); border-color: var(--line-ctl); }
+.tool-entry:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .tool-entry-icon {
   flex: none;
   width: 26px;
@@ -1826,7 +1873,7 @@ async function deleteKnowledgeFile(row) {
   align-items: center;
   justify-content: center;
   border-radius: 7px;
-  background: #fff;
+  background: var(--bg-card);
   border: 1px solid var(--line-soft);
   color: var(--ink-2);
 }
@@ -1855,7 +1902,7 @@ async function deleteKnowledgeFile(row) {
   border-radius: var(--radius-card);
   border: 1px solid var(--line-soft);
   box-shadow: none;
-  background: #fff;
+  background: var(--bg-card);
 }
 
 .upload-card :deep(.el-card__body),
@@ -1890,7 +1937,7 @@ async function deleteKnowledgeFile(row) {
 .card-header {
   font-size: 18px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--ink);
   letter-spacing: -0.3px;
 }
 
@@ -1903,7 +1950,7 @@ async function deleteKnowledgeFile(row) {
 .config-panel {
   flex: 4;
   padding: 28px 32px 20px;
-  border-right: 1px solid rgba(0, 0, 0, 0.05);
+  border-right: 1px solid var(--line-soft);
 }
 
 .upload-panel {
@@ -1933,7 +1980,7 @@ async function deleteKnowledgeFile(row) {
 .up-model {
   margin: 8px 0 4px;
   padding: 9px 11px 10px;
-  background: #f8fafc;
+  background: var(--bg-sunken);
   border-radius: 8px;
 }
 
@@ -1961,7 +2008,7 @@ async function deleteKnowledgeFile(row) {
   background: none;
   padding: 0;
   font-size: 11.5px;
-  color: #9aa3b1;
+  color: var(--faint);
   cursor: pointer;
   transition: color .14s ease;
 }
@@ -2008,7 +2055,7 @@ async function deleteKnowledgeFile(row) {
 .up-num :deep(.el-input__wrapper) {
   height: 26px;
   padding: 0 6px;
-  background: #fff;
+  background: var(--bg-card);
   border-radius: 6px;
   box-shadow: 0 0 0 1px var(--line-soft) inset;
 }
@@ -2028,7 +2075,7 @@ async function deleteKnowledgeFile(row) {
   margin-top: 6px;
   font-family: var(--mono);
   font-size: 11px;
-  color: #9aa3b1;
+  color: var(--faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2057,9 +2104,9 @@ async function deleteKnowledgeFile(row) {
   flex: 1;
   width: 100%;
   box-sizing: border-box;
-  border: 1.5px dashed rgba(0, 0, 0, 0.1);
+  border: 1.5px dashed var(--line-ctl);
   border-radius: 16px;
-  background: #fafafa;
+  background: var(--bg-sunken);
   transition: all 0.3s ease;
   padding: 32px 24px;
   min-height: 240px;
@@ -2070,35 +2117,35 @@ async function deleteKnowledgeFile(row) {
 }
 
 .upload-dragger :deep(.el-upload-dragger:hover) {
-  border-color: rgba(0, 0, 0, 0.2);
-  background: #f5f5f7;
+  border-color: var(--line-field-hover);
+  background: var(--bg-hover);
 }
 
 .upload-dragger :deep(.el-icon--upload) {
   font-size: 40px;
-  color: #86868b;
+  color: var(--muted);
   margin-bottom: 12px;
   transition: color 0.3s;
 }
 
 .upload-dragger :deep(.el-upload-dragger:hover .el-icon--upload) {
-  color: #0071e3;
+  color: var(--accent);
 }
 
 .upload-dragger :deep(.el-upload__text) {
   font-size: 15px;
-  color: #1d1d1f;
+  color: var(--ink);
   font-weight: 500;
 }
 
 .upload-dragger :deep(.el-upload__text em) {
-  color: #0071e3;
+  color: var(--accent);
   font-style: normal;
 }
 
 .upload-dragger :deep(.el-upload__tip) {
   font-size: 12px;
-  color: #86868b;
+  color: var(--muted);
   margin-top: 8px;
 }
 
@@ -2119,8 +2166,8 @@ async function deleteKnowledgeFile(row) {
   border-radius: 10px;
   overflow: hidden;
   position: relative;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: #f5f5f7;
+  border: 1px solid var(--line-field);
+  background: var(--bg-sunken);
 }
 
 /* 文档不该塞进 72×72 的方块里：文件名被挤到 9px 还截断。
@@ -2132,7 +2179,7 @@ async function deleteKnowledgeFile(row) {
   padding: 0 26px 0 10px;
   display: flex;
   align-items: center;
-  background: #fafbfc;
+  background: var(--bg-sunken);
   border-color: var(--line-soft);
   border-radius: var(--radius-ctl);
   overflow: visible;
@@ -2174,7 +2221,7 @@ async function deleteKnowledgeFile(row) {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  color: #86868b;
+  color: var(--muted);
 }
 
 .file-doc-preview span {
@@ -2234,8 +2281,8 @@ async function deleteKnowledgeFile(row) {
   transition: color .14s ease;
 }
 .text-act:not(:disabled):hover { color: var(--accent); }
-.text-act:disabled { color: #c9cfd8; cursor: default; }
-.act-sep { font-size: 11px; color: #dfe3e8; user-select: none; }
+.text-act:disabled { color: var(--faint); cursor: default; }
+.act-sep { font-size: 11px; color: var(--line-ctl); user-select: none; }
 
 .desc-layout {
   display: flex;
@@ -2254,10 +2301,10 @@ async function deleteKnowledgeFile(row) {
   width: 50%;
   display: flex;
   flex-direction: column;
-  background: #f6f7f9;
+  background: var(--bg-stage);
   border-radius: 14px;
   padding: 12px;
-  border: 0.5px solid rgba(0, 0, 0, 0.06);
+  border: 0.5px solid var(--line-soft);
 }
 
 .desc-image-viewer {
@@ -2265,10 +2312,10 @@ async function deleteKnowledgeFile(row) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #fff;
+  background: var(--bg-card);
   border-radius: 10px;
   overflow: hidden;
-  border: 0.5px solid rgba(0, 0, 0, 0.04);
+  border: 0.5px solid var(--line-faint);
 }
 
 .desc-image-viewer img {
@@ -2322,8 +2369,8 @@ async function deleteKnowledgeFile(row) {
 
 .crop-overlay {
   position: absolute;
-  border: 2px dashed #409EFF;
-  background: rgba(64, 158, 255, 0.15);
+  border: 2px dashed var(--accent);
+  background: var(--accent-soft);
   pointer-events: none;
   z-index: 2;
 }
@@ -2353,7 +2400,7 @@ async function deleteKnowledgeFile(row) {
   width: 40%;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--bg-card);
   border-radius: 12px;
   padding: 16px 18px;
   overflow-y: auto;
@@ -2395,12 +2442,12 @@ async function deleteKnowledgeFile(row) {
 .path-label {
   font-weight: 600;
   font-size: 13px;
-  color: #333;
+  color: var(--ink);
 }
 
 .path-desc-label {
   font-size: 12px;
-  color: #909399;
+  color: var(--muted);
   margin-bottom: 4px;
 }
 
@@ -2417,7 +2464,7 @@ async function deleteKnowledgeFile(row) {
 
 .step-num {
   font-size: 12px;
-  color: #909399;
+  color: var(--muted);
   flex-shrink: 0;
   width: 20px;
 }
@@ -2442,16 +2489,16 @@ async function deleteKnowledgeFile(row) {
   flex: 1;
   display: flex;
   flex-direction: column;
-  background: #f5f7fa;
+  background: var(--bg-stage);
   border-radius: 10px;
   padding: 12px;
 }
 
 .desc-doc-viewer {
   flex: 1;
-  background: #fff;
+  background: var(--bg-card);
   border-radius: 10px;
-  border: 0.5px solid rgba(0, 0, 0, 0.04);
+  border: 0.5px solid var(--line-faint);
   overflow: auto;
   padding: 16px;
 }
@@ -2461,7 +2508,7 @@ async function deleteKnowledgeFile(row) {
   font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.6;
-  color: #1d1d1f;
+  color: var(--ink);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2482,7 +2529,7 @@ async function deleteKnowledgeFile(row) {
   position: absolute;
   top: 2px;
   right: 2px;
-  background: #409EFF;
+  background: var(--accent);
   color: #fff;
   font-size: 9px;
   border-radius: 3px;
@@ -2516,39 +2563,39 @@ async function deleteKnowledgeFile(row) {
   width: 48px;
   height: 48px;
   object-fit: cover;
-  border: 2px solid rgba(0, 0, 0, 0.06);
+  border: 2px solid var(--line-soft);
   border-radius: 8px;
   cursor: pointer;
   transition: border-color 0.2s;
 }
 
 .desc-image-thumbs img.active {
-  border-color: #0071e3;
+  border-color: var(--accent);
 }
 
 .desc-image-thumbs img:hover {
-  border-color: rgba(0, 0, 0, 0.15);
+  border-color: var(--line-field-hover);
 }
 
 .desc-doc-thumb {
   padding: 6px 12px;
   border-radius: 8px;
   font-size: 12px;
-  color: #86868b;
-  background: #f5f5f7;
+  color: var(--muted);
+  background: var(--bg-sunken);
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.2s;
 }
 
 .desc-doc-thumb.active {
-  background: #0071e3;
+  background: var(--accent);
   color: #fff;
 }
 
 .desc-doc-thumb:hover:not(.active) {
-  background: #e8e8ed;
-  color: #1d1d1f;
+  background: var(--bg-active);
+  color: var(--ink);
 }
 
 /* 页码与缩放在同一行：页码贴左、缩放贴右。
@@ -2589,7 +2636,7 @@ async function deleteKnowledgeFile(row) {
 }
 
 .desc-zoom-btn:hover {
-  background: rgba(0, 0, 0, .05);
+  background: var(--bg-hover);
   color: var(--ink);
 }
 
@@ -2639,13 +2686,13 @@ async function deleteKnowledgeFile(row) {
   line-height: 1.75;
   padding: 14px 16px;
   color: var(--ink-2);
-  background: #fbfcfd;
+  background: var(--bg-sunken);
   border: 1px solid var(--line-soft);
   box-shadow: none;
 }
 
 .desc-form-panel .el-textarea :deep(.el-textarea__inner:focus) {
-  background: #fff;
+  background: var(--bg-card);
   border-color: var(--accent);
   box-shadow: none;
 }
@@ -2662,14 +2709,14 @@ async function deleteKnowledgeFile(row) {
 .progress-text {
   margin-top: 24px;
   font-size: 14px;
-  color: #303133;
+  color: var(--ink-2);
   font-weight: 500;
 }
 
 .progress-sub {
   margin-top: 8px;
   font-size: 12px;
-  color: #909399;
+  color: var(--muted);
 }
 
 .ios-spinner {
@@ -2686,7 +2733,7 @@ async function deleteKnowledgeFile(row) {
   width: 6%;
   height: 18%;
   margin-left: -3%;
-  background: #0071e3;
+  background: var(--accent);
   border-radius: 2px;
   transform-origin: 50% 350%;
   opacity: 0.05;

@@ -18,10 +18,13 @@ STAGES = {
     'snapshot': ('正在记录工作区快照', 16, 22),
     'writing': ('正在让 AI 写脚本', 22, 62),
     'check': ('正在确认目标文件已写出', 62, 68),
-    'validate': ('正在校验脚本', 68, 92),
+    'validate': ('正在校验脚本', 68, 86),
     # 修复要重写文件，进度退回去是实情：不伪装成还在前进。
     'repair': ('正在修正校验错误', 62, 78),
-    'record': ('正在登记生成记录', 92, 98),
+    # 真跑一遍是最后一个能改变结论的阶段：过了就是「跑通」，不过才进 run_repair。
+    'run': ('正在真实执行生成的用例', 86, 94),
+    'run_repair': ('正在修正运行时错误', 74, 86),
+    'record': ('正在登记生成记录', 94, 98),
     'done': ('完成', 100, 100),
 }
 
@@ -34,7 +37,7 @@ PLAN_STAGES = {
 }
 
 # 前端只展示这些字段，reply 可能上万字，不跟着进度一起传。
-RESULT_FIELDS = ('path', 'framework', 'validated', 'detected', 'degraded',
+RESULT_FIELDS = ('path', 'framework', 'validated', 'run', 'detected', 'degraded',
                  'outside', 'changed', 'generation_id')
 
 
@@ -42,6 +45,10 @@ class EmitProgress:
     def __init__(self):
         self._lock = threading.Lock()
         self._state = self._idle()
+        # 任务书单独放：start('write') 会整体重置 _state，不能让它把任务书冲掉
+        # （用户可能刷新页面后还要按旧任务书继续执行）。
+        self._plan = None
+        self._cancel = threading.Event()
 
     @staticmethod
     def _idle():
@@ -55,10 +62,45 @@ class EmitProgress:
     def _stages(self):
         return PLAN_STAGES if self._state.get('mode') == 'plan' else STAGES
 
-    def reset(self):
-        """新录制的起点：上一个会话的进度不该出现在这一条里。"""
+    def reset(self, keep_plan=False):
+        """新录制的起点：上一个会话的进度不该出现在这一条里。
+
+        keep_plan=True 用于「目标文件已存在、等用户选覆盖」这种中途重启：
+        进度要清，但任务书还得留着，用户刷新页面也要能接着执行。
+        """
         with self._lock:
             self._state = self._idle()
+            self._cancel.clear()
+            if not keep_plan:
+                self._plan = None
+
+    def remember_plan(self, result, sig, session=None):
+        """把这次的任务书存下来，供 /recording/current 恢复（刷新不丢）。"""
+        with self._lock:
+            self._plan = {
+                'result': result,
+                'sig': sig,
+                'at': time.time(),
+                'session': dict(session) if session else None,
+            }
+
+    def plan_snapshot(self):
+        with self._lock:
+            plan = self._plan
+            return {
+                'result': dict(plan['result']) if plan and plan.get('result') else None,
+                'sig': plan.get('sig') if plan else None,
+                'at': plan.get('at') if plan else None,
+                'session': dict(plan['session']) if plan and plan.get('session') else None,
+            } if plan else None
+
+    def request_cancel(self):
+        """喊停：生成线程在轮询里看这个标志，路由据此决定要不要 abort + 杀进程。"""
+        self._cancel.set()
+        return True
+
+    def cancelled(self):
+        return self._cancel.is_set()
 
     def start(self, mode='write'):
         """占住任务位。返回 False 表示已经有一个任务在跑（另一个窗口先点了，或规划还没结束）。
@@ -120,6 +162,15 @@ class EmitProgress:
             # 数组是调用方可能改的对象，复制一份免得被轮询线程之外的人动到。
             state['error'] = dict(state['error']) if state['error'] else None
             state['result'] = dict(state['result']) if state['result'] else None
+            plan = self._plan
+            # 任务书要让刷新后的页面能恢复，所以跟着进度一起下发。
+            state['plan'] = {
+                'result': dict(plan['result']) if plan.get('result') else None,
+                'sig': plan.get('sig'),
+                'at': plan.get('at'),
+                'session': dict(plan['session']) if plan.get('session') else None,
+            } if plan else None
+            state['cancelled'] = self._cancel.is_set()
         if state['started_at'] and state['status'] == 'running':
             state['elapsed'] = round(time.time() - state['started_at'], 1)
         elif state['started_at'] and state['finished_at']:

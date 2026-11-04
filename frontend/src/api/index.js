@@ -173,9 +173,6 @@ batchDeleteTestcases(ids) {
   startRecording(baseUrl, extra = {}) {
     return api.post('/automation/recording/start', { base_url: baseUrl, ...extra })
   },
-  relayoutRecordingPanel() {
-    return api.post('/automation/recording/panel/relayout')
-  },
   focusRecordingSheet(open) {
     // 任务书浮层：让后端把面板窗口铺宽 / 收回并排。调不动也不影响浮层显示。
     return api.post('/automation/recording/panel/sheet', { open: !!open })
@@ -234,6 +231,18 @@ batchDeleteTestcases(ids) {
   chooseRecordingTarget(no, desc, index) {
     return api.post(`/automation/recording/steps/${no}/chosen`, { desc, index }, { timeout: 30000 })
   },
+  // 定位详情：采用的定位 + 此刻页面上的存在性 / 唯一性。顺带在页面上把匹配框出来。
+  locateRecordingStep(no, framework) {
+    return api.post(`/automation/recording/steps/${no}/locate`, { framework }, { timeout: 30000 })
+  },
+  // 「允许降级」：这一步不再追问，生成时按最窄候选 + 录制时的序号写。
+  degradeRecordingTarget(no) {
+    return api.post(`/automation/recording/steps/${no}/degrade`, {}, { timeout: 30000 })
+  },
+  // 按下那一刻的视口截图。直接给 <img> 用，所以返回地址而不是请求。
+  recordingStepShotUrl(no, shotId) {
+    return `/api/automation/recording/steps/${no}/shot?v=${encodeURIComponent(shotId || '')}`
+  },
   parseRecordingIntent(text, model) {
     return api.post('/automation/recording/intent', { text, model }, { timeout: 180000 })
   },
@@ -242,13 +251,35 @@ batchDeleteTestcases(ids) {
     if (python) params.python = python
     return api.get('/automation/recording/detect', { params })
   },
+  // 项目画像：录制开始时后端会在后台学一份，这里只读它学到的东西。
+  getRecordingMemory(workspacePath, framework) {
+    const params = { workspace_path: workspacePath }
+    if (framework) params.framework = framework
+    return api.get('/automation/recording/memory', { params })
+  },
+  refreshRecordingMemory(data) {
+    // 学习要读 6~8 个文件，但接口只是「排进后台」就返回，所以超时不用给长。
+    return api.post('/automation/recording/memory/refresh', data, { timeout: 30000 })
+  },
+  forgetRecordingMemory(workspacePath) {
+    return api.delete('/automation/recording/memory', { params: { workspace_path: workspacePath } })
+  },
   planRecording(data) {
-    // 规划只读项目，实测一次 1~2 分钟（9 个文件、8 轮工具调用）；超时给足，
-    // 但比写入短：它不该被写入的耗时节流。
-    return api.post('/automation/recording/plan', data, { timeout: 600000 })
+    // 规划只读项目，不再限制读多少文件（最长 15 分钟）；超时要跟着放宽，
+    // 否则前端先断开、后端还在跑，用户会看到一条假的失败。
+    return api.post('/automation/recording/plan', data, { timeout: 960000 })
+  },
+  // 中止正在进行的规划 / 生成：后端会 abort 会话并杀掉 serve。
+  cancelRecordingEmit() {
+    return api.post('/automation/recording/emit/cancel', {}, { timeout: 15000 })
   },
   generateRecording(data) {
     return api.post('/automation/recording/generate', data, { timeout: 1900000 })
+  },
+  // 还原这次生成里越界改动过的文件；paths 为空表示清单里的全部。
+  revertRecordingBackup(backupId, paths, workspacePath) {
+    return api.post(`/automation/recording/backups/${encodeURIComponent(backupId)}/revert`,
+      { paths, workspace_path: workspacePath }, { timeout: 60000 })
   },
   // 回放校验要起浏览器把录制重跑一遍，10 步大概十几秒，超时给宽一点
   replayRecording(data) {

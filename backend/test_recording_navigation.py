@@ -129,6 +129,18 @@ class NavigationRecordingTest(unittest.TestCase):
         # 点击引起的跳转由脚本里的点击自然完成，不该再补一条 goto
         self.assertEqual(self._types(session), ['goto', 'click'])
 
+    def test_click_that_navigates_records_where_it_landed(self):
+        """点击引起的跳转不记 goto，但落点要写在点击那一步上（nav_to）。
+
+        没有它，生成出来就是「点完直接找下一个元素」——站点一慢，下一步就找不到元素。
+        """
+        session = self._record()
+        _in_recording_thread(session, lambda: session._test_page.get_by_role('link').click())
+        self.assertTrue(
+            _wait_for(lambda: (session.ir()[-1].get('nav_to') or '').endswith('second.html')),
+            [step.get('nav_to') for step in session.ir()])
+        self.assertEqual(self._types(session), ['goto', 'click'])
+
     def test_reload_is_not_recorded_automatically(self):
         """刷新只由工具栏按钮显式添加：用户按 F5 只改变浏览器状态，不该悄悄多一步。"""
         session = self._record()

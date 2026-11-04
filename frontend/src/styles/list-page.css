@@ -79,8 +79,8 @@
   box-shadow: 0 0 0 1px var(--line-soft) inset;
   transition: box-shadow .16s ease;
 }
-.list-filters .el-select__wrapper:hover { box-shadow: 0 0 0 1px rgba(0, 0, 0, .16) inset; }
-.list-filters .el-select__wrapper.is-focused { box-shadow: 0 0 0 1.5px rgba(0, 113, 227, .45) inset; }
+.list-filters .el-select__wrapper:hover { box-shadow: 0 0 0 1px var(--line-field-hover) inset; }
+.list-filters .el-select__wrapper.is-focused { box-shadow: 0 0 0 1.5px var(--focus-ring) inset; }
 .sel-project { width: 176px; }
 .sel-sprint { width: 156px; }
 .sel-image { width: 216px; }
@@ -98,15 +98,18 @@
 .list-shell {
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--bg-card);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-card);
   overflow: hidden;
 
   /* Element 表格自带的一堆颜色，在这里一次改掉，页面里就不用再逐个覆盖 */
+  --el-table-bg-color: var(--bg-card);
+  --el-table-tr-bg-color: var(--bg-card);
+  --el-table-expanded-cell-bg-color: var(--bg-card);
   --el-table-border-color: var(--line-faint);
-  --el-table-header-bg-color: #fff;
-  --el-table-row-hover-bg-color: #f6f8fa;
+  --el-table-header-bg-color: var(--bg-card);
+  --el-table-row-hover-bg-color: var(--bg-sunken);
   --el-table-text-color: var(--ink-2);
   --el-table-header-text-color: var(--muted);
   --el-table-fixed-box-shadow: -10px 0 14px -10px rgba(16, 24, 40, .18);
@@ -115,9 +118,11 @@
 /* .flat-table：已经有自己卡片的页面（比如首页的知识库）只想借用表格的外观，
    不需要 .list-shell 那圈边框。 */
 .flat-table {
+  --el-table-bg-color: var(--bg-card);
+  --el-table-tr-bg-color: var(--bg-card);
   --el-table-border-color: var(--line-faint);
-  --el-table-header-bg-color: #fff;
-  --el-table-row-hover-bg-color: #f6f8fa;
+  --el-table-header-bg-color: var(--bg-card);
+  --el-table-row-hover-bg-color: var(--bg-sunken);
   --el-table-text-color: var(--ink-2);
   --el-table-header-text-color: var(--muted);
 }
@@ -126,7 +131,7 @@
 :is(.list-page, .flat-table) .el-table th.el-table__cell {
   height: 40px;
   padding: 0;
-  background: #fff;
+  background: var(--bg-card);
   font-size: 11.5px;
   font-weight: 500;
   letter-spacing: .02em;
@@ -164,14 +169,14 @@
   height: 38px;
   padding: 0 16px;
   background: var(--accent-soft);
-  border-bottom: 1px solid #dce9fa;
+  border-bottom: 1px solid var(--accent-line);
   font-size: 12.5px;
-  color: #0b62c4;
+  color: var(--accent-ink);
 }
 .list-bulk-count { font-weight: 600; font-variant-numeric: tabular-nums; }
 .list-bulk-spacer { margin-left: auto; }
-.list-bulk .list-act { color: #0b62c4; }
-.list-bulk .list-act:hover { color: #004f9e; text-decoration: underline; }
+.list-bulk .list-act { color: var(--accent-ink); }
+.list-bulk .list-act:hover { color: var(--accent-hover); text-decoration: underline; }
 
 /* ---------- 行内文字操作 ---------- */
 .list-act {
@@ -225,7 +230,7 @@
 
 /* ---------- 杂项 ---------- */
 :is(.list-page, .flat-table) .el-checkbox__inner { border-radius: 3px; }
-:is(.list-page, .flat-table) .el-loading-mask { background: rgba(255, 255, 255, .68); }
+:is(.list-page, .flat-table) .el-loading-mask { background: var(--loading-mask); }
 :is(.list-page, .flat-table) .el-table__empty-text { color: var(--faint); font-size: 13px; }
 
 /* 窄屏：筛选行允许换行，列宽收一点 */

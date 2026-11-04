@@ -270,9 +270,11 @@ class EmitTest(unittest.TestCase):
         self.assertIn('tests/old-run.spec.ts', facts['previous_outputs'])
 
     def test_planner_prompt_budgets_exploration(self):
-        """规划只负责路径、风格、每步说明；找封装和猜定位交给写手，且必须有轮数预算。"""
+        """规划只负责路径、风格、每步说明；读项目不设硬上限，但要收敛。"""
         text = emit._plan_prompt(emit._plan_payload('playwright-ts', [_rf_step()], TARGET, 'Login'))
-        self.assertIn('最多读 4 个文件', text)
+        self.assertNotIn('最多读 4 个文件', text)
+        self.assertIn('不设硬上限', text)
+        self.assertIn('15 分钟', text)
         self.assertIn('previous_outputs', text)
         self.assertIn('不要写定位表达式', text)
 
@@ -299,7 +301,8 @@ class EmitTest(unittest.TestCase):
     def test_writer_prompt_forbids_using_the_plan_path(self):
         prompt = emit._prompt({'framework': 'robot-selenium', 'target_path': TARGET,
                                'steps': [], 'plan': PLAN})
-        self.assertIn('唯一允许写入的路径', prompt)
+        self.assertIn('主文件必须是 target_path', prompt)
+        self.assertIn('不要拿它当主文件', prompt)
         self.assertIn('plan.target_path', prompt)
 
     def test_plan_json_survives_code_fence_and_chatter(self):

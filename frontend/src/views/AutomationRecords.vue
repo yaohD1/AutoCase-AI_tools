@@ -253,13 +253,13 @@ function formatTime(value) {
 }
 .run-chip i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .run-chip.is-ok { background: var(--ok-soft); color: var(--ok); }
-.run-chip.is-run { background: var(--accent-soft); color: #0b62c4; }
+.run-chip.is-run { background: var(--accent-soft); color: var(--accent-ink); }
 .run-chip.is-run i { animation: chip-pulse 1.8s ease-in-out infinite; }
-.run-chip.is-danger { background: #fdeeed; color: #c9342b; }
-.run-chip.is-mute { background: #f4f6f9; color: var(--muted); }
+.run-chip.is-danger { background: var(--danger-soft); color: var(--danger); }
+.run-chip.is-mute { background: var(--chip-bg); color: var(--muted); }
 @keyframes chip-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(11, 98, 196, .35); }
-  50% { box-shadow: 0 0 0 3px rgba(11, 98, 196, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 var(--focus-ring); }
+  50% { box-shadow: 0 0 0 3px transparent; }
 }
 
 .cell-quiet { color: var(--muted); font-size: 12.5px; }
@@ -269,5 +269,5 @@ function formatTime(value) {
 
 /* 行可以点开详情，给一点可点的暗示 */
 :deep(.el-table__row) { cursor: pointer; }
-.list-act:disabled { color: #c6ccd5; cursor: default; }
+.list-act:disabled { color: var(--faint); cursor: default; }
 </style>

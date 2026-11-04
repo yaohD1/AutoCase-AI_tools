@@ -291,7 +291,7 @@ function errorText(error) {
   min-height: 0;
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
-  background: #fff;
+  background: var(--bg-card);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-card);
   overflow: hidden;
@@ -330,7 +330,7 @@ function errorText(error) {
   padding: 6px 6px 8px;
 }
 .rec-list-scroll::-webkit-scrollbar { width: 8px; }
-.rec-list-scroll::-webkit-scrollbar-thumb { background: #e6e9ef; border-radius: 4px; }
+.rec-list-scroll::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
 
 .rec-item {
   display: grid;
@@ -346,8 +346,8 @@ function errorText(error) {
   cursor: pointer;
   transition: background .14s ease, border-color .14s ease;
 }
-.rec-item:hover { background: #fafbfc; }
-.rec-item.is-active { background: #f5f8fd; border-left-color: var(--accent); }
+.rec-item:hover { background: var(--bg-hover); }
+.rec-item.is-active { background: var(--accent-soft); border-left-color: var(--accent); }
 
 .rec-name {
   min-width: 0;
@@ -420,7 +420,7 @@ function errorText(error) {
   align-items: center;
   gap: 12px;
 }
-.rec-detail-actions .list-act:disabled { color: #cdd3db; cursor: default; }
+.rec-detail-actions .list-act:disabled { color: var(--faint); cursor: default; }
 
 .rec-meta {
   flex: none;
@@ -433,7 +433,7 @@ function errorText(error) {
   overflow: hidden;
   white-space: nowrap;
 }
-.rec-sep { color: #d8dde5; }
+.rec-sep { color: var(--line-ctl); }
 
 .rec-scroll {
   flex: 1;
@@ -444,7 +444,7 @@ function errorText(error) {
   padding-right: 6px;
 }
 .rec-scroll::-webkit-scrollbar { width: 8px; }
-.rec-scroll::-webkit-scrollbar-thumb { background: #e6e9ef; border-radius: 4px; }
+.rec-scroll::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
 
 /* 提示条：一块淡底 + 一条细边，不用 el-alert 那个带图标的灰盒子 */
 .rec-note {
@@ -454,8 +454,8 @@ function errorText(error) {
   font-size: 12px;
   line-height: 1.55;
 }
-.rec-note.is-warn { background: var(--warn-soft); border: 1px solid #f2e3c9; color: var(--warn); }
-.rec-note.is-ok { background: var(--ok-soft); border: 1px solid #d9ecdf; color: var(--ok); }
+.rec-note.is-warn { background: var(--warn-soft); border: 1px solid var(--warn-line); color: var(--warn); }
+.rec-note.is-ok { background: var(--ok-soft); border: 1px solid var(--ok-line); color: var(--ok); }
 
 .rec-block { margin-bottom: 14px; }
 .rec-label {
@@ -500,15 +500,15 @@ function errorText(error) {
   overflow: auto;
   padding: 12px 14px;
   border-radius: 10px;
-  background: #0f172a;
-  color: #dde5f0;
+  background: var(--bg-code);
+  color: var(--bg-code-ink);
   font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.65;
   white-space: pre;
 }
 .rec-code.is-empty {
-  background: #fafbfc;
+  background: var(--bg-hover);
   border: 1px solid var(--line-faint);
   color: var(--faint);
   white-space: pre-wrap;
@@ -517,7 +517,7 @@ function errorText(error) {
 .rec-reply {
   padding: 9px 11px;
   border-radius: 8px;
-  background: #f7f8fa;
+  background: var(--bg-sunken);
   font-size: 12.5px;
   line-height: 1.65;
   color: var(--ink-2);
@@ -542,7 +542,7 @@ function errorText(error) {
   gap: 12px;
 }
 .rec-commit-row :deep(.form-input) { flex: 1; }
-.rec-commit-row :deep(.el-input__wrapper) { border-bottom-color: rgba(0, 0, 0, .09); }
+.rec-commit-row :deep(.el-input__wrapper) { border-bottom-color: var(--line-field); }
 
 .rec-detail-empty {
   display: flex;

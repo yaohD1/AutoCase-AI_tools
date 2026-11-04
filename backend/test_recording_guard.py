@@ -1,6 +1,6 @@
-"""guard：范围检查（git 优先、指纹回退）与 emitter 写权限配置。
+"""guard：范围检查（git 优先、指纹回退）、越界快照 / 手动还原，以及 emitter 写权限配置。
 
-重点：产物目录不进集合、越界只报告不回滚、git 模式下能认出新文件/删除/已被跟踪文件的改动。
+重点：产物目录不进集合、越界不自动还原但能按需还原、git 模式下能认出新文件/删除/已被跟踪文件的改动。
 """
 import json
 import shutil
@@ -148,13 +148,14 @@ class EmitConfigTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def test_without_writable_uses_the_original_config(self):
-        path, drop = self.runner._emit_config(None, self.dir)
+    def test_file_scope_without_writable_uses_the_original_config(self):
+        path, drop = self.runner._emit_config(None, self.dir, scope='file')
         self.assertEqual(path, self.config)
         drop()
 
-    def test_permission_allows_only_the_target(self):
-        path, drop = self.runner._emit_config('autocase/tests/login.spec.ts', self.dir)
+    def test_file_scope_allows_only_the_target(self):
+        path, drop = self.runner._emit_config('autocase/tests/login.spec.ts', self.dir,
+                                              scope='file')
         try:
             self.assertEqual(path.parent, self.dir, '临时配置必须和原配置同目录，否则 {file:} 提示词会失效')
             data = json.loads(path.read_text(encoding='utf-8'))
@@ -174,8 +175,26 @@ class EmitConfigTest(unittest.TestCase):
             drop()
         self.assertFalse(path.exists(), '临时配置用完必须删掉')
 
+    def test_workspace_scope_allows_helpers_but_still_blocks_git(self):
+        """默认范围：可写整个工作区（脚本常要顺带写 helper），但 .git 这类必须挡。"""
+        path, drop = self.runner._emit_config(None, self.dir)
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            permission = data['agent']['recording-emitter']['permission']
+            for key in ('edit', 'write'):
+                self.assertEqual(permission[key]['*'], 'allow')
+                for denied in ('.git', '.git/**', '.opencode/**', 'node_modules/**'):
+                    self.assertEqual(permission[key][denied], 'deny',
+                                     '%s 必须 deny：写 git hook 等于能执行任意命令' % denied)
+            # 命令执行仍然关着：文件改动能还原，命令造成的破坏不能。
+            self.assertEqual(permission['bash'], {'*': 'deny'})
+            self.assertEqual(permission['task'], 'deny')
+        finally:
+            drop()
+
     def test_backslash_target_is_normalised(self):
-        path, drop = self.runner._emit_config('autocase\\tests\\login.spec.ts', self.dir)
+        path, drop = self.runner._emit_config('autocase\\tests\\login.spec.ts', self.dir,
+                                              scope='file')
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
             rules = data['agent']['recording-emitter']['permission']['edit']
@@ -190,6 +209,102 @@ class EmitConfigTest(unittest.TestCase):
         self.config.write_text('{"agent": {}}', encoding='utf-8')
         with self.assertRaises(RuntimeError):
             self.runner._emit_config('a.ts', self.dir)
+
+    def test_missing_emitter_agent_is_an_error(self):
+        self.config.write_text('{"agent": {}}', encoding='utf-8')
+        with self.assertRaises(RuntimeError):
+            self.runner._emit_config('a.ts', self.dir)
+
+
+class BackupTest(unittest.TestCase):
+    """越界快照与手动还原：capture 记下生成前的内容，revert 按需写回。"""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix='guard-backup-'))
+        _init_repo(self.root)
+        (self.root / 'src').mkdir()
+        (self.root / 'src' / 'keep.ts').write_text('original keep\n', encoding='utf-8')
+        (self.root / 'src' / 'gone.ts').write_text('original gone\n', encoding='utf-8')
+        _git(self.root, 'add', '-A', check=True)
+        _git(self.root, 'commit', '-m', 'seed', check=True)
+        self.snap = guard.snapshot(self.root)
+        # 模拟一次生成：改一个、删一个、新增一个
+        (self.root / 'src' / 'keep.ts').write_text('model version\n', encoding='utf-8')
+        (self.root / 'src' / 'gone.ts').unlink()
+        (self.root / 'tests').mkdir()
+        (self.root / 'tests' / 'helper.ts').write_text('export const x = 1;\n', encoding='utf-8')
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def capture(self):
+        changed = guard.changed(self.snap)
+        outside = guard.violations(changed, 'tests/a.spec.ts')
+        return guard.capture(self.snap, outside)
+
+    def test_capture_classifies_modified_deleted_and_new(self):
+        token, entries = self.capture()
+        self.assertTrue(token)
+        by_path = {e['path']: e['action'] for e in entries}
+        self.assertEqual(by_path['src/keep.ts'], 'restore')
+        self.assertEqual(by_path['src/gone.ts'], 'restore')
+        self.assertEqual(by_path['tests/helper.ts'], 'delete')
+
+    def test_revert_restores_content_and_deletes_new_files(self):
+        token, _ = self.capture()
+        result = guard.revert(self.root, token)
+        self.assertEqual(sorted(row['path'] for row in result['reverted']),
+                         ['src/gone.ts', 'src/keep.ts', 'tests/helper.ts'])
+        self.assertEqual((self.root / 'src' / 'keep.ts').read_text(encoding='utf-8'),
+                         'original keep\n')
+        self.assertEqual((self.root / 'src' / 'gone.ts').read_text(encoding='utf-8'),
+                         'original gone\n')
+        self.assertFalse((self.root / 'tests' / 'helper.ts').exists())
+
+    def test_revert_keeps_a_copy_of_what_the_model_wrote(self):
+        """还原本身也要可逆：模型写的版本留在 current/ 下，误点了能捞回来。"""
+        token, _ = self.capture()
+        guard.revert(self.root, token, ['src/keep.ts'])
+        current = self.root / guard.BACKUP_DIR / token / 'current' / 'src' / 'keep.ts'
+        self.assertEqual(current.read_text(encoding='utf-8'), 'model version\n')
+
+    def test_revert_can_be_limited_to_one_file(self):
+        token, _ = self.capture()
+        result = guard.revert(self.root, token, ['tests/helper.ts'])
+        self.assertEqual([row['path'] for row in result['reverted']], ['tests/helper.ts'])
+        self.assertFalse((self.root / 'tests' / 'helper.ts').exists())
+        # 没点的那两个保持模型写的样子
+        self.assertEqual((self.root / 'src' / 'keep.ts').read_text(encoding='utf-8'),
+                         'model version\n')
+
+    def test_path_traversal_is_ignored(self):
+        token, _ = self.capture()
+        result = guard.revert(self.root, token, ['../outside.txt', '/etc/passwd', 'a/../b'])
+        self.assertEqual(result['reverted'], [])
+        self.assertEqual((self.root / 'src' / 'keep.ts').read_text(encoding='utf-8'),
+                         'model version\n')
+
+    def test_unknown_backup_id_is_an_error(self):
+        with self.assertRaises(guard.GuardError):
+            guard.revert(self.root, 'no-such-id')
+
+    def test_unsafe_backup_id_is_rejected(self):
+        self.assertIsNone(guard.read_manifest(self.root, '../etc'))
+
+    def test_fingerprint_mode_cannot_restore_content(self):
+        """不是 git 仓库时只有指纹，capture 必须如实标 skip，不能假装能还原。"""
+        plain = Path(tempfile.mkdtemp(prefix='guard-plain-'))
+        try:
+            (plain / 'a.ts').write_text('a', encoding='utf-8')
+            snap = guard.snapshot(plain)
+            self.assertEqual(snap.mode, 'files')
+            (plain / 'a.ts').write_text('b', encoding='utf-8')
+            token, entries = guard.capture(snap, ['a.ts'])
+            self.assertTrue(token)
+            self.assertEqual(entries[0]['action'], 'skip')
+            self.assertIsNotNone(guard.read_manifest(plain, token))
+        finally:
+            shutil.rmtree(plain, ignore_errors=True)
 
 
 if __name__ == '__main__':

@@ -722,14 +722,14 @@ async function confirmDeleteSprint(sprint) {
 
 .set-nav-item:hover {
   color: var(--ink);
-  background: rgba(0, 0, 0, .03);
+  background: var(--bg-hover);
 }
 
 /* 选中只加深字重和一点点底，不铺蓝：这一栏是导航不是按钮 */
 .set-nav-item.is-active {
   color: var(--ink);
   font-weight: 500;
-  background: rgba(0, 0, 0, .045);
+  background: var(--bg-active);
 }
 
 .set-nav-count {
@@ -773,7 +773,7 @@ async function confirmDeleteSprint(sprint) {
 
 /* ---------- 表格 ---------- */
 .set-table {
-  background: #fff;
+  background: var(--bg-card);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-card);
   overflow: hidden;
@@ -783,11 +783,11 @@ async function confirmDeleteSprint(sprint) {
    灰底会让迭代列表看起来像另一张表；内边距由 .sprint-list 自己控制才能对齐列 */
 .set-table :deep(.el-table__expanded-cell) {
   padding: 0;
-  background: #fff;
+  background: var(--bg-card);
 }
 
 .set-table :deep(.el-table__expanded-cell:hover) {
-  background: #fff;
+  background: var(--bg-card);
 }
 
 .cell-stack {
@@ -873,7 +873,7 @@ async function confirmDeleteSprint(sprint) {
 }
 
 .cap.is-on::before {
-  background: #2ba471;
+  background: var(--ok);
 }
 
 .cap.is-off {
@@ -904,7 +904,7 @@ async function confirmDeleteSprint(sprint) {
 }
 
 .row-act.is-danger:hover {
-  color: #ff3b30;
+  color: var(--danger);
 }
 
 .table-empty {
@@ -1052,11 +1052,11 @@ async function confirmDeleteSprint(sprint) {
 }
 
 .test-dot.is-ok {
-  color: #1a7f37;
+  color: var(--ok);
 }
 
 .test-dot.is-bad {
-  color: #d93026;
+  color: var(--danger);
 }
 
 /* ---------- 窄屏 ---------- */

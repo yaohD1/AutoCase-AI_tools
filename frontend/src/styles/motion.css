@@ -1,0 +1,135 @@
+/* ==================== 动效 ====================
+   全站只做两件事：首页首帧的阶梯入场、路由切换的淡入。
+   三条约束写死在这里，后面的页面照抄即可：
+     1. 位移不超过 16px、单段时长不超过 700ms —— 再长就从「落位」变成「表演」。
+        位移超过 20px 观感会变成「整页在滑入」，那已经是换场，不是入场。
+     2. 只写 enter，不写 leave。离开动画一存在，旧页面还没走完、
+        新页面已经压上来，keep-alive 的缓存切换会跟着抖。
+     3. 一律关在 prefers-reduced-motion: no-preference 里 ——
+        系统里开了「减少动态效果」的人不该看到任何位移动画。 */
+
+/* 首页入场：先演页头，再画线，最后落块。
+   页头必须从 0ms 起手 —— 让它等着线画完再出现的话，前 0.3 秒页面是空的，
+   只有一条线悬在那儿，看起来像渲染坏了。正确的读法是：
+   标题先落地 → 它下面那条线从左压出来 → tab / 工具条 / 卡片跟着排上去。
+
+   冷启动有品牌启动幕时不走这一套，改用下面的 .is-boot-in（原因写在那里）。 */
+@media (prefers-reduced-motion: no-preference) {
+  /* tab 行下那条 1px 线（.mode-tabs::after，见 Upload.vue）。
+     选择器必须是 ::after：挂到 .enter-rule（就是 nav 本身）上会把整行横向压扁。 */
+  .upload-page.is-enter .enter-rule::after {
+    animation: rule-draw .34s cubic-bezier(.2, .8, .3, 1) both;
+    animation-delay: 240ms;
+  }
+
+  /* 四个块各错开 80ms，延迟直接写在元素上（--d），不靠序号算 ——
+     页头 0、工具条 480、卡片 560，tab 文字 400 在下面单独给。
+     类只在本会话第一次打开首页时加（见 Upload.vue 的 playEntry）。 */
+  .upload-page.is-enter .enter-item {
+    animation: enter-rise .62s cubic-bezier(.16, 1, .3, 1) both;
+    animation-delay: var(--d, 0ms);
+  }
+
+  /* tab 文字单独动：容器不能整体淡入，否则连那条线一起淡，
+     线就抽不出来了（伪元素跟着父级 opacity 走）。 */
+  .upload-page.is-enter .mode-tab,
+  .upload-page.is-enter .mode-jump {
+    animation: enter-rise .62s cubic-bezier(.16, 1, .3, 1) both;
+    animation-delay: 400ms;
+  }
+}
+
+/* 冷启动 + 品牌启动幕：首页不做阶梯入场，整页淡入。
+   原因不是「重复」，是方向对不上 —— 幕布 translateY(-100%) 是自下而上让开的，
+   而阶梯是自上而下落的：下半屏会先露出来，可那里的卡片还在 delay 里（opacity:0），
+   揭开过程中会有 100~200ms 看到一块空页面，像少渲染了一段。
+   改成一整块淡入就没有这个缝：任何时刻露出来的部分都在同一个透明度上。
+   --boot-off 是「幕布还要等多久才起手」，由 Upload.vue 写在根节点上；
+   走延迟而不是揭幕后再加类，否则元素会先以 opacity:1 亮一帧。 */
+@media (prefers-reduced-motion: no-preference) {
+  .upload-page.is-boot-in {
+    animation: page-fade-in .38s ease-out var(--boot-off, 0ms) both;
+  }
+}
+
+@keyframes page-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes enter-rise {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes rule-draw {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* 路由切换：新页面淡入并轻抬 4px，240ms。也是「从别的页回到首页」时的全部动效 ——
+   keep-alive 重新激活组件同样走 enter，不需要首页自己再写一套轻版。
+   240ms 是「看得出它来了、但不觉得在等」的位置。 */
+@media (prefers-reduced-motion: no-preference) {
+  .page-enter-active {
+    transition: opacity .24s ease-out, transform .24s cubic-bezier(.2, .7, .3, 1);
+  }
+
+  .page-enter-from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* 跳转时内容区顶端扫过一条 1px 蓝线：不是进度条，只是「换页了」的记号。
+   元素按导航计数换 key 重建（App.vue 的 navTick），动画自然重播，
+   不需要 JS 计时器，也不需要在动画结束后手动收拾。 */
+.nav-line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--accent);
+  transform-origin: left center;
+  pointer-events: none;
+  z-index: 20;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .nav-line {
+    animation: nav-sweep .52s cubic-bezier(.2, .7, .3, 1) both;
+  }
+}
+
+/* 没有动画时必须藏掉：否则会留下一根永远亮着的蓝线，比不做还糟 */
+@media (prefers-reduced-motion: reduce) {
+  .nav-line {
+    display: none;
+  }
+}
+
+@keyframes nav-sweep {
+  0% {
+    transform: scaleX(0);
+    opacity: 1;
+  }
+  60% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+}

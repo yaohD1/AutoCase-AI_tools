@@ -41,7 +41,7 @@
 /* 字段之间一条线；最后一个不画，否则会和卡片/弹窗的底边叠成双线 */
 .form-field {
   padding: 13px 0 7px;
-  border-bottom: 1px solid rgba(0, 0, 0, .09);
+  border-bottom: 1px solid var(--line-field);
 }
 
 .form-field:last-child {
@@ -55,7 +55,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   column-gap: 22px;
-  border-bottom: 1px solid rgba(0, 0, 0, .09);
+  border-bottom: 1px solid var(--line-field);
 }
 
 .form-pair > .form-field {
@@ -86,7 +86,7 @@
   background: none;
   padding: 0;
   font-size: 11.5px;
-  color: #a8b1be;
+  color: var(--faint);
   cursor: pointer;
   transition: color .14s ease;
 }
@@ -113,7 +113,7 @@
 }
 
 .el-select.form-ctl .el-select__wrapper:hover {
-  border-bottom-color: rgba(0, 0, 0, .16);
+  border-bottom-color: var(--line-field-hover);
 }
 
 /* 聚焦不用蓝线：选完一个值后焦点还留在 select 上，
@@ -137,7 +137,7 @@
 }
 
 .form-ctl .el-select__caret {
-  color: #b6bcc5;
+  color: var(--faint);
   font-size: 12px;
 }
 
@@ -153,7 +153,7 @@
 }
 
 .el-input.form-input .el-input__wrapper:hover {
-  border-bottom-color: rgba(0, 0, 0, .16);
+  border-bottom-color: var(--line-field-hover);
 }
 
 .el-input.form-input .el-input__wrapper.is-focus {
@@ -172,7 +172,7 @@
 
 /* 密码框自带的「眼睛」颜色太深，会抢走字段值 */
 .form-input .el-input__password {
-  color: #b6bcc5;
+  color: var(--faint);
 }
 
 /* 前缀/后缀单位（如 "s"、"Token"）比正文淡一档 */
@@ -198,7 +198,7 @@
 }
 
 .form-textarea .el-textarea__inner:hover {
-  border-bottom-color: rgba(0, 0, 0, .16);
+  border-bottom-color: var(--line-field-hover);
 }
 
 .form-textarea .el-textarea__inner:focus {
@@ -216,7 +216,7 @@
   align-items: center;
   gap: 8px;
   padding: 12px 0 11px;
-  border-bottom: 1px solid rgba(0, 0, 0, .09);
+  border-bottom: 1px solid var(--line-field);
 }
 
 .form-toggle:last-child {
@@ -258,7 +258,7 @@
 }
 
 .el-input-number.form-num .el-input__wrapper:hover {
-  border-bottom-color: rgba(0, 0, 0, .16);
+  border-bottom-color: var(--line-field-hover);
 }
 
 .el-input-number.form-num .el-input__wrapper.is-focus {
@@ -279,7 +279,7 @@
   width: 18px;
   border: 0;
   background: transparent;
-  color: #aab3c0;
+  color: var(--faint);
   font-size: 11px;
 }
 
@@ -313,14 +313,14 @@
    弹窗里字段少，最后一个字段也要有线，否则单字段弹窗的输入框
    看起来就是一行悬空的字。 */
 .el-dialog .form-field:last-child {
-  border-bottom: 1px solid rgba(0, 0, 0, .09);
+  border-bottom: 1px solid var(--line-field);
   padding-bottom: 8px;
 }
 
 /* 弹窗里最后一个「开关行」和字段一样要有一道线，
    否则它会悬在 footer 上方，看起来像没结束 */
 .el-dialog .form-toggle:last-child {
-  border-bottom: 1px solid rgba(0, 0, 0, .09);
+  border-bottom: 1px solid var(--line-field);
 }
 
 .el-dialog .form-block {

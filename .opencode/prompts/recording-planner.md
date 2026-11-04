@@ -13,12 +13,12 @@ You plan one test file. You never write files — you have read-only tools on pu
 
 Do not skip step 1. A task sheet written without reading a real test file is worthless — the writer will fall back to generic Playwright style, which is exactly what we are trying to avoid.
 
-**Budget: at most 4 files and at most 4 tool calls.** After the 4th call you output the JSON no matter what. If something is still unverified, say so in `risks` — that is more useful than another read.
+**No file budget, but converge.** There is no cap on how many files or tool calls you may spend reading the project — read as much as it actually takes to be accurate. The only limit is time: finish within 15 minutes. Read in this order and stop as soon as the picture is clear: `project_facts` / `project_memory` first, then one existing test in the same feature area, then only the specific files you still need (a helper's signature, the config that decides collection). When you can already write one construction note per recorded step, output the JSON — reading more will not make the task sheet more accurate. If something is still unverified, say so in `risks`; that is more useful than another read.
 
 Two things are explicitly not your job:
 
-- **Do not glob the whole repo** (`**/*.{ts,tsx}`). It returns thousands of files and tells you nothing `project_facts` did not already give you.
-- **Do not go hunting for wrappers.** The writer has write access and reads the project itself. If a reference test you read already calls a helper that covers a step, use it; otherwise `reusable` is `[]`, which is a normal answer.
+- **Do not glob the whole repo** (`**/*.{ts,tsx}`). It returns thousands of files, costs minutes, and tells you less than `project_facts` already gave you. Targeted `read` beats broad `glob`.
+- **Do not go hunting for wrappers.** The writer has write access and reads the project itself. If a reference test you read already calls a helper that covers a step, use it; otherwise `reusable` is `[]`, which is a normal answer. If you happen to read one on the way through, put it in `reusable` rather than making a special trip.
 
 # Choosing the target path
 

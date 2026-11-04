@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 RF_FRAMEWORK = 'robot-selenium'
 PW_FRAMEWORK = 'playwright-ts'
 MAX_REPAIR_ROUNDS = 1
+# 运行时失败和类型错误不是一回事：类型错误看一眼就能改，跑不过往往要试两下。
+# 但也只给两轮 —— 每轮是一次完整模型调用加一次真实执行，再多就不如让人接手。
+MAX_RUN_REPAIR_ROUNDS = 2
 MAX_CANDIDATES_IN_PROMPT = 5
 # 任务书会原样进写手提示词、也会经前端回传，体积必须有上限，
 # 否则模型偶尔吐一份巨型 JSON 就能把一次生成撑爆。
@@ -32,8 +35,6 @@ MAX_PLAN_FEEDBACK = 20
 FACT_TEST_SCAN = 8
 LOCATOR_RULES = (
     '要求：\n'
-    '- 只写 target_path 指定的那一个文件。运行环境只给它开了写权限，'
-    '写其他任何文件都会被拒绝，并导致本次生成失败；不要尝试创建辅助文件、临时文件或改配置。\n'
     '- 定位优先用 target.locator；不要自己编造选择器，需要更精确时只能从 target.candidates 里挑或组合。\n'
     '- target.locator 里出现 [class*="..."] / [class~="..."]（或 xpath 里的 contains(@class, ...)）'
     '是录制有意选的：那是 CSS Modules / BEM 类名去掉构建哈希后的名字部分，同一份代码重新打包也不变，'
@@ -104,6 +105,14 @@ FRAMEWORK_RULES = {
         '（interval 为 5s 就写 3s）。内层超时若大于等于 interval，单次判断就吃满整个节奏，轮询会退化成慢速串行。\n'
         '    条件不是可见性时（文字包含、地址包含等），Reload And Check 里换成对应的 Should 断言即可。\n'
         '    不要用 Sleep 拼循环，也不要用 FOR 手写重试。\n'
+        '- 等页面加载（intent.type 为 page_ready）：Selenium 没有等价 API，用 Wait For Condition 判 readyState。\n'
+        '  intent.state 为 load → Wait For Condition    return document.readyState === "complete"    ${intent.timeout}s\n'
+        '  intent.state 为 domcontentloaded → Wait For Condition    return document.readyState !== "loading"    ${intent.timeout}s\n'
+        '  intent.state 为 networkidle → Selenium 侧没有对应物，按 load 那一档写，并加一行注释说明「后台请求可能未停」。\n'
+        '- 如果某一步带 nav_to（录制时这一下点击确实跳转了），点击之后先等地址落地再继续，'
+        '否则站点慢的时候下一步会直接找不到元素：\n'
+        '  Wait Until Location Contains    <nav_to 的路径片段>    15s\n'
+        '  只取路径，不要把带查询串的整条 URL 写死（参数一变就失配），也不要用 Sleep。\n'
         '- target.locator 已带 xpath= 前缀，原样使用，不要再包 css= 或再拼前缀。\n'
     ),
     'playwright-ts': (
@@ -114,6 +123,14 @@ FRAMEWORK_RULES = {
         '- 新标签页用 context.waitForEvent("page")；frame 内用 page.frameLocator(目标 frame 的 url)。\n'
         '- 刷新页面（type 为 reload）用 page.reload()，不要写成 page.goto(page.url())：'
         '后者在 SPA 里可能根本不重载。\n'
+        '- 等页面加载（intent.type 为 page_ready）：await page.waitForLoadState("${intent.state}", '
+        '{ timeout: <intent.timeout 换算成毫秒> })。state 原样用 intent.state'
+        '（load / domcontentloaded / networkidle），不要换成 waitForTimeout，也不要自己加 waitForURL；'
+        '它没有目标元素，不要套用上面 expect(locator) 那套映射。\n'
+        '- 如果某一步带 nav_to（录制时这一下点击确实跳转了），点击之后必须等跳转落地再进下一步，'
+        '否则站点慢的时候下一步会直接找不到元素：\n'
+        '  await page.waitForURL("**" + <nav_to 的路径部分>, { timeout: 15000 });\n'
+        '  只取路径，不要把带查询串的整条 URL 写死（参数一变就失配），也不要用 waitForTimeout。\n'
         '- 按键（type 为 press）用 await ${loc}.press("${step.value}")，键名原样用 step.value，不要翻译。\n'
         '- 弹窗（type 为 dialog）：Playwright 必须在弹窗出现**之前**注册处理方式，等走到 dialog 这一步再注册'
         '已经晚了（页面在弹窗出现那一刻就挂起了）。所以把下面这行写在**上一步之前**：\n'
@@ -222,6 +239,10 @@ def _steps_for_prompt(steps, framework):
             item['label'] = step['label']
         if step.get('url'):
             item['url'] = step['url']
+        # 点击引起的跳转不单独记 goto，但要告诉写手「这一下真的跳走了」，
+        # 否则写出来是「点完直接找下一个元素」，站点一慢就扑空。
+        if step.get('nav_to'):
+            item['nav_to'] = step['nav_to']
         if step.get('intent'):
             item['intent'] = step['intent']
         if step.get('dialog'):
@@ -295,11 +316,12 @@ def _fit_nth(locator, index, framework):
     return inline_nth(locator, index)
 
 
-def _locator_info(target, framework):
-    """选定位：有唯一的就用唯一的；没有就降级到「命中最少」的那条 + 录制时的序号。
+def _pick_locator(target, framework):
+    """挑出「生成时到底用哪条候选、第几个」。
 
-    返回 {'locator', 'matches', 'nth', 'mode'}，RF 下序号可能已经内联进 locator
-    （此时带 nth_applied）。连一条能命中的候选都没有时返回 None。
+    返回 (candidate, index, mode)，一条能命中的都没有时 (None, None, None)。
+    单独抽出来的理由很实际：界面上的「定位详情」要回答的是同一个问题，
+    两边各写一份判断迟早会「弹窗说 A、生成写 B」。
     """
     counted = target.get('candidates') or []
     # 用户看过框、亲手挑过的，优先于任何自动选择：他选的是这条候选的第 index 个，
@@ -309,15 +331,10 @@ def _locator_info(target, framework):
         allowed = {c['kind'] for c in pool_for(framework, counted)}
         hit = next((c for c in counted if c['desc'] == picked.get('desc')), None)
         if hit is not None and hit['kind'] in allowed and (hit.get('count') or 0) > 1:
-            index = picked.get('index')
-            locator, applied = _fit_nth(_fmt(hit, framework), index, framework)
-            info = {'locator': locator, 'matches': hit['count'], 'nth': index, 'mode': 'chosen'}
-            if applied:
-                info['nth_applied'] = True
-            return info
+            return hit, picked.get('index'), 'chosen'
     chosen = pick_for(framework, counted)
     if chosen is not None:
-        return {'locator': _fmt(chosen, framework), 'matches': chosen['count'], 'nth': None, 'mode': 'unique'}
+        return chosen, None, 'unique'
     best = best_effort(framework, counted)
     if best is None:
         # 录制那一刻页面就跳走了，元素一条都数不到。这类步骤的定位本来就是按快照推的，
@@ -325,18 +342,34 @@ def _locator_info(target, framework):
         if target.get('unverified'):
             pool = pool_for(framework, counted)
             if pool:
-                return {'locator': _fmt(pool[0], framework), 'matches': 0, 'nth': None, 'mode': 'stale'}
+                return pool[0], None, 'stale'
+        return None, None, None
+    return best, best.get('index'), 'ambiguous'
+
+
+def _locator_info(target, framework):
+    """选定位：有唯一的就用唯一的；没有就降级到「命中最少」的那条 + 录制时的序号。
+
+    返回 {'locator', 'matches', 'nth', 'mode'}，RF 下序号可能已经内联进 locator
+    （此时带 nth_applied）。连一条能命中的候选都没有时返回 None。
+    kind / desc / spec 是给界面「定位详情」用的：它得知道这条长什么样、能不能拿去查页面。
+    """
+    candidate, index, mode = _pick_locator(target, framework)
+    if candidate is None:
         return None
-    index = best.get('index')
-    locator, applied = _fit_nth(_fmt(best, framework), index, framework)
     info = {
-        'locator': locator,
-        'matches': best['count'],
+        'locator': _fmt(candidate, framework),
+        'matches': candidate.get('count') or 0,
         'nth': index,
-        'mode': 'ambiguous',
+        'mode': mode,
+        'kind': candidate.get('kind'),
+        'desc': candidate.get('desc'),
+        'spec': candidate.get('spec'),
     }
-    if applied:
-        info['nth_applied'] = True
+    if mode in ('chosen', 'ambiguous'):
+        info['locator'], applied = _fit_nth(info['locator'], index, framework)
+        if applied:
+            info['nth_applied'] = True
     return info
 
 
@@ -388,8 +421,10 @@ PLAN_RULES = (
     '它们不是项目惯例。遇到时不要覆盖旧版本，另起一个新文件名（在原名后加动作后缀），'
     '并在 risks 里写一句「已存在旧版本 xxx，本次写新文件」。'
     '只有 payload.target_path 明确指向旧版本时才覆盖。\n'
-    '- 时间预算很紧：最多读 4 个文件、最多 4 轮工具调用。读完 1 个同业务域用例就够动笔，'
-    '第 4 轮之后必须直接输出 JSON，不要再做任何确认。\n'
+    '- 读项目不设文件数、也不设工具调用轮数的硬上限，但要收敛：先看 project_facts / '
+    'project_memory，再读一个同业务域的用例，之后只在需要确认封装签名、目录约定或配置时才有针对性地再读。'
+    '不要重复读同一类文件，也不要 glob 整个仓库。能写出每一步的施工说明时立刻输出 JSON'
+    '——再读下去不会更准。全程控制在 15 分钟以内。\n'
     '- 写入路径：payload.target_path 非空表示用户已经指定，必须原样返回；'
     '为空表示由你按项目约定选一个，直接写进 target_path，并在 target_path_reason 里给一句依据'
     '（例如「playwright.config.ts 的 testDir 是 ./tests，参考 tests/login-page/login-success.spec.ts」）。'
@@ -479,7 +514,7 @@ def _project_facts(workspace, framework):
 
 
 def _plan_payload(framework, steps, target_path, title, feedback=None, previous_plan=None,
-                  workspace=None):
+                  workspace=None, memory=None, context_reused=False):
     payload = {
         'framework': framework,
         # 空字符串 = 用户没指定，由规划按项目约定选一个。
@@ -488,10 +523,17 @@ def _plan_payload(framework, steps, target_path, title, feedback=None, previous_
         'steps': [_plan_step(step) for step in steps],
         'output_language': 'Simplified Chinese',
     }
+    if context_reused:
+        # 同一会话的第二轮：项目已经读过了，别让模型以为还要再读一遍。
+        payload['context_reused'] = True
     if workspace:
         facts = _project_facts(workspace, framework)
         if facts:
             payload['project_facts'] = facts
+    # 项目画像长期存在库里，project_facts 是这次现算的——两者都在时以画像为准，
+    # 它看过真实用例，而 facts 只有路径。
+    if memory:
+        payload['project_memory'] = memory
     notes = _clean_feedback(feedback)
     if notes:
         payload['feedback'] = notes
@@ -501,18 +543,55 @@ def _plan_payload(framework, steps, target_path, title, feedback=None, previous_
     return payload
 
 
-def _plan_prompt(payload):
+def _plan_prompt(payload, revise=False):
+    if revise:
+        # 同一会话里对任务书的修订：项目已经读过了，再读一遍纯属烧时间。
+        head = (
+            '这是同一个会话里对任务书的修订。上一轮你已经读过这个项目、给过一版任务书'
+            '（previous_plan）。\n'
+            '本轮只按 feedback 改任务书：不要重新扫项目，不要重新论证目录结构，'
+            '只改被点到的部分，其余原样保留。\n'
+            '你没有写权限，也不应该尝试写任何文件。只输出 JSON。\n'
+        )
+        return (
+            head
+            + PLAN_RULES
+            + '```json\n' + json.dumps(payload, ensure_ascii=False, indent=2) + '\n```\n'
+        )
     head = (
         '下面是一条录制好的测试流程。请产出任务书。\n'
         '你没有写权限，也不应该尝试写任何文件。\n'
-        '时间预算很紧：读完 1 个同业务域用例就动笔，最多 4 轮工具调用，然后直接输出 JSON。\n'
     )
+    if payload.get('project_memory'):
+        # 有画像时不能把「先读一个用例」当默认动作：画像本身就是读完的结果，
+        # 再读一遍等于把 60~120 秒重新烧掉。
+        head += '项目画像已经在 project_memory 里，不用再读项目文件，直接出任务书。\n'
+    else:
+        head += '读项目不设硬上限，但要收敛：能写出每一步的施工说明时就停（要求见下）。\n'
     if payload.get('project_facts'):
         head += (
             '项目事实已经探好放在 project_facts 里（测试目录、项目原有用例 recent_tests、'
             '你自己以前生成的旧版本 previous_outputs），直接用它们定写入路径和风格，'
             '不要为了这两件事再翻一遍目录。\n'
         )
+    if payload.get('project_memory'):
+        head += (
+            '这次有 project_memory：它是之前有人读遍这个项目后总结的画像（测试目录、目录与命名习惯、'
+            '现成封装、断言与等待习惯），比 project_facts 的路径列表准得多。\n'
+            '- 定写入路径、定风格、认封装**一律以 project_memory 为准**，不要再去读任何项目文件，'
+            '也不要为了「确认一下」去 glob 或 ls——那只会把时间烧掉。\n'
+            '- 这次的阅读预算更省：画像已经覆盖大部分事实，只有 project_memory 缺了某个关键信息'
+            '（例如 target_path 为空而画像又没写 test_dir）时才读一次，读完立刻输出 JSON。\n'
+            '- project_memory 带 stale: true 表示项目在画像之后被改过。此时仍然按它写，'
+            '但把「画像可能过时」记进 risks。\n'
+        )
+        if (payload.get('project_memory') or {}).get('map'):
+            head += (
+                '- project_memory.map 是这个项目的「地图」：整个仓库的目录职责、用例该放哪、'
+                '有哪些现成封装该怎么调。定 target_path 时按「测试」那一节里的目录划分来选，'
+                '不要另起一个和现有结构不一致的目录；reusable 里要优先收进地图「现成封装」里'
+                '能覆盖本次步骤的那些。\n'
+            )
     if payload.get('feedback'):
         head += '用户对上一版任务书提了意见，这次必须按意见修订，不要装作没看见。\n'
     return (
@@ -704,12 +783,15 @@ def _prepare(workspace, steps, framework, target_path):
 
 
 def plan(runner, workspace, model, steps, framework, target_path, title, python=None,
-         feedback=None, previous_plan=None, progress=None):
+         feedback=None, previous_plan=None, progress=None, memory=None, session=None):
     """只跑规划：读项目、出任务书，不写任何文件。
 
     返回值里的 plan 已经归一化：用户配了 target_path 就锁死它、把模型想改的
     那条留在 target_path_suggestion；没配就用规划提名的路径，此时 `chosen`
     标记为 True，告诉界面「这个位置是 AI 定的，需要你确认」。
+
+    session 给出时走同一个 opencode 会话（重规划也复用它，不再重读项目）；
+    不给就退回一次性的 emit_planning，行为和以前完全一致。
     """
     def mark(stage, detail=''):
         if progress is not None:
@@ -718,13 +800,18 @@ def plan(runner, workspace, model, steps, framework, target_path, title, python=
     root, _ = _prepare(workspace, steps, framework, target_path)
     mark('planning')
     partial = {}
+    reused = session is not None
+    prompt = _plan_prompt(
+        _plan_payload(framework, steps, target_path, title,
+                      feedback=feedback, previous_plan=previous_plan,
+                      workspace=workspace, memory=memory, context_reused=reused),
+        revise=bool(reused and previous_plan),
+    )
     try:
-        text = runner.emit_planning(
-            root, model,
-            _plan_prompt(_plan_payload(framework, steps, target_path, title,
-                                       feedback=feedback, previous_plan=previous_plan,
-                                       workspace=workspace)),
-        )
+        if session is not None:
+            text = session.plan_turn(prompt, revise=bool(previous_plan))
+        else:
+            text = runner.emit_planning(root, model, prompt)
     except Exception as exc:
         # 超时不一定颗粒无收：模型经常已经在正文里把 JSON 写了大半。
         # 能拼出完整任务书就直接用，拼不出才报错，并且说清它跑到哪一步。
@@ -779,26 +866,71 @@ def plan(runner, workspace, model, steps, framework, target_path, title, python=
     }
 
 
-def _prompt(payload):
-    head = (
+def _prompt(payload, resumed=False):
+    head = ''
+    if resumed:
+        # 同一会话的第二轮：项目已经在这个会话里读过了，重复扫只会烧时间。
+        head += (
+            '这是同一个会话的第二轮：上一轮你已经读过这个项目，并给出了任务书。\n'
+            '- 不要重新扫项目，不要再 glob / ls 找惯例；只有需要某个文件的精确内容'
+            '（一行 import、一个封装的签名）时才读 1~2 个文件。\n'
+            '- 任务书以本轮 plan 字段为准（用户可能改了 target_path、提了意见），'
+            '不要沿用上一轮的原始版本；本轮给的 steps / samples / keywords 是完整事实，以它为准。\n'
+            '- 本轮不要再输出任务书，直接写文件；完成后用一句中文说明写了哪个文件、覆盖了几步。\n'
+            '- 直接写 target_path 这个文件，不要为它新建目录：目录结构是用户/项目定的，'
+            '建目录会被拒。辅助文件同理，放在它所在的目录里。\n'
+        )
+    head += (
         '请按下面的录制结果写入一个测试文件。\n'
-        '只写 target_path 指定的文件，不写其他文件。\n'
-        '- 唯一允许写入的路径就是最外层 target_path。任务书里若出现别的路径'
-        '（包括 plan.target_path、plan.target_path_suggestion），一律不要采用，'
-        '也不要据此新建目录或文件。\n'
+        '- 主文件必须是 target_path。任务书里若出现别的路径（包括 plan.target_path、'
+        'plan.target_path_suggestion），不要拿它当主文件。\n'
     )
+    if payload.get('write_scope') == 'workspace':
+        head += (
+            '- 这几步如果确实需要一个辅助文件（helper / fixture / 类型定义），可以写，'
+            '但要放在 target_path 同一个测试目录下，能内联就内联。\n'
+            '- 不许改 package.json、playwright.config、tsconfig、.env 这类配置，'
+            '也不要动其他已存在的测试文件——那会影响别人的用例能不能跑，'
+            '而且这些改动会被列成「越界」报给用户。\n'
+            '- 写完在回复里逐个说明额外文件：路径、用途、为什么不能内联。\n'
+        )
+    elif payload.get('write_scope') == 'instruction_only':
+        head += (
+            '- 本次没有运行时兜底（规划期的会话被复用）。写到 target_path 以外的任何文件'
+            '都会被记录成越界并报给用户。\n'
+        )
     if payload.get('plan'):
         head += (
             '本次已经有人替你读过项目，任务书在 plan 字段里。按它写：\n'
             '- project_style 是这套项目真实的写法，优先于下面任何通用规则；两者冲突时以 project_style 为准。\n'
             '- reusable 里列出的封装只要能覆盖某一步，就必须调用它，不要自己重写同样的动作。\n'
             '- steps 里标 reuse 的步骤按 target 和 args 调用；标 write 的步骤用录制的定位手写。\n'
-            '- needs 里列出的文件你没有写权限，不要尝试改，也不要把它们的内容复制进来。\n'
+            '- needs 里列出的文件不是这次要改的，不要动它们，也不要把它们的内容复制进来。\n'
         )
     else:
         head += (
             '没有任务书：动笔之前先自己看一眼项目和已有用例，跟上它们的写法再写。\n'
         )
+    if payload.get('project_memory'):
+        if (payload.get('project_memory') or {}).get('map'):
+            head += (
+                'project_memory.map 是这个项目的「地图」：整个仓库里哪块代码在哪、新用例该放哪个目录、'
+                '有哪些现成封装该怎么调。samples 里是一条真实用例。\n'
+                '- 优先级：plan（本次任务书）> project_memory（项目长期写法）> 下面的通用规则。'
+                '两者冲突时以 plan 为准，它是针对这一次的。\n'
+                '- 「现成封装」里能覆盖某一步的，直接按它写的调用方式用，不要重写同样的动作。\n'
+                '- 「测试」那一节说明新文件该放哪、怎么命名，跟上它。\n'
+                '- 地图是某个时间点的快照；和你眼前读到的文件冲突时，以文件为准。\n'
+            )
+        else:
+            head += (
+                'project_memory 是这个项目长期积累的画像（有人读遍项目后总结的），'
+                'samples 里是它挑出来的一条真实用例。\n'
+                '- 优先级：plan（本次任务书）> project_memory（项目长期写法）> 下面的通用规则。'
+                '两者冲突时以 plan 为准，它是针对这一次的。\n'
+                '- helpers / fixtures 里列出的封装只要能覆盖某一步，就直接调用，不要重写同样的动作。\n'
+                '- assertions 是这个项目真实用过的断言；没有特别理由不要引入清单外的写法。\n'
+            )
     if payload.get('plan_feedback'):
         head += (
             '用户对任务书提了修改意见（plan_feedback：quote 是原文，comment 是他的要求）。\n'
@@ -813,21 +945,39 @@ def _prompt(payload):
 
 
 def _payload(framework, steps, target_path, title, detected, keywords, plan=None,
-             plan_feedback=None):
-    return {
+             plan_feedback=None, memory=None, context_reused=False, write_scope='exact'):
+    samples = list(detected.get('samples') or [])
+    snippet = (memory or {}).get('snippet') or {}
+    if snippet.get('code'):
+        # 画像里的范例优先于 detect 的「最近改过的前 60 行」：后者常常只有 import 和
+        # describe 开头，helper 封装、断言习惯全在 60 行之后，等于给了目录没给正文。
+        samples = [{
+            'path': snippet.get('file') or 'project sample',
+            'head': snippet['code'],
+            'generated': False,
+        }]
+    payload = {
         'framework': framework,
         'target_path': target_path,
         'title': title,
         'steps': _steps_for_prompt(steps, framework),
         'evidence': detected.get('evidence', []),
-        'samples': detected.get('samples', []),
+        'samples': samples,
         'keywords': keywords,
         'plan': plan,
+        # 项目画像：跨多次录制复用，plan 是针对这一次的，两者同时在场。
+        'project_memory': memory,
         # 用户对任务书的意见：选中片段 + 他自己的话。写手必须照这个改，
         # 否则「选中后评价」只是界面上的装饰。
         'plan_feedback': _clean_feedback(plan_feedback),
         'output_language': 'Simplified Chinese for progress notes; keep code and identifiers unchanged.',
     }
+    if context_reused:
+        # 同一会话的第二轮：读过的项目还在上下文里，别让它从头再扫一遍。
+        payload['context_reused'] = True
+    payload['write_scope'] = (write_scope if write_scope in ('exact', 'workspace', 'instruction_only')
+                              else 'exact')
+    return payload
 
 
 def _validate(framework, python, workspace, target_path):
@@ -838,12 +988,45 @@ def _validate(framework, python, workspace, target_path):
     return toolchain.tsc_check(workspace, target_path=target_path)
 
 
+def _write_with_session(session, prompt, runner, root, model, target_path):
+    """写轮优先走同一个会话；会话没了就退回一次性生成。
+
+    返回 (回复文本, 会话是否还可用)。退回时会话已不可用，后面的修复轮也别再试它。
+    """
+    from app.services.recording.emit_session import SessionLost
+    try:
+        return session.emitter_turn(prompt), True
+    except SessionLost as exc:
+        logger.warning('生成会话已失效（%s），退回一次性生成', exc)
+        return runner.emit_recording(root, model, prompt, writable=target_path), False
+
+
+def _repair_turn(session, runner, root, model, target_path):
+    """修复轮也留在同一个会话里：它知道刚才写了什么，比重新读一遍准。"""
+    from app.services.recording.emit_session import SessionLost
+
+    def turn(prompt):
+        try:
+            return session.repair_turn(prompt)
+        except SessionLost as exc:
+            logger.warning('修复轮会话已失效（%s），退回一次性生成', exc)
+            return runner.emit_recording(root, model, prompt, writable=target_path)
+
+    return turn
+
+
 def generate(runner, workspace, model, steps, framework, target_path, title, python=None,
-             overwrite=False, plan=None, plan_feedback=None, progress=None):
-    """按任务书写入脚本。成功返回 {'path', 'changed', 'validated', 'reply', 'plan'}。
+             overwrite=False, plan=None, plan_feedback=None, progress=None, storage_state=None,
+             memory=None, session=None, write_scope='exact'):
+    """按任务书写入脚本。返回 {'path', 'changed', 'outside', 'backup_id', 'validated', ...}。
 
     这里**不再跑规划**：规划是独立的一步（见 plan），任务书由用户确认后随请求带进来。
     传 plan=None 仍然可以写，但那只用于测试/兜底；产品入口要求必须有任务书。
+
+    session 给出时，写轮和后面的修复轮都走同一个 opencode 会话；不给就退回一次性的
+    emit_recording，行为与以前完全一致。write_scope 告诉写手运行时允许写到哪：
+    `workspace`（整个工作区）、`exact`（只准写 target_path）、`instruction_only`
+    （本轮没有运行时兜底）。
     """
     def mark(stage, detail=''):
         if progress is not None:
@@ -879,19 +1062,32 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
                     (plan.get('project_style') or {}).get('runner') or '未说明')
     else:
         logger.warning('录制生成：没有任务书，写手自己看项目')
+    if memory:
+        logger.info('录制生成：注入项目记忆（地图 %d 字符 / 范例=%s）',
+                    len(memory.get('map') or ''),
+                    (memory.get('snippet') or {}).get('file') or '无')
 
     before = None
+    resumed = session is not None
     try:
         # 快照本身也可能失败（git 异常、目录不可读），必须放在 try 里，否则会变成没有原因的 500。
         mark('snapshot')
         before = guard.snapshot(root)
         mark('writing')
-        reply = runner.emit_recording(
-            root, model,
-            _prompt(_payload(framework, steps, target_path, title, detected, keywords,
-                             plan, plan_feedback)),
-            writable=target_path,
-        )
+        payload = _payload(framework, steps, target_path, title, detected, keywords,
+                           plan, plan_feedback, memory,
+                           context_reused=resumed, write_scope=write_scope)
+        prompt = _prompt(payload, resumed=resumed)
+
+        if resumed:
+            reply, session_alive = _write_with_session(session, prompt, runner, root, model,
+                                                       target_path)
+        else:
+            reply = runner.emit_recording(root, model, prompt, writable=target_path)
+            session_alive = False
+
+        repair_turn = (_repair_turn(session, runner, root, model, target_path)
+                       if session_alive else None)
         mark('check')
         if not target_abs.is_file():
             raise EmitError('agent 没有写出目标文件：%s' % target_path,
@@ -900,11 +1096,23 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         mark('validate')
         validated, output = _check_with_repair(
             runner, root, model, framework, target_path, detected, writable=target_path,
-            progress=progress,
+            progress=progress, turn=repair_turn,
         )
         if not validated:
             raise EmitError('校验未通过' if existed else '校验未通过，文件已保留',
                             details=[output] + _target_hint(target_path, existed))
+
+        # 静态校验之后真跑一遍。tsc 只证明「能编译」，证明不了「点下去能过」；
+        # 录制的定位是现成的，但等待、跳转、弹窗时机全靠写手想象，只有执行能证伪。
+        # Robot 不做：录制侧只有 Playwright，Selenium 环境不在这一侧，硬跑会变成假失败。
+        run = None
+        if framework == PW_FRAMEWORK:
+            try:
+                run = _run_with_repair(runner, root, model, target_path, storage_state, progress,
+                                       turn=repair_turn)
+            except Exception as exc:  # 验证层自己出问题，不该把已经写好的文件判成失败
+                logger.exception('执行验证失败：%s', target_path)
+                run = {'ran': False, 'reason': '执行验证时出错：%s' % exc}
     except EmitError as exc:
         raise _abort(target_abs, exc, target_path, existed)
     except toolchain.ToolchainError as exc:
@@ -914,12 +1122,25 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
 
     # 校验之后再取一次：产物目录已在 guard 里排除，剩下的就是真正被动过的文件。
     after = guard.changed(before)
+    outside = guard.violations(after, target_path)
+    backup_id = None
+    if outside:
+        # 立刻把越界文件在「生成前」的内容导出来。stash create 出来的 commit 没有 ref，
+        # git gc 之后就取不到了；导出之后用户点还原才不依赖它。
+        try:
+            backup_id, _entries = guard.capture(before, outside)
+        except Exception:  # noqa: BLE001 - 备份失败不该让已经写好的文件判成失败
+            logger.exception('导出越界备份失败：%s', target_path)
     return {
         'path': target_path,
         'changed': after,
-        # 目标文件以外的改动：只报告，不回滚。正常情况下它应该为空——不为空说明写权限没拦住。
-        'outside': guard.violations(after, target_path),
+        # 目标文件以外的改动：不自动还原（模型可能确实需要写 helper），界面列出来让用户决定。
+        'outside': outside,
+        'backup_id': backup_id,
         'validated': True,
+        # 真实执行的结果：None 表示没跑（Robot），ran=False 表示跑不起来，
+        # ok=False 表示跑了但没过。三种情况界面上的说法必须不一样。
+        'run': run,
         'framework': framework,
         'detected': detected.get('framework'),
         'reply': reply,
@@ -979,11 +1200,20 @@ def _abort(target_abs, error, target_path, existed):
 
 
 def _check_with_repair(runner, root, model, framework, target_path, detected, writable=None,
-                       progress=None):
-    """校验；失败则把输出交回 agent 修一次；仍失败返回 (False, 输出)。"""
+                       progress=None, turn=None):
+    """校验；失败则把输出交回 agent 修一次；仍失败返回 (False, 输出)。
+
+    turn 给出时走同一个 opencode 会话（见 emit_session）；不给就退回一次性的
+    emit_recording，行为和以前完全一致。
+    """
     def mark(stage, detail=''):
         if progress is not None:
             progress(stage, detail)
+
+    def send(text):
+        if turn is not None:
+            return turn(text)
+        return runner.emit_recording(root, model, text, writable=writable)
 
     python = detected.get('python')
     ok, output = _validate(framework, python, root, target_path)
@@ -995,7 +1225,94 @@ def _check_with_repair(runner, root, model, framework, target_path, detected, wr
             '上一次写入的 %s 校验失败。请只修改该文件，修正以下错误，不要改动其他文件。\n'
             '校验输出：\n```\n%s\n```\n' % (target_path, output)
         )
-        runner.emit_recording(root, model, fix, writable=writable)
+        send(fix)
         mark('validate', '第 %d 轮修正后重新校验' % rounds)
         ok, output = _validate(framework, python, root, target_path)
     return ok, output
+
+
+def _run_with_repair(runner, root, model, target_path, storage_state, progress=None, turn=None):
+    """真跑一遍；失败把运行时错误交回写手修，再跑。
+
+    只在 Playwright 上用。登录态通过临时文件注入（见 toolchain.run_playwright），
+    所以「跑不过」里的登录问题已经被排除掉了 —— 剩下的才是脚本自己的问题。
+    环境不通（服务没起、域名解析不了）不修：那不是代码错，硬修只会把定位改坏。
+    """
+    def mark(stage, detail=''):
+        if progress is not None:
+            progress(stage, detail)
+
+    def send(text):
+        if turn is not None:
+            return turn(text)
+        return runner.emit_recording(root, model, text, writable=target_path)
+
+    mark('run', '正在真实执行生成的用例')
+    result = toolchain.run_playwright(root, target_path, storage_state)
+    rounds = 0
+    last = None
+    while result.get('ran') and not result.get('ok') and rounds < MAX_RUN_REPAIR_ROUNDS:
+        if result.get('env_error'):
+            mark('run', '页面打不开，未自动修复')
+            result['note'] = '目标站点不可达，这次没有判断脚本本身对不对'
+            break
+        signature = _run_signature(result)
+        # 修完还是同一个错误：再修一轮大概率还是它，停手比空转好。
+        if signature and signature == last:
+            break
+        last = signature
+        rounds += 1
+        mark('run_repair', '第 %d 轮修正运行时错误' % rounds)
+        try:
+            send(_run_fix_prompt(target_path, result))
+        except (RuntimeError, ValueError) as exc:
+            result['repair_error'] = '自动修正没能执行：%s' % exc
+            break
+        mark('run', '第 %d 轮修正后重新执行' % rounds)
+        result = toolchain.run_playwright(root, target_path, storage_state)
+    result['auth'] = bool(storage_state)
+    # 没抓到登录态时，「跑不过」可能只是没登录。必须说清楚，否则用户会去改本来正确的定位。
+    if not storage_state and result.get('ran') and not result.get('ok') and not result.get('note'):
+        result['note'] = '这次没有可注入的登录态（录制结束后浏览器可能已关闭），失败也可能来自登录。'
+    return _compact_run(result)
+
+
+def _run_fix_prompt(target_path, run):
+    errors = '\n'.join('- ' + item for item in (run.get('errors') or []))
+    if not errors:
+        errors = '- （没有拿到结构化错误）'
+    tail = (run.get('tail') or '').strip()
+    return (
+        '上一次写入的 %s 能通过类型检查，但真跑起来失败了。请只修改该文件，不要改动其他文件。\n'
+        '运行方式：playwright test %s。运行环境已经注入录制时的登录态，'
+        '所以「登录不上」「被重定向到登录页」不是失败原因，不要为了绕过登录去改流程。\n'
+        '失败信息：\n%s\n' % (target_path, target_path, errors)
+        + ('原始输出尾部：\n```\n%s\n```\n' % tail if tail else '')
+        + '修正原则：\n'
+        '- 定位匹配到多个元素（strict mode violation）→ 用 .first() / .nth(i) 或更窄的定位，不要用 force。\n'
+        '- 等不到元素 → 先判断是不是缺了等待、或上一步的跳转没等，不要只把超时改大。\n'
+        '- 断言失败 → 看 received 值，先确认断言方法有没有用错'
+        '（toHaveText 是相等，toContainText 才是包含）。\n'
+        '- 不允许删步骤、删断言、加 test.skip / test.fixme 来让测试通过。\n'
+        '- 不要改 playwright 配置，不要新建文件。\n'
+    )
+
+
+def _run_signature(run):
+    """判断「改了没有」用的指纹：Playwright 的错误里带计数和耗时，
+    原样比会永远不相等（`14 × locator resolved` 每轮都变），必须先把数字抹掉。"""
+    text = '\n'.join(run.get('errors') or []) or (run.get('tail') or '')
+    return re.sub(r'\d+', '#', text)[:600]
+
+
+def _compact_run(run):
+    """返回给前端前收一下体积：原始输出只在「根本没跑起来」时才有价值。"""
+    if not isinstance(run, dict):
+        return run
+    result = dict(run)
+    if result.get('ran'):
+        result.pop('tail', None)
+    elif result.get('tail'):
+        result['tail'] = result['tail'][-1200:]
+    result['errors'] = list(result.get('errors') or [])[:3]
+    return result

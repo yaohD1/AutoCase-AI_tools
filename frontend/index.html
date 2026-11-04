@@ -3,12 +3,154 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f5f7fa">
   <!-- 内联图标：和顶栏 logo 同一套形状，顺便消掉浏览器自动请求 /favicon.ico 的 404 -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23171d2b'/%3E%3Cpath d='M7.5 16V8l4.5 8V8' fill='none' stroke='%23ffffff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16.5' cy='12' r='1.7' fill='%2360a5fa'/%3E%3C/svg%3E">
   <title>AutoCase - AI测试用例生成工具</title>
+  <!-- 主题必须在首屏渲染前定下来：等 Vue 挂载再切，会先闪一帧白再变暗。
+       这段是同步脚本，和 token 里的键名保持一致（ac-theme）。 -->
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('ac-theme')
+        var dark = saved ? saved === 'dark'
+          : window.matchMedia('(prefers-color-scheme: dark)').matches
+        if (dark) {
+          document.documentElement.dataset.theme = 'dark'
+          document.documentElement.classList.add('dark')
+        }
+      } catch (e) {}
+
+      /* 品牌启动幕（#ac-boot 在 body 里）：
+         判断必须在这里、首帧之前做完 —— 放到挂载后决定，幕布会先以 display:none 出现、
+         再突然跳出来，比不做还难看。ac-booted 只写一次，所以「每次会话一遍」。
+         系统开了「减少动态效果」的人直接不给幕布：一块静止的黑板等一秒多更难受。 */
+      var calm = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      var booted = false
+      try { booted = sessionStorage.getItem('ac-booted') === '1' } catch (e) { booted = false }
+      if (!booted && !calm) {
+        document.documentElement.dataset.boot = '1'
+        try { sessionStorage.setItem('ac-booted', '1') } catch (e) { /* 无痕模式每次都会演，可以接受 */ }
+        // 兜底：脚本挂了 / 接口卡住时别留一块盖住整个站的黑板
+        setTimeout(function () {
+          var el = document.getElementById('ac-boot')
+          if (el) el.remove()
+          document.documentElement.removeAttribute('data-boot')
+        }, 8000)
+      }
+    })()
+  </script>
+  <!-- 幕布的样式必须内联在这里：它要在 CSS 包下载完之前就已经画好，
+       所以既不能用 token（那要等 JS 引进来），也不能放进 styles/ 目录。 -->
+  <style>
+    #ac-boot {
+      --boot-bg: #f5f7fa;
+      --boot-line: rgba(19, 22, 28, .22);
+      --boot-edge: rgba(19, 22, 28, .12);
+      --boot-ink: #3c4048;
+      --boot-dot: #0071e3;
+      position: fixed;
+      inset: 0;
+      z-index: 4000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: var(--boot-bg);
+      will-change: transform;
+      user-select: none;
+    }
+    /* 幕布底色和页面一样，所以「升到一半」时唯一能看见的就是它被切掉的那条边 ——
+       没有这条 1px 线，揭幕看起来不是「幕在走」，而是「内容被裁了一半」。
+       用伪元素而不是 border-bottom，免得把 900px 的高度顶成 901。 */
+    #ac-boot::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 1px;
+      background: var(--boot-edge);
+    }
+    /* 只有本轮会话第一次打开才盖 */
+    html[data-boot="1"] #ac-boot { display: flex; }
+    html[data-theme="dark"] #ac-boot {
+      --boot-bg: #12161d;
+      --boot-line: rgba(255, 255, 255, .2);
+      --boot-edge: rgba(255, 255, 255, .12);
+      --boot-ink: #c9d1dd;
+      --boot-dot: #0a84ff;
+    }
+
+    .boot-in {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      animation: boot-in .42s cubic-bezier(.2, .7, .3, 1) both;
+    }
+    .boot-mark {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      border: 1px solid var(--boot-line);
+    }
+    /* 那颗蓝点慢慢呼吸：加载慢的时候（冷启动的 Vite、首屏接口）画面不至于死着 */
+    .boot-mark i {
+      width: 10px;
+      height: 10px;
+      background: var(--boot-dot);
+      animation: boot-breathe 2.2s ease-in-out .2s infinite;
+    }
+    .boot-word {
+      margin-top: 20px;
+      font: 500 12px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      letter-spacing: .44em;
+      text-indent: .44em; /* 补掉最后一个字母多出来的字距，让字标真的居中 */
+      color: var(--boot-ink);
+    }
+    .boot-rule {
+      margin-top: 16px;
+      width: 44px;
+      height: 1px;
+      background: var(--boot-line);
+      transform-origin: center;
+      animation: boot-rule .38s cubic-bezier(.2, .7, .3, 1) .14s both;
+    }
+
+    /* 揭开：整块幕布向上推走。字标只淡出、不跟着位移 ——
+       让它一起升的话，揭到一半会看见一个「AUTOCASE」悬在页面顶端，
+       像水印而不像幕布上的字。 */
+    #ac-boot.is-lift { animation: boot-lift .4s cubic-bezier(.4, 0, .2, 1) forwards; }
+    #ac-boot.is-lift .boot-in { animation: boot-out .16s ease-out forwards; }
+
+    @keyframes boot-lift { to { transform: translateY(-100%); } }
+    @keyframes boot-out { to { opacity: 0; } }
+    @keyframes boot-in {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: none; }
+    }
+    @keyframes boot-rule {
+      from { transform: scaleX(0); }
+      to { transform: scaleX(1); }
+    }
+    @keyframes boot-breathe {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .4; }
+    }
+  </style>
 </head>
 <body>
   <div id="app"></div>
+  <!-- 启动幕。放在 #app 外面：Vue 挂载时会清空容器内容，放里面会被一起清掉，
+       而清空的那一刻正是路由还没解析完的时候 -->
+  <div id="ac-boot" aria-hidden="true">
+    <div class="boot-in">
+      <span class="boot-mark"><i></i></span>
+      <span class="boot-word">AUTOCASE</span>
+      <span class="boot-rule"></span>
+    </div>
+  </div>
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>

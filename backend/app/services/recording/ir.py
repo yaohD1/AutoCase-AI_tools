@@ -18,6 +18,15 @@ INTENT_TYPES = (
 # wait_visible / wait_hidden 是合并前的老写法，只为读旧数据保留，前端不再产出。
 POLL_INTENT_TYPES = ('wait_visible', 'wait_hidden')
 
+# 等「整页加载到某个状态」：没有目标元素，也不是干等秒数。
+# 不进 INTENT_TYPES —— 那是自然语言解析的词表，让模型自己产出这个类型，
+# 它会把「等元素出现」也塞进来。这一档只由工具栏的三个按钮直接给。
+PAGE_READY = 'page_ready'
+READY_STATES = ('load', 'domcontentloaded', 'networkidle')
+# 默认 15 秒：内网页面在慢网络下 5 秒经常不够（Playwright 的 expect 默认就是 5 秒），
+# 30 秒又会让真正挂掉的用例白等。超时算失败，所以不能给太大。
+DEFAULT_READY_SECONDS = 15
+
 # 给用户和模型看的类型集合：等待不再是独立类型，而是任意条件 + timeout。
 CONDITION_INTENT_TYPES = tuple(t for t in INTENT_TYPES if t not in POLL_INTENT_TYPES)
 
@@ -31,6 +40,9 @@ def step_type_for_intent(kind, intent=None):
     """
     if kind == 'sleep':
         return 'sleep'
+    # 等整页就绪天生带超时，但它的语义是「等到」，不是「此刻就要成立」。
+    if kind == PAGE_READY:
+        return 'wait'
     if kind in ('wait_visible', 'wait_hidden'):
         return 'wait'
     if intent and intent.get('timeout'):

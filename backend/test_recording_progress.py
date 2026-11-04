@@ -147,12 +147,13 @@ class EmitConfigPermissionTest(unittest.TestCase):
         }), encoding='utf-8')
         return config
 
-    def _rules(self, writable):
+    def _rules(self, writable, scope='file'):
+        """默认测 file 模式（只准写目标文件）；workspace 模式的断言见 test_recording_guard。"""
         root = Path(tempfile.mkdtemp(prefix='emit-config-'))
         workspace = root / 'ws'
         workspace.mkdir()
         runner = OpenCodeRunner({'OPENCODE_CONFIG': str(self._config_in(root))})
-        path, drop = runner._emit_config(writable, workspace)
+        path, drop = runner._emit_config(writable, workspace, scope)
         try:
             data = json.loads(Path(path).read_text(encoding='utf-8'))
             return data['agent']['recording-emitter']['permission']
@@ -187,10 +188,11 @@ class EmitConfigPermissionTest(unittest.TestCase):
         self.assertEqual(permission['task'], 'deny')
 
     def test_no_writable_returns_original_config(self):
+        """file 模式下没有目标路径就没必要生成临时配置，直接用原配置。"""
         root = Path(tempfile.mkdtemp(prefix='emit-config-'))
         config = self._config_in(root)
         runner = OpenCodeRunner({'OPENCODE_CONFIG': str(config)})
-        path, drop = runner._emit_config(None, root)
+        path, drop = runner._emit_config(None, root, scope='file')
         self.assertEqual(Path(path), config)
         drop()
 

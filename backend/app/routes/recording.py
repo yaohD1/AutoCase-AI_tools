@@ -5,16 +5,17 @@
 import json
 import logging
 import os
+from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 
 from app.services.automation_generator import AutomationScriptGenerator
 from app.services.opencode_runner import OpenCodeRunner
 from app.models import db
 from app.models.recording_generation import RecordingGeneration
-from app.services.recording import detect, embedding, emit, records, replay
-from app.services.recording import intent, progress, verify
+from app.services.recording import detect, embedding, emit, guard, records, replay
+from app.services.recording import emit_session, intent, memory, progress, verify
 from app.services.recording.ask_pool import AskUnavailable
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
 
@@ -24,6 +25,15 @@ logger = logging.getLogger(__name__)
 
 # 解析进程要用的 OpenCode 启动参数：只传存在的那几项，其余走 OpenCodeRunner 的默认值。
 OPENCODE_CONFIG_KEYS = ('OPENCODE_BIN', 'OPENCODE_CONFIG', 'OPENCODE_PURE', 'OPENCODE_SERVE_HOST')
+
+
+def _emit_key(session):
+    """生成会话的 key：一次录制对应一条 opencode session。
+
+    用录制会话的 id 而不是工作区：决策是「不跨录制复用」，同一条录制里
+    规划、重规划、写入、修复才是同一件事。
+    """
+    return str(getattr(session, 'id', '') or '') or None
 
 
 def _opencode_config():
@@ -100,6 +110,11 @@ def start_recording():
         return _error('无法启动录制：%s' % exc, 500)
     # 新录制 = 新的生成任务：上一条的「已写入 / 失败」不该出现在这一条里。
     progress.PROGRESS.reset()
+    # 上一条录制的生成会话也不能继承：规划上下文只对当次录制有效。
+    emit_session.REGISTRY.close_all()
+    # 项目画像：录制一开始就在后台学。用户录完点「生成」时画像已经好了，
+    # 规划和写手都不用再现场读项目。学不成不影响录制，所以整段吞掉。
+    _prime_project_memory(body)
     data = session.snapshot()
     if notice:
         # 布局被自动换掉必须让用户知道，否则他会奇怪为什么弹出两个窗口。
@@ -142,19 +157,6 @@ def _panel_url(body, base_url):
     params = {'panel': '1', 'base_url': base_url}
     params.update(_prefill(body))
     return _frontend_url(params)
-
-
-@recording_bp.route('/automation/recording/panel/relayout', methods=['POST'])
-def relayout_panel():
-    """把被测浏览器与编排面板重新并排（用户挪动窗口后用）。"""
-    session = RecordingSession.current()
-    if session is None:
-        return _error('没有录制', 404)
-    try:
-        result = session.relayout()
-    except RecordingError as exc:
-        return _error(str(exc), 409)
-    return jsonify({'laid_out': bool(result.get('laid_out'))}), 200
 
 
 @recording_bp.route('/automation/recording/panel/sheet', methods=['POST'])
@@ -316,6 +318,26 @@ def clear_recording_highlight():
     return _mutate(lambda session: session.clear_highlight())
 
 
+@recording_bp.route('/automation/recording/steps/<int:no>/locate', methods=['POST'])
+def locate_recording_step(no):
+    """这一步「生成时到底用哪条定位」，以及它此刻在当前页面上还在不在、唯不唯一。
+
+    口径是**此刻**，不是回放：页面已经走到后面几步时，这里的结论只说明现在。
+    顺带把匹配到的元素在页面上框出来——只给数字不画框，等于没验证。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    if not session.snapshot().get('browser_open'):
+        return _error('浏览器已关闭，无法再看当前页面', 409)
+    body = request.get_json(silent=True) or {}
+    try:
+        result = session.locate(no, framework=body.get('framework') or 'playwright-ts')
+    except RecordingError as exc:
+        return _error(str(exc), 409)
+    return jsonify(result), 200
+
+
 @recording_bp.route('/automation/recording/steps/<int:no>/chosen', methods=['POST'])
 def choose_recording_target(no):
     """用户看过框之后指定「就是这个（第 index 个匹配）」。
@@ -330,6 +352,31 @@ def choose_recording_target(no):
     if not isinstance(index, int) or index < 0:
         return _error('index 必须是非负整数', 400)
     return _mutate(lambda session: session.set_chosen(no, desc, index))
+
+
+@recording_bp.route('/automation/recording/steps/<int:no>/degrade', methods=['POST'])
+def degrade_recording_target(no):
+    """「允许降级」：这一步不再追问，生成时按最窄候选 + 录制时的序号写。
+
+    和「选第几个」是两个出口：选是「我知道要哪个」，降级是「我不看了，按录制的来」。
+    """
+    return _mutate(lambda session: session.set_degraded(no))
+
+
+@recording_bp.route('/automation/recording/steps/<int:no>/shot', methods=['GET'])
+def recording_step_shot(no):
+    """这一步被按下那一刻的视口截图（只在内存里，不落盘）。
+
+    没有图是正常情况：只有「不唯一」的点击才会截，唯一的那几百次点击不付这个成本。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    shot = session.shot(no)
+    if not shot or not shot.get('png'):
+        return _error('这一步没有截图', 404)
+    return Response(shot['png'], mimetype='image/png',
+                    headers={'Cache-Control': 'no-store'})
 
 
 @recording_bp.route('/automation/recording/pause', methods=['POST'])
@@ -415,23 +462,135 @@ def plan_recording():
             return _error('上一版任务书过大', 400)
     if not progress.PROGRESS.start('plan'):
         return _error('已有生成任务正在进行，请等它结束', 409)
-    try:
-        result = emit.plan(
+    # 项目画像：录制开始时预热的那份。没有就这一次先不用，后台补学（见 _memory_for）。
+    profile = _memory_for(ctx['workspace'], ctx['framework'])
+    key = _emit_key(ctx['session'])
+    session = emit_session.REGISTRY.acquire(
+        key, ctx['workspace'], ctx['framework'], ctx['model'], ctx['runner'],
+    ) if key else None
+
+    def run_plan(active):
+        return emit.plan(
             ctx['runner'], ctx['workspace'], ctx['model'], ctx['steps'],
             ctx['framework'], ctx['target_path'], ctx['title'],
             python=body.get('python') or None,
             feedback=body.get('feedback') or [],
             previous_plan=previous,
             progress=progress.mark,
+            memory=memory.for_plan(profile) if profile else None,
+            session=active,
+        )
+
+    try:
+        try:
+            result = run_plan(session)
+        except emit_session.SessionLost as exc:
+            # 会话没了不影响出任务书：退回一次性规划，只是模型要重新读一遍项目。
+            logger.warning('规划会话失效，退回一次性规划：%s', exc)
+            emit_session.REGISTRY.close(key, 'lost')
+            session = None
+            result = run_plan(None)
+        progress.PROGRESS.remember_plan(
+            result, emit.steps_signature(ctx['steps']),
+            session.snapshot() if session is not None else None,
         )
         progress.PROGRESS.finish()
-        return jsonify(result), 200
+        payload = dict(result)
+        payload['session'] = session.snapshot() if session is not None else {'reused': False}
+        return jsonify(payload), 200
     except emit.EmitError as exc:
         progress.PROGRESS.fail(str(exc), exc.details)
         return jsonify({'error': str(exc), 'details': exc.details}), 422
     except Exception as exc:
         progress.PROGRESS.fail('规划失败：%s' % exc)
         raise
+
+
+def _prime_project_memory(body):
+    """录制开始时给项目画像排一次后台学习。
+
+    拿不到工作区、没选模型、目录不存在都算正常情况（用户可能先录再回头填配置）：
+    真到生成时还会再兜一次（见 _memory_for），所以这里失败不需要告诉任何人。
+    """
+    model = (body.get('model') or '').strip()
+    if '/' not in model:
+        return
+    try:
+        _, workspace = AutomationScriptGenerator(current_app.config)._resolve_workspace(
+            body.get('workspace'))
+    except ValueError:
+        return
+    if not workspace or not Path(workspace).is_dir():
+        return
+    try:
+        memory.start_background(
+            current_app._get_current_object(), _opencode_config(), workspace, model,
+            framework=(body.get('framework') or '').strip() or None,
+        )
+    except Exception:  # noqa: BLE001 - 画像是锦上添花，绝不能让「开始录制」失败
+        logger.warning('项目画像预热没能启动', exc_info=True)
+
+
+def _memory_for(workspace, framework):
+    """取这次生成要用的画像；没有就返回 None，**不在请求里补学**。
+
+    一次学习要读 6~8 个文件、1~2 分钟，塞进「点生成」这一段等于让用户赌运气，
+    而且会和写手抢 CPU。学习只发生在两个明确时机：录制开始时的后台预热
+    （见 _prime_project_memory）、用户在卡片上点「重学」。
+
+    画像过期也照样用：旧的比没有强，注入时会带 stale 标记让模型自己留意；
+    下一次开始录制时指纹对不上，预热会自动重学一份。
+    """
+    try:
+        return memory.load(workspace, framework)
+    except Exception:  # noqa: BLE001 - 画像读不出来不该影响生成
+        logger.warning('项目画像读取失败', exc_info=True)
+        return None
+
+
+@recording_bp.route('/automation/recording/memory', methods=['GET'])
+def get_recording_memory():
+    """当前工作区的项目画像：学了什么、准不准、什么时候学的。"""
+    try:
+        _, workspace = AutomationScriptGenerator(current_app.config)._resolve_workspace(
+            request.args.get('workspace_path'))
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    return jsonify(memory.snapshot(workspace, request.args.get('framework') or None)), 200
+
+
+@recording_bp.route('/automation/recording/memory/refresh', methods=['POST'])
+def refresh_recording_memory():
+    """重学一遍。学习在后台跑，这里只确认「已经排上了」。"""
+    body = request.get_json(silent=True) or {}
+    model = (body.get('model') or '').strip()
+    if '/' not in model:
+        return _error('请先选择模型', 400)
+    try:
+        _, workspace = AutomationScriptGenerator(current_app.config)._resolve_workspace(
+            body.get('workspace_path') or body.get('workspace'))
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    if not workspace or not Path(workspace).is_dir():
+        return _error('工作区目录不存在：%s' % workspace, 400)
+    started = memory.start_background(
+        current_app._get_current_object(), _opencode_config(), workspace, model,
+        framework=(body.get('framework') or '').strip() or None, force=True, delay=0,
+    )
+    if not started:
+        return _error('这个工作区已经在学了，请稍等', 409)
+    return jsonify({'started': True}), 202
+
+
+@recording_bp.route('/automation/recording/memory', methods=['DELETE'])
+def forget_recording_memory():
+    """删掉画像。模型学歪了没有擦除通道，用户就只能整个关掉这个功能。"""
+    try:
+        _, workspace = AutomationScriptGenerator(current_app.config)._resolve_workspace(
+            request.args.get('workspace_path'))
+    except ValueError as exc:
+        return _error(str(exc), 400)
+    return jsonify({'removed': memory.forget(workspace)}), 200
 
 
 def _prepare_generation(body):
@@ -468,6 +627,9 @@ def _prepare_generation(body):
         'target_path': target_path,
         'title': title,
         'steps': session.ir(),
+        # 登录态只在「跑一遍」时用：注入到临时配置里，不写进用户仓库、不返回给前端。
+        # 浏览器已经关掉也可能有（停止时抓过一份），所以这里取的是缓存而不是活对象。
+        'storage_state': session.storage_state(),
     }, None
 
 
@@ -504,6 +666,25 @@ def generate_recording():
     # 而不是两个请求各自写一遍同一个文件。
     if not progress.PROGRESS.start('write'):
         return _error('已有生成任务正在进行，请等它结束', 409)
+    profile = _memory_for(ctx['workspace'], ctx['framework'])
+    key = _emit_key(ctx['session'])
+    session = emit_session.REGISTRY.get(key)
+    scope = {'reused': False, 'scope': 'exact'}
+    if session is not None:
+        # 换了工作区/框架就不能再续用：旧上下文会把写法带到另一个仓库去。
+        if session.workspace != str(ctx['workspace']) or session.framework != ctx['framework']:
+            emit_session.REGISTRY.close(key, 'workspace_changed')
+            progress.PROGRESS.reset()
+            return jsonify({'error': '工作区或框架已变化，请重新生成任务书',
+                            'details': ['workspace_changed']}), 409
+        scope = session.begin_write(target_path)
+        if not scope.get('reused'):
+            # 会话没了：退回一次性生成，界面会知道这一轮重新读了项目。
+            emit_session.REGISTRY.close(key, 'lost')
+            session = None
+    # 'workspace'（可写整个工作区，越界由 guard 列出来）/ 'exact'（只准写目标文件）。
+    write_scope = scope.get('scope') or 'exact'
+    keep_session = False
     try:
         result = emit.generate(
             ctx['runner'], ctx['workspace'], ctx['model'], steps,
@@ -511,6 +692,9 @@ def generate_recording():
             python=(body.get('python') or None), overwrite=bool(body.get('overwrite')),
             plan=plan, plan_feedback=body.get('plan_feedback') or [],
             progress=progress.mark,
+            storage_state=ctx['storage_state'],
+            memory=memory.for_writer(profile) if profile else None,
+            session=session, write_scope=write_scope,
         )
         progress.mark('record')
         record = records.create(
@@ -518,14 +702,22 @@ def generate_recording():
             target_abs.read_bytes(), steps, result.get('reply'),
         )
         result['generation_id'] = record.id
+        result['session'] = (session.snapshot() if session is not None
+                             else {'reused': False, 'scope': 'exact'})
         progress.PROGRESS.finish(result)
         return jsonify(result), 200
     except emit.EmitError as exc:
+        if progress.PROGRESS.cancelled():
+            # 用户点了取消：这不是「生成失败」，说法要分开，否则他以为脚本有问题。
+            progress.PROGRESS.fail('已取消', ['cancelled'])
+            return jsonify({'error': '已取消', 'details': ['cancelled']}), 422
         status = 409 if exc.details and str(exc.details[0]).startswith('conflict:') else 422
         if status == 409:
             # 目标文件已存在不是任务失败：用户还要选覆盖或改名，进度回到 idle，
             # 别让另一个窗口看到一条没有意义的「失败」。
-            progress.PROGRESS.reset()
+            # 会话也留着——用户点「覆盖」还要接着写，重新读一遍项目纯属浪费。
+            keep_session = True
+            progress.PROGRESS.reset(keep_plan=True)
         else:
             # 失败也可能已经动过文件（写了一半、校验不过）。留一条可回滚的记录，
             # 否则覆盖掉的旧内容就再也拿不回来了——路径放给 AI 选之后，这一步是底线。
@@ -538,6 +730,26 @@ def generate_recording():
         # 500 也要落到进度里：否则进度条会永远停在「正在写入」，用户只能刷新。
         progress.PROGRESS.fail('生成失败：%s' % exc)
         raise
+    finally:
+        if not keep_session and key:
+            # 决策：生成结束就关。成功、失败、取消都走这里。
+            emit_session.REGISTRY.close(key, 'done')
+
+
+@recording_bp.route('/automation/recording/emit/cancel', methods=['POST'])
+def cancel_recording_emit():
+    """中止正在进行的规划 / 生成：先 abort 会话，再收掉 serve 进程树。
+
+    规划轮现在最长 15 分钟，没有这个入口用户只能等或者杀后端。
+    """
+    session = RecordingSession.current()
+    key = _emit_key(session) if session is not None else None
+    hit = emit_session.REGISTRY.cancel(key) if key else False
+    # 即使没有会话也要立标志：一次性生成路径虽然收不到，但进度条要能立刻停。
+    progress.PROGRESS.request_cancel()
+    if not hit:
+        return jsonify({'cancelled': False, 'reason': '没有正在进行的生成会话'}), 200
+    return jsonify({'cancelled': True}), 200
 
 
 def _keep_failed_record(ctx, target_path, original):
@@ -649,6 +861,34 @@ def detect_workspace():
     if not workspace.is_dir():
         return _error('工作区目录不存在：%s' % workspace, 404)
     return jsonify(detect.detect(workspace, python=request.args.get('python') or None)), 200
+
+
+@recording_bp.route('/automation/recording/backups/<backup_id>/revert', methods=['POST'])
+def revert_recording_backup(backup_id):
+    """把这次生成里越界改动过的文件还原到生成之前的样子。
+
+    只还原清单里有的文件，`paths` 为空表示全部。模型写的辅助文件不会被自动删——
+    保留还是还原由用户决定。还原前会把当前内容存到同一目录的 `current/` 下，
+    点错了也捞得回来。
+    """
+    body = request.get_json(silent=True) or {}
+    session = RecordingSession.current()
+    workspace = Path(session.workspace) if session is not None else None
+    if workspace is None or not workspace.is_dir():
+        try:
+            _, workspace = AutomationScriptGenerator(current_app.config)._resolve_workspace(
+                body.get('workspace_path'))
+        except ValueError as exc:
+            return _error(str(exc), 400)
+    if not workspace or not Path(workspace).is_dir():
+        return _error('工作区目录不存在', 404)
+    try:
+        result = guard.revert(workspace, backup_id, body.get('paths') or None)
+    except guard.GuardError as exc:
+        return _error(str(exc), 404)
+    except OSError as exc:
+        return _error('还原失败：%s' % exc, 500)
+    return jsonify(result), 200
 
 
 @recording_bp.route('/automation/recording/steps/<int:no>/move', methods=['POST'])

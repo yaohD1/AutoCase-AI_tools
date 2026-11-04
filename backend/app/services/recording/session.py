@@ -5,9 +5,13 @@ Playwright 同步 API 必须在同一个线程里使用，所以每个会话占�
 - Flask 请求线程只通过命令队列与会话交互，不直接碰 Playwright 对象；
 - 循环里调用 wait_for_timeout 让事件得以分发（同步 API 只在调用期间分发事件）。
 """
+import atexit
 import json
 import os
 import queue
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -16,18 +20,51 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
 from app.services.recording import intent as intent_mod
-from app.services.recording import ir, progress, verify
+from app.services.recording import emit, ir, progress, verify, winwindows
 from app.services.recording.ask_pool import STOP_DELAY_SECONDS as ASK_STOP_DELAY_SECONDS
 from app.services.recording.ask_pool import AskPool, disabled_snapshot
 from app.services.recording.locators import (PW_SEMANTIC_KINDS, RF_SEMANTIC_KINDS,
                                              best_effort, build_locator, build_specs,
-                                             narrowest, pick_for, rank, rf_row_scoped_specs,
-                                             row_scoped_spec, stale_check, status_of)
+                                             narrowest, pick_for, pool_for, rank,
+                                             rf_row_scoped_specs, row_scoped_spec,
+                                             stale_check, status_of)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RECORDER_JS = os.path.join(HERE, 'recorder.js')
 # 录制时给目标元素打的临时属性，用来算出「用户点的是第几个匹配」（见 _count）。
 TARGET_MARK_ATTR = 'data-autocase-target'
+
+# 无壳面板是独立进程，不归 Playwright 管：后端要是异常退出（调试时最常见的收场），
+# 它就留在桌面上不走了，还占着一个临时 profile。退出时统一收掉。
+_PANEL_PROCS = set()
+_PANEL_PIDS = set()
+
+
+def _kill_panel_procs():
+    for pid in list(_PANEL_PIDS):
+        try:
+            winwindows.kill_tree(pid)
+        except Exception:
+            pass
+    _PANEL_PIDS.clear()
+    for proc in list(_PANEL_PROCS):
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    _PANEL_PROCS.clear()
+
+
+atexit.register(_kill_panel_procs)
+
+# 面板窗口优先用系统 Edge 打开。Playwright 自带的是 Chrome for Testing，启动后顶部
+# 必挂一条「仅适用于自动测试」的提示条——`--test-type`、`--disable-features=...`
+# 都关不掉（v148 实测），而面板只有三四百像素宽，这条横幅能吃掉首屏一整行。
+# Edge 的 --app 窗口没有这条，标题栏也干净。
+_PANEL_BROWSERS = (
+    r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
+    r'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
+)
 # 光有 index 不够：count 数到 1 也可能数错人。这里把「命中元素与目标的关系」一并算出来，
 # 上层据此排除「指向别人」的候选（locators.hits_target），并给 index 找到的 nth 定位背书。
 FIND_INDEX_JS = """(els, mark) => {
@@ -57,6 +94,54 @@ def _read_js(name):
 
 
 # 把匹配元素全部框出来并编号（人眼确认用）。见 overlay.js 里的两条约束。
+def _png_side(png, offset):
+    """从 PNG 的 IHDR 里读宽/高（字节流，不用引入图片库）。
+
+    offset 16 是宽、20 是高，各 4 字节大端。
+    """
+    try:
+        if len(png) >= offset + 4 and png[:8] == b'\x89PNG\r\n\x1a\n':
+            return int.from_bytes(png[offset:offset + 4], 'big')
+    except Exception:  # noqa: BLE001 - 读不出来就走兜底，不值得影响录制
+        pass
+    return None
+
+
+def _candidate_rows(candidates, info, framework):
+    """候选清单：每条命中了几个、生成时用的是哪条。只给界面看，不参与生成。
+
+    只列**当前框架**那一组：Playwright 和 Robot 各有一套候选，混在一起列十几条，
+    用户根本对不上号。顺序沿用录制时的排序（pool_for 已按该框架的偏好排好）。
+    """
+    adopted = (info or {}).get('desc')
+    return [{
+        'kind': candidate.get('kind'),
+        'desc': candidate.get('desc'),
+        'count': candidate.get('count'),
+        'relation': candidate.get('relation'),
+        'adopted': candidate.get('desc') == adopted,
+    } for candidate in pool_for(framework, candidates)]
+
+
+def _shot_error(exc):
+    """把截图失败翻成一句人话。
+
+    以前这里是 `except: return None`，前端只能写「没截到」——用户不知道是页面跳走了、
+    浏览器关了，还是根本点得太快。失败原因必须跟着步骤走，弹窗里要说得出来。
+    """
+    text = str(exc) or exc.__class__.__name__
+    low = text.lower()
+    if 'target closed' in low or 'has been closed' in low or 'browser has been closed' in low:
+        return '浏览器页面已经关了，截不到图'
+    if 'context was destroyed' in low or 'navigat' in low:
+        return '按下之后页面立刻跳转了，没来得及截'
+    if 'timeout' in low:
+        return '截图超时：按下这一刻页面正忙'
+    if 'detached' in low or 'not attached' in low:
+        return '页面结构正在变化，没来得及截'
+    return '截图失败：' + text[:80]
+
+
 OVERLAY_JS = _read_js('overlay.js')
 CLEAR_OVERLAY_JS = (
     "() => { const el = document.getElementById('__autocase_boxes');"
@@ -67,11 +152,18 @@ CLEAR_OVERLAY_JS = (
 MATCH_SUMMARY_JS = """(els) => els.slice(0, 10).map((el) => {
   const row = el.closest('tr, li, [role=row], [role=listitem], dd, article');
   const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+  const r = el.getBoundingClientRect();
   return {
     tag: el.tagName.toLowerCase(),
     text: clean(el.innerText || el.value || '').slice(0, 40),
     row: row ? clean(row.innerText).slice(0, 40) : null,
     visible: el.getClientRects().length > 0,
+    // 视口坐标，给「不唯一」弹窗在截图上画框用。和截图同一时刻取，所以对得上。
+    // 负数/超出视口的值原样保留，前端据此把框裁掉并标「在屏幕外」。
+    x: Math.round(r.left),
+    y: Math.round(r.top),
+    w: Math.round(r.width),
+    h: Math.round(r.height),
   };
 })"""
 MAX_MATCH_ITEMS = 10
@@ -88,6 +180,12 @@ PUMP_MS = 30
 PRECOUNT_TTL = 5.0
 # 最多留几条：只可能命中紧接着的那次 click，不需要攒。
 PRECOUNT_MAX = 8
+# 输入框每敲一个字符就来一条 fill。同一条元素在这个窗口内复用同一张图：
+# 页面没变，重截只是白白多花 50~80ms。
+FILL_SHOT_REUSE = 1.5
+# 截图自己最多等多久。等待期间录制线程是停着的，不能按 Playwright 默认的 30 秒等：
+# 页面真在跳转时它会一直卡到超时，把后面的点击全堵在队列里。
+SHOT_TIMEOUT_MS = 1500
 # 「回到这一步的页面」用记下来的地址重新打开，不走浏览器后退：
 # 实测后退会被登录跳转留下的历史条目带偏（URL 落到 /login，前进也回不去）。
 # 静音 4 秒是给 SPA 连续几次 framenavigated 上报留的窗口。
@@ -98,6 +196,8 @@ GOTO_TIMEOUT_MS = 20000
 COMMAND_TIMEOUT = 60
 # 关闭浏览器这类命令不能把请求线程拖住：关不掉就让线程自己退出。
 CLOSE_TIMEOUT = 8
+# 「定位详情」最多带回多少个匹配元素：弹窗里再多人也没法一条条看，40 已经够判断了。
+LOCATE_MAX_ITEMS = 40
 PICK_OFF_TAGS = ('select', 'label')
 NON_TEXT_INPUT_TYPES = ('button', 'submit', 'reset', 'checkbox', 'radio')
 # 被录制页面里的浮层：只显示最近几步，避免面板过高挡住应用。
@@ -214,6 +314,16 @@ class RecordingSession(object):
         self._panel_ratio = panel_ratio if 0.2 <= panel_ratio <= 0.8 else 0.45
         self._panel_context = None
         self._panel_page = None
+        # 面板的「无壳窗口」形态（Windows + 有头）：独立 Chromium 实例跑 --app，
+        # 没有标签栏和地址栏，看起来就是 AutoCase 自己的侧栏。
+        # 这条路走不通（非 Windows / 起不来）就退回同浏览器的第二个窗口。
+        self._panel_proc = None
+        self._panel_profile = None
+        self._panel_hwnd = 0
+        # 被测窗口的 HWND 与「粘合」线程：拖其中一个，另一个跟着走。
+        self._main_hwnd = 0
+        self._glue = None
+        self._chromium_path = None
         # 页面内悬浮面板默认关闭，只保留操作点的即时徽标。
         self._hud_panel = hud_panel
         self._lock = threading.RLock()
@@ -244,9 +354,15 @@ class RecordingSession(object):
         self._return_url = None
         # frame id → 最近一次点击的时间。用来判断「这次导航是不是点击引起的」，取用即失效。
         self._pending_click = {}
-        # mark → (时间, 候选计数, 同名元素快照)：pointerdown 时先数一遍，click 命中后即取走。
-        # 下拉项、选中态这类元素会被点击自己从 DOM 上带走，click 回来再数只能数到 0。
+        # mark → (时间, 候选计数, 同名元素快照, 按下那一刻的截图)：pointerdown 时先数一遍，
+        # click 命中后即取走。下拉项、选中态这类元素会被点击自己从 DOM 上带走，
+        # click 回来再数只能数到 0；同一时刻截的图也是唯一能证明「点的是哪一个」的东西。
         self._precounts = {}
+        # 不唯一时的视口截图：shot_id → png 字节。只在内存里，录制结束即清。
+        self._shots = {}
+        # 输入/按键没有 pointerdown 那个时机，只能事件到达时截。fill 每个字符来一条，
+        # 同一元素短时间内沿用上一张，否则打字会被「每个字符一张 80ms 的图」拖死。
+        self._fill_shots = {}
         self._pick = False
         # 暂停录制：浏览器照常可用，但操作不再记为步骤（同 Playwright codegen 的 Pause）。
         self._paused = False
@@ -254,6 +370,10 @@ class RecordingSession(object):
         self._last_activity = time.time()
         self._browser = None
         self._context = None
+        # 停止录制时抓一份 cookie / localStorage 快照。生成的脚本要在真实环境里跑一遍
+        # 才能算验证，而登录态属于环境、不属于脚本 —— 不能写进用例，只能由运行器注入。
+        # 只在内存里放一份，落盘由调用方用临时文件处理（里面有会话凭据）。
+        self._storage_state = None
         self._thread = threading.Thread(target=self._run, name='recording-%s' % self.id[:8], daemon=True)
 
     # ---- 会话管理（Flask 线程调用）----
@@ -308,6 +428,24 @@ class RecordingSession(object):
         """关掉浏览器与面板窗口（录制结果保留）。"""
         return self._call('close', timeout=CLOSE_TIMEOUT)
 
+    def storage_state(self):
+        """录制结束时抓到的登录态快照；浏览器已关也能取到。
+
+        只给「跑一遍生成的脚本」用：登录态属于运行环境，不属于用例本身，
+        所以在界面上不可见，也不会被写进用户的仓库。
+        """
+        cached = getattr(self, '_storage_state', None)
+        if cached:
+            return cached
+        # 有些测试会绕过 __init__ 直接造会话，没有线程也调用不到浏览器。
+        thread = getattr(self, '_thread', None)
+        if thread is None or not thread.is_alive():
+            return None
+        try:
+            return self._call('storage_state', timeout=COMMAND_TIMEOUT)
+        except RecordingError:
+            return None
+
     def verify_intent(self, intent):
         """在当前页面上判断一条断言此刻是否成立。"""
         return self._call('verify', intent=intent)
@@ -319,6 +457,13 @@ class RecordingSession(object):
         """
         return self._call('highlight', no=no, index=index, framework=framework)
 
+    def locate(self, no, framework='playwright-ts'):
+        """这一步「生成时到底用哪条定位」，以及它此刻在当前页面上还在不在、唯不唯一。
+
+        只读录制数据，只往页面上画一次框（不画出来等于没验证）。浏览器关掉时 ok=False。
+        """
+        return self._call('locate', no=no, framework=framework)
+
     def clear_highlight(self):
         return self._call('clear_highlight')
 
@@ -329,6 +474,10 @@ class RecordingSession(object):
         元素了（不同选择器的匹配顺序不一定相同）。生成时据此走用户选的那条。
         """
         return self._call('set_chosen', no=no, desc=desc, index=index, timeout=COMMAND_TIMEOUT)
+
+    def set_degraded(self, no):
+        """用户明确「这一步允许降级」：不再追问，生成时按最窄候选 + 录制时的序号写。"""
+        return self._call('degrade', no=no, timeout=COMMAND_TIMEOUT)
 
     def cancel(self):
         """内部中止：关浏览器但不重校验定位。界面上没有入口（只有「停止录制」），
@@ -343,7 +492,12 @@ class RecordingSession(object):
             pass
 
     def relayout(self):
-        """把被测页面和面板窗口重新摆成左右并排。"""
+        """把被测页面和面板窗口重新摆成左右并排。
+
+        界面上没有入口（「并排」按钮实测太鸡肋，已去掉）：开始录制时 `_run` 会自动
+        排一次，之后靠粘合跟着走。留着这个线程安全的入口给验证脚本和测试用——
+        直接调 `layout_windows()` 会碰到 Playwright 对象，只能在会话线程里执行。
+        """
         return self._call('relayout')
 
     def focus_sheet(self, on=True):
@@ -415,9 +569,12 @@ class RecordingSession(object):
                 # 下拉里要区分「删除」和「删除#2」，只给字符串分不出来（见 alias_items）。
                 'alias_items': self.alias_items(),
                 # 面板窗口是否开着，前端据此显示「重新并排」按钮。
-                'panel': self._panel_page is not None,
+                # 面板可能是同浏览器的第二个窗口，也可能是 --app 起的独立无壳窗口
+                'panel': self._panel_page is not None or bool(getattr(self, '_panel_hwnd', 0)),
                 # 浏览器的生命周期比录制长：停止后仍开着，前端据此决定能否继续拾取 / 验证。
                 'browser_open': self._browser_open(),
+                # 有没有抓到登录态：生成本身不依赖它，但「跑一遍」依赖。
+                'auth_saved': bool(getattr(self, '_storage_state', None)),
                 # 断言解析器（录制期常驻的 opencode）状态：就绪 / 启动中 / 不可用。
                 'ask': pool.snapshot() if pool is not None else disabled_snapshot(),
                 # 生成进度：主界面和录制面板是两个窗口，只靠各自的本地 loading
@@ -428,6 +585,30 @@ class RecordingSession(object):
     def _browser_open(self):
         return (getattr(self, '_browser', None) is not None
                 and self.status in ('starting', 'recording', 'stopped', 'idle_timeout'))
+
+    def _capture_storage_state(self):
+        """抓一份 cookie / localStorage 快照。必须在会话线程里调（Playwright 对象不是线程安全的）。
+
+        只抓一次：停止后再点一次停止、或关浏览器时都不该重新抓 —— 那时页面可能已经被
+        「回去看」跳到了别的步骤，抓到的就不是用户真正用来生成的那份登录态了。
+        """
+        cached = getattr(self, '_storage_state', None)
+        if cached:
+            return cached
+        if getattr(self, '_context', None) is None:
+            return None
+        try:
+            try:
+                # indexedDb 只有较新的 Playwright 支持；老版本会 TypeError。
+                state = self._context.storage_state(indexed_db=True)
+            except TypeError:
+                state = self._context.storage_state()
+        except Exception:
+            return None
+        if not isinstance(state, dict):
+            return None
+        self._storage_state = state
+        return state
 
     def ir(self):
         """完整 IR（含可执行的定位 spec），供回放与生成使用；不返回给前端。"""
@@ -753,6 +934,11 @@ class RecordingSession(object):
     def _run(self):
         try:
             with sync_playwright() as p:
+                # 面板的 --app 窗口要自己拉进程，得先拿到同一个 Chromium 的可执行文件。
+                try:
+                    self._chromium_path = p.chromium.executable_path
+                except Exception:
+                    self._chromium_path = None
                 self._browser = p.chromium.launch(headless=self._headless)
                 # no_viewport：页面跟随真实窗口大小。Playwright 默认会给 1280×720 的
                 # viewport（用 CDP 覆盖渲染尺寸），窗口最大化后页面仍按 1280 渲染，
@@ -888,6 +1074,7 @@ class RecordingSession(object):
                 elif name == 'close':
                     # 先把结果回给请求线程，再关窗口——面板可能就活在这个浏览器里。
                     # 状态要按「关掉之后」写，不能等 _shutdown 之后再取（那时已经回不了话）。
+                    self._capture_storage_state()
                     result = dict(self.snapshot(), browser_open=False)
                     reply.put((True, result))
                     self._shutdown()
@@ -915,10 +1102,16 @@ class RecordingSession(object):
                 elif name == 'highlight':
                     result = self._highlight_now(kwargs['no'], kwargs.get('index'),
                                                  kwargs.get('framework') or 'playwright-ts')
+                elif name == 'locate':
+                    result = self._locate_now(kwargs['no'], kwargs.get('framework') or 'playwright-ts')
                 elif name == 'clear_highlight':
                     result = self._clear_highlight_now()
                 elif name == 'set_chosen':
                     result = self._set_chosen_now(kwargs['no'], kwargs['desc'], kwargs['index'])
+                elif name == 'degrade':
+                    result = self._degrade_now(kwargs['no'])
+                elif name == 'storage_state':
+                    result = self._capture_storage_state()
                 else:
                     raise RecordingError('未知命令：%s' % name)
                 reply.put((True, result))
@@ -931,6 +1124,8 @@ class RecordingSession(object):
     def _mark_stopped(self, status, revalidate):
         """结束记录：不再入库新步骤，但浏览器和面板都留着。"""
         self._process_inbox()
+        # 先抓登录态，再重校验定位：重校验会跳页面，抓晚了拿到的可能不是录制时那份。
+        self._capture_storage_state()
         with self._lock:
             self.status = 'stopping'
             # 没等到 click 的预计数不能再落到下一轮，缓存清掉。
@@ -960,6 +1155,9 @@ class RecordingSession(object):
                 self._panel_context.close()
         except Exception:
             pass
+        # 无壳面板是独立进程，粘合线程也要收掉，否则钩子会一直挂在已销毁的窗口上。
+        self._stop_glue()
+        self._cleanup_panel_app()
         self._panel_page = None
         self._panel_context = None
         try:
@@ -1012,8 +1210,16 @@ class RecordingSession(object):
     # ---- 编排面板窗口（独立 context，与被测页面左右并排）----
 
     def _open_panel(self):
-        """额外开一个窗口加载前端录制页。打不开就退回单窗口录制，不影响录制本身。"""
+        """额外开一个窗口加载前端录制页。打不开就退回单窗口录制，不影响录制本身。
+
+        优先走 `--app` 无壳窗口：它没有标签栏和地址栏，跟被测窗口贴在一起时看起来
+        就是 AutoCase 自己的侧栏，而不是「又开了一个浏览器」。起不来（非 Windows、
+        无头、Chromium 路径拿不到）就退回原来的「同浏览器再开一个窗口」。
+        """
         if not self._panel_url or self._browser is None:
+            return
+        if self._open_panel_app():
+            self.layout_windows()
             return
         try:
             # no_viewport：让页面跟随窗口大小，而不是被固定 viewport 框住。
@@ -1034,10 +1240,119 @@ class RecordingSession(object):
             return
         self.layout_windows()
 
+    def _panel_browser(self):
+        """给面板窗口挑一个浏览器：优先系统 Edge，没有就退回自带的 Chromium。"""
+        for path in _PANEL_BROWSERS:
+            if os.path.exists(path):
+                return path
+        return self._chromium_path
+
+    def _open_panel_app(self):
+        """用 --app 起一个无壳浏览器当面板窗口。成功返回 True。"""
+        exe = self._panel_browser()
+        if not winwindows.available() or self._headless or not exe:
+            return False
+        before = winwindows.all_windows()
+        try:
+            self._panel_profile = tempfile.mkdtemp(prefix='autocase-panel-')
+            proc = subprocess.Popen(
+                [exe, '--app=' + self._panel_url,
+                 '--user-data-dir=' + self._panel_profile,
+                 '--no-first-run', '--no-default-browser-check',
+                 # Edge 会拿 Windows 登录的账号弹「同步你的浏览数据」，那是个独立窗口，
+                 # 出现在被测页面上面挡一半屏。关掉同步和后台服务自动启动就没这回事了。
+                 '--disable-sync', '--no-service-autorun',
+                 '--window-size=460,900']
+                # 只有 AutoCase 自己跑在 https 上（自签名证书）才需要放行；平时是
+                # http://localhost，加了这个参数反而会被挂一条黄色安全警告条。
+                + (['--ignore-certificate-errors'] if self._panel_url.startswith('https') else []),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            self._cleanup_panel_app()
+            return False
+        hwnd = self._wait_panel_window(proc, before)
+        if not hwnd:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            self._panel_proc = None
+            self._cleanup_panel_app()
+            return False
+        self._panel_proc = proc
+        _PANEL_PROCS.add(proc)
+        self._panel_hwnd = hwnd
+        pid = winwindows.pid_of_window(hwnd)
+        if pid:
+            _PANEL_PIDS.add(pid)
+        return True
+
+    def _wait_panel_window(self, proc, before, timeout=12.0):
+        """等 --app 的窗口出现。
+
+        先按进程号找（正常情况就是这样）；找不到就退回「启动后新冒出来的那个
+        浏览器窗口」——Edge 的启动器把活交给真正的浏览器进程后就自己退了，
+        pid 对不上，只看 pid 会误判成启动失败。
+        """
+        deadline = time.time() + timeout
+        exited_at = None
+        while time.time() < deadline:
+            wins = winwindows.find_windows(proc.pid)
+            if wins:
+                return wins[0]
+            fresh = winwindows.all_windows() - before
+            if fresh:
+                return sorted(fresh)[0]
+            if proc.poll() is not None:
+                exited_at = exited_at or time.time()
+                # 启动器退出后再给两秒：真正的浏览器进程可能还在起。
+                if time.time() - exited_at > 2.5:
+                    return 0
+            else:
+                exited_at = None
+            time.sleep(0.2)
+        return 0
+
+    def _cleanup_panel_app(self):
+        """收掉 --app 面板窗口和它的临时 profile。
+
+        按**窗口所属进程**杀整棵树，而不是 terminate 那个 Popen：Edge/Chrome 的
+        启动器把活交给真正的浏览器进程后自己就退了，terminate 拿的是个空壳，
+        窗口会留在桌面上不走（实测残留过 7 个）。
+        """
+        pid = winwindows.pid_of_window(self._panel_hwnd) if self._panel_hwnd else 0
+        if pid and pid != os.getpid():
+            _PANEL_PIDS.discard(pid)
+            winwindows.kill_tree(pid)
+        self._panel_hwnd = 0
+        proc = self._panel_proc
+        self._panel_proc = None
+        if proc is not None:
+            _PANEL_PROCS.discard(proc)
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        profile = self._panel_profile
+        self._panel_profile = None
+        if profile:
+            try:
+                shutil.rmtree(profile, ignore_errors=True)
+            except Exception:
+                pass
+
     def layout_windows(self):
         """把被测页面与面板窗口左右并排；用户挪过窗口后可再次调用。"""
         if self._context is None or self._embed:
             # 嵌入模式只有一个窗口，不需要并排。
+            return False
+        if self._layout_native():
+            return True
+        if self._panel_page is None:
+            # 无壳面板是**另一个进程**的窗口，下面的 CDP 兜底根本够不着它。
+            # 以前这里照样 return True：被测窗口被挪了一下、面板原地不动，
+            # 前端却弹「已重新并排」——用户看到的就是「右边空一大块」还提示成功。
+            # 宁可如实报失败，让界面说「无法调整窗口位置」。
             return False
         try:
             main = self._context.pages[0]
@@ -1060,16 +1375,138 @@ class RecordingSession(object):
         except Exception:
             return False
 
+    # ---- 两个窗口贴成一对（Windows 原生）----
+
+    def _browser_pid(self):
+        """Playwright 浏览器主进程的 pid。窗口都在它名下。"""
+        try:
+            cdp = self._browser.new_browser_cdp_session()
+            info = cdp.send('SystemInfo.getProcessInfo')
+            cdp.detach()
+            for item in info.get('processInfo') or []:
+                if item.get('type') == 'browser':
+                    return int(item.get('id') or 0)
+        except Exception:
+            pass
+        return 0
+
+    def _main_window_hwnd(self):
+        """被测页面的窗口句柄。窗口被关掉过就重新找一次。"""
+        if self._main_hwnd and winwindows.is_usable(self._main_hwnd):
+            return self._main_hwnd
+        pid = self._browser_pid()
+        wins = winwindows.find_windows(pid) if pid else []
+        self._main_hwnd = wins[0] if wins else 0
+        return self._main_hwnd
+
+    def _layout_native(self):
+        """按显示器工作区把两个窗口摆成紧贴的一对，然后开粘合。
+
+        比的是**可见边界**而不是窗口矩形：Win10 每个窗口左右各有约 8px 不可见的
+        拉伸边框，按矩形贴死视觉上会漏 16px 的桌面，看着像一条黑缝。
+        """
+        if not winwindows.available() or self._embed or self._headless:
+            return False
+        if not getattr(self, '_panel_hwnd', 0):
+            return False
+        if not winwindows.prepare(self._panel_hwnd):
+            # 面板窗口被用户关掉了：别再按旧句柄摆位，走兜底分支即可。
+            return False
+        main = self._main_window_hwnd()
+        if not main:
+            return False
+        if not winwindows.prepare(main):
+            return False
+        area = winwindows.work_area(main) or winwindows.work_area(self._panel_hwnd)
+        if not area:
+            return False
+        ax, ay, aw, ah = area
+        panel_w = max(360, int(aw * self._panel_ratio))
+        page_w = max(480, aw - panel_w)
+        panel_w = aw - page_w
+        # 摆完回头看一眼：刚从最大化还原的窗口，边框尺寸在还原那一刻才变，
+        # 第一遍 move_visible 用的还是最大化时的旧边框，能差出几十像素
+        # （实测 806 摆成 896，面板右边界直接跑到屏幕外）。给它一拍再看，不对就再摆。
+        for attempt in range(3):
+            moved = winwindows.move_visible(main, ax, ay, page_w, ah)
+            moved = winwindows.move_visible(self._panel_hwnd, ax + page_w, ay, panel_w, ah) and moved
+            if not moved:
+                return False
+            if attempt == 2:
+                break
+            time.sleep(0.05)
+            if self._pair_is_flush(main, ax, page_w, panel_w):
+                break
+        self._start_glue(main)
+        return True
+
+    def _pair_is_flush(self, main, ax, page_w, panel_w, tol=4):
+        """两个窗口是不是真的按预期贴住了。
+
+        校验四件事：被测窗口落在工作区左边、宽度是分到的那份、面板的左边就是被测
+        窗口的右边、面板宽度也是分到的那份。刚从最大化还原时最容易有哪条不成立。
+        """
+        mv = winwindows.visible_rect(main)
+        pv = winwindows.visible_rect(self._panel_hwnd)
+        if not mv or not pv:
+            return False
+        return (abs(mv[0] - ax) <= tol and abs(mv[2] - page_w) <= tol
+                and abs(pv[0] - (mv[0] + mv[2])) <= tol
+                and abs(pv[2] - panel_w) <= tol)
+
+    def _start_glue(self, main_hwnd=None):
+        """粘合：拖任意一个窗口，另一个按同样的位移跟着走。
+
+        先停旧的再起新的：重新并排时窗口位置变了，旧钩子留着只会互相打架。
+        """
+        self._stop_glue()
+        main = main_hwnd or self._main_window_hwnd()
+        if not main or not getattr(self, '_panel_hwnd', 0):
+            return False
+        glue = winwindows.Glue(main, self._panel_hwnd)
+        if glue.start():
+            self._glue = glue
+            return True
+        return False
+
+    def _stop_glue(self):
+        glue = getattr(self, '_glue', None)
+        if glue is not None:
+            try:
+                self._glue.stop()
+            except Exception:
+                pass
+            self._glue = None
+
     def sheet_windows(self, on=True):
         """任务书浮层的窗口形态：铺宽读文档 / 收回并排。
 
         embed 模式只有一个窗口、也没有独立面板窗口，直接返回 False，
         前端拿到 False 就不做任何事（浮层照样是窗口内的 96vw）。
         """
-        if self._context is None or self._embed or self._panel_page is None:
+        if self._context is None or self._embed:
+            return False
+        # 两种面板窗口（同浏览器的新窗口 / --app 无壳窗口）都算「有面板」，
+        # 一个都没有就是单窗口录制，铺宽/收回都无从谈起。
+        if self._panel_page is None and not getattr(self, '_panel_hwnd', 0):
             return False
         if not on:
             return self.layout_windows()
+        if getattr(self, '_panel_hwnd', 0):
+            # 无壳面板：直接把它铺到工作区中间，读完再 layout_windows 摆回去。
+            # 铺之前先解开粘合，否则被拖的会拉着被测窗口一起跑。
+            self._stop_glue()
+            area = winwindows.work_area(self._panel_hwnd)
+            if not area:
+                return False
+            ax, ay, aw, ah = area
+            width = max(720, min(aw - 60, 1280))
+            height = max(480, ah - 60)
+            return winwindows.move_visible(
+                self._panel_hwnd, ax + (aw - width) // 2, ay + (ah - height) // 2, width, height)
+        if self._panel_page is None:
+            return False
+
         try:
             size = self._panel_page.evaluate(
                 '() => ({ w: screen.availWidth, h: screen.availHeight })')
@@ -1465,7 +1902,9 @@ class RecordingSession(object):
                 # 两者都不该自动变成「打开页面」。
                 return
             elif self._clicked_recently(frame):
-                # 点击引起的跳转不单独记 goto：脚本里点完自然会跳。
+                # 点击引起的跳转不单独记 goto：脚本里点完自然会跳。但「会跳到哪」要记在
+                # 点击那一步上——生成时据此写「点完等跳转落地」，站点一慢也不至于下一步扑空。
+                self._mark_click_nav(url)
                 return
             else:
                 step_type = 'goto'
@@ -1512,6 +1951,17 @@ class RecordingSession(object):
             self._pending_click.pop(key, None)
             return False
         return True
+
+    def _mark_click_nav(self, url):
+        """把这次跳转的落点记到触发它的点击步骤上（nav_to）。
+
+        只往回看三步：点击之后一般紧跟 new_page，再往前就跨过了别的操作，那不是这次跳转
+        的原因。SPA 连着几次 framenavigated 时以最后一个落点为准（一般就是重定向后的终址）。
+        """
+        for step in reversed(self._steps[-3:]):
+            if step['type'] == 'click':
+                step['nav_to'] = url
+                return
 
     def _page_index(self, page):
         try:
@@ -1696,7 +2146,7 @@ class RecordingSession(object):
             # 页面正在导航 / frame 已销毁：当作不在了，宁可少弹一次。
             return False
 
-    def _handle_precount(self, frame, snap):
+    def _handle_precount(self, frame, snap, page=None):
         """pointerdown 时先数一遍候选，按 mark 缓存，等 click 来取。
 
         下拉项、选中态、菜单按钮这类元素会被点击自己从 DOM 上带走：等 click 回来再数，
@@ -1717,13 +2167,99 @@ class RecordingSession(object):
             return
         # 同名元素的快照也在这时候取：点完它们可能就没了，这份快照是「当场选第几个」的依据。
         matches = self._collect_matches(frame, counted)
+        # 只有真的不唯一才截图：截图 50~80ms，唯一的那几百次点击没必要付这个成本。
+        # 失败也留一份（带 error），弹窗要能说清「为什么没图」。
+        shot = self._capture_shot(page, frame, matches) if matches else None
         now = time.monotonic()
         with self._lock:
             self._precounts = {k: v for k, v in self._precounts.items()
                                if now - v[0] <= PRECOUNT_TTL}
-            self._precounts[mark] = (now, counted, matches)
+            self._precounts[mark] = (now, counted, matches, shot)
             while len(self._precounts) > PRECOUNT_MAX:
                 self._precounts.pop(next(iter(self._precounts)))
+
+    def _shot_clip(self, page, frame):
+        """截图该截哪一块：被测页面在 iframe 里时，只截那个 iframe。
+
+        这是之前最要命的一处：embed 模式下整页是「AutoCase 外壳 + 右边编排面板」，
+        被测系统只是左边的 iframe。截整页不但把我们自己的界面拍进去，框的坐标
+        （iframe 内的）放到整页图上还会整体偏移——图看着有，实际对不上。
+        传进来的 frame 是被点元素所在的 frame，它的位置就是被测区域。
+
+        主流页面（元素在主 frame）返回 None，整页就是被测页面，不用裁。
+        """
+        if page is None or frame is None:
+            return None
+        try:
+            if frame == page.main_frame:
+                return None
+            handle = frame.frame_element()
+        except Exception:
+            # 取不到 iframe 的位置（frame 正在销毁）：退回整页，总比没有图强。
+            return None
+        try:
+            box = handle.bounding_box()
+        except Exception:
+            return None
+        finally:
+            # frame_element() 给的是 ElementHandle，不主动释放会在长会话里攒下来。
+            try:
+                handle.dispose()
+            except Exception:
+                pass
+        if not box:
+            return None
+        left, top = float(box.get('x') or 0), float(box.get('y') or 0)
+        width, height = float(box.get('width') or 0), float(box.get('height') or 0)
+        if width < 8 or height < 8:
+            return None
+        # clip 必须落在页面内：超出视口 Playwright 直接报错。
+        # 外层的 shell 页不滚动，正常情况下这里不会裁掉任何东西。
+        try:
+            view_w, view_h = page.evaluate('[window.innerWidth, window.innerHeight]')
+        except Exception:
+            view_w, view_h = left + width, top + height
+        left, top = max(0.0, left), max(0.0, top)
+        right = min(float(view_w), float(box.get('x') or 0) + width)
+        bottom = min(float(view_h), float(box.get('y') or 0) + height)
+        if right - left < 8 or bottom - top < 8:
+            return None
+        return {'x': left, 'y': top, 'width': right - left, 'height': bottom - top}
+
+    def _capture_shot(self, page, frame, matches):
+        """按下鼠标那一刻截一张**视口**图，给「不唯一」弹窗画框用。
+
+        为什么在这里截：precount 是 pointerdown 发的，比 click 和跳转都早。等点完再截，
+        「点一下跳走」的那类只会得到一张新页面（甚至白屏）——而那正是最需要图的场景。
+
+        只截视口不截全页：长列表的全页图能到 3000px，传输和渲染都慢，
+        多换来的只是「屏幕外那几屏」，而屏幕外的元素本来也没法用眼睛确认。
+        图只在内存里，不落盘、不进工作区；录制结束就没了。
+        """
+        if page is None or not matches:
+            return {'error': '这一步没有可截的页面'}
+        clip = self._shot_clip(page, frame)
+        try:
+            png = page.screenshot(type='png', clip=clip, timeout=SHOT_TIMEOUT_MS)
+        except Exception as exc:  # noqa: BLE001 - 截图失败不能影响录制，但原因要留下
+            return {'error': _shot_error(exc)}
+        if not png:
+            return {'error': '浏览器没有返回图片'}
+        if clip:
+            # 有 clip 时尺寸就是裁出来的那块（CSS 像素），不用再按 DPR 折算。
+            return {'png': png, 'w': int(round(clip['width'])), 'h': int(round(clip['height']))}
+        # 有头浏览器上 viewport_size 是 None，而 PNG 的像素尺寸又受设备缩放影响。
+        # 画框用的是 CSS 像素，所以这里统一按 devicePixelRatio 折回 CSS 尺寸——
+        # 直接用 PNG 宽度当分母的话，125% 缩放的机器上框会整体偏小一圈。
+        png_w, png_h = _png_side(png, 16), _png_side(png, 20)
+        try:
+            dpr = page.evaluate('window.devicePixelRatio') or 1
+        except Exception:
+            dpr = 1
+        size = page.viewport_size or {}
+        return {'png': png,
+                'w': int(round(png_w / dpr)) if png_w else size.get('width'),
+                'h': int(round(png_h / dpr)) if png_h else size.get('height')}
 
     def _take_precount(self, mark):
         """取走按下鼠标时算好的计数；过期或没有就返回 None（退回现场再数）。"""
@@ -1733,7 +2269,71 @@ class RecordingSession(object):
             item = self._precounts.pop(mark, None)
         if item is None or time.monotonic() - item[0] > PRECOUNT_TTL:
             return None
-        return item[1], item[2]
+        # 老数据/老测试可能只塞了两三项，按下标取，别用解包。
+        return item[1], item[2], (item[3] if len(item) > 3 else None)
+
+    def _register_shot(self, shot):
+        """截图进内存字典，返回给前端的元信息（不含字节）。
+
+        id 递增不复用：步骤重新编号（插入/删除）之后仍能按 id 找到自己的那张图。
+        没有图但有失败原因时，把原因原样带回去——前端据此显示「为什么没截到」，
+        而不是一句空的「没截到」。
+        """
+        if not shot:
+            return None
+        if not shot.get('png'):
+            error = shot.get('error')
+            return {'error': error} if error else None
+        with self._lock:
+            self._shot_seq = getattr(self, '_shot_seq', 0) + 1
+            shot_id = 'shot-%d' % self._shot_seq
+            self._shots[shot_id] = shot
+            # 一小时的录制可能攒几十张，每张 100~300KB：只留最近 40 张，够回头选了。
+            while len(self._shots) > 40:
+                self._shots.pop(next(iter(self._shots)))
+        return {'id': shot_id, 'w': shot.get('w'), 'h': shot.get('h')}
+
+    def _shot_for(self, kind, page, frame, matches, cached_shot, key):
+        """给这一步配一张图：click 用按下那一刻的，fill/press 现在截。
+
+        输入和按键没有 pointerdown 那个时机（fill 是 input 事件，press 是 keydown），
+        之前这两类永远没有图——「很多都显示没截到」主要就是它们。
+        它们也不会像点击那样把页面带走，所以事件到达时截是安全的。
+
+        fill 每敲一个字符就来一条，同一条元素 1.5 秒内复用上一张：页面没变，
+        重截只是白花 50~80ms，还会把后面的按键堵在队列里。
+        """
+        if cached_shot:
+            return self._register_shot(cached_shot)
+        if kind not in ('fill', 'press'):
+            return None
+        # 连续输入会合并成上一条 fill：直接沿用它的图，不必再截。
+        # 打一段长文字中间停两秒也只会重截一次，不会每停一次就多一张。
+        if kind == 'fill':
+            with self._lock:
+                last = self._steps[-1] if self._steps else None
+            if last and last.get('type') == 'fill' and last.get('_key') == key:
+                prev_meta = (last.get('target') or {}).get('shot')
+                if prev_meta and prev_meta.get('id'):
+                    return dict(prev_meta)
+        now = time.monotonic()
+        with self._lock:
+            hit = self._fill_shots.get(key)
+        if hit and now - hit[0] <= FILL_SHOT_REUSE:
+            return dict(hit[1])
+        meta = self._register_shot(self._capture_shot(page, frame, matches))
+        if meta and meta.get('id'):
+            with self._lock:
+                self._fill_shots[key] = (now, dict(meta))
+                while len(self._fill_shots) > 20:
+                    self._fill_shots.pop(next(iter(self._fill_shots)))
+        return meta
+
+    def shot(self, no):
+        """按步骤号取截图字节（步骤重新编号后依然正确，因为 id 挂在 target 上）。"""
+        step = self._find_step(no)
+        meta = ((step.get('target') or {}).get('shot') or {}) if step else {}
+        return self._shots.get(meta.get('id'))
 
     def _collect_matches(self, frame, counted):
         """不唯一时，把「这批匹配到底是哪几个」存一份到 target 上。
@@ -1890,6 +2490,74 @@ class RecordingSession(object):
                 pass
         return {'ok': True}
 
+    def _locate_now(self, no, framework='playwright-ts'):
+        """这一步采用的定位 + 它此刻在当前页面上的状态（存在 / 唯一 / 可见）。
+
+        **「采用」必须和生成脚本同口径**：直接问 `emit._locator_info`，不在这儿另写
+        一份「哪条最好」的判断——两份判断迟早会变成「弹窗说 A、生成写 B」。
+
+        只读：不改任何录制数据。副作用只有一次画框（框出来才算真看见）。
+        """
+        step = self._find_step(no)
+        target = step.get('target') or {}
+        info = emit._locator_info(target, framework) if target else None
+        base = {
+            'no': no,
+            'alias': target.get('alias'),
+            'framework': framework,
+            'checked_at': time.time(),
+            'page_url': None,
+            'page_gone': bool(target.get('page_gone')),
+            'mode': (info or {}).get('mode'),
+            'code': (info or {}).get('locator'),
+            'kind': (info or {}).get('kind'),
+            'desc': (info or {}).get('desc'),
+            'recorded_count': (info or {}).get('matches'),
+            'candidates': _candidate_rows(target.get('candidates') or [], info, framework),
+        }
+        if not target:
+            return dict(base, ok=False, reason='no_target', count=0, exists=False, unique=False)
+        frame = step.get('_frame') or self._app_frame()
+        if frame is None:
+            return dict(base, ok=False, reason='no_frame', count=0, exists=False, unique=False)
+        try:
+            base['page_url'] = frame.url
+        except Exception:  # noqa: BLE001 - frame 已经 detach
+            pass
+        if not info or not info.get('spec'):
+            # 所有候选在录制时就是 0 个（页面当时已经翻走），没有能在当前页面查的东西。
+            return dict(base, ok=False, reason='no_candidate', count=0, exists=False, unique=False)
+        try:
+            locator = build_locator(frame, info['spec'])
+            count = locator.count()
+        except Exception as exc:  # noqa: BLE001 - frame 已销毁 / 页面已关
+            return dict(base, ok=False, reason='frame_lost', detail=str(exc)[:200],
+                        count=0, exists=False, unique=False)
+        index = info.get('nth')
+        if not isinstance(index, int) or not 0 <= index < max(count, 1):
+            index = 0
+        items = []
+        if count:
+            try:
+                # OVERLAY_JS 把每个匹配都框出来并编号，顺手带回可见性和文字——一次调用两件事。
+                items = locator.evaluate_all(OVERLAY_JS, index) or []
+            except Exception as exc:  # noqa: BLE001
+                return dict(base, ok=False, reason='overlay_failed', detail=str(exc)[:200],
+                            count=count, exists=True, unique=count == 1)
+        active = next((item for item in items if item.get('index') == index),
+                      items[0] if items else None)
+        return dict(
+            base,
+            ok=True,
+            reason=None,
+            index=index,
+            count=count,
+            exists=count > 0,
+            unique=count == 1,
+            visible=bool(active and active.get('visible')),
+            items=items[:LOCATE_MAX_ITEMS],
+        )
+
     def _set_chosen_now(self, no, desc, index):
         step = self._find_step(no)
         target = step.get('target') or {}
@@ -1900,6 +2568,20 @@ class RecordingSession(object):
                     candidate['index'] = index
                     candidate.pop('index_invalid', None)
             target['chosen'] = {'desc': desc, 'index': index}
+        return self.snapshot()
+
+    def _degrade_now(self, no):
+        """用户明确「这一步允许降级」：按最窄候选 + 录制时的序号生成，不再追问。
+
+        和「选一个」的区别：选一个说的是「取第 2 个」，降级说的是「我不看了，
+        你按录制时那个写」。两者都会让这一步不再算待确认。
+        """
+        step = self._find_step(no)
+        target = step.get('target')
+        if not target:
+            raise RecordingError('这一步没有目标元素，无法降级')
+        with self._lock:
+            target['degraded'] = True
         return self.snapshot()
 
     def _on_event(self, source, raw):
@@ -1920,7 +2602,7 @@ class RecordingSession(object):
 
         # 按下鼠标时先数一遍候选：只存缓存，不落库。随后的 click 会按 mark 取走。
         if kind == 'precount':
-            self._handle_precount(frame, snap)
+            self._handle_precount(frame, snap, page)
             return
 
         # 点可写入的文本框只是聚焦，值由随后的 fill 表达，记成 click 会多一步。
@@ -1950,13 +2632,14 @@ class RecordingSession(object):
             doc = self._doc_identity(frame)
         counted = None
         cached_matches = None
+        cached_shot = None
         vanished_after = False
         if mark:
             # 按下鼠标时已经数过：直接用那一刻的结果。点击自己把元素带走后，
             # 现在再数只会得到 0（未核实），但用户点的时候它明明在。
             cached = self._take_precount(mark)
             if cached is not None:
-                counted, cached_matches = cached
+                counted, cached_matches, cached_shot = cached
                 # 缓存来自按下那一刻，元素现在可能已经被这次点击带走了。
                 # 界面靠这个标记决定还弹不弹「当场选第几个」：元素都没了，
                 # 再框只会框到页面上剩下的同名元素，张冠李戴。
@@ -1977,6 +2660,8 @@ class RecordingSession(object):
             unverified = primary is not None
         status = 'stale' if unverified else status_of(primary)
         target = ir.make_target(snap, ordered, primary, status)
+        # 合并键要提前算：fill 每敲一个字符来一条，截图得知道「是不是同一个元素」才能复用。
+        key = self._merge_key(snap, primary, frame)
         if vanished_after:
             target['vanished_after'] = True
         if unverified:
@@ -1989,6 +2674,11 @@ class RecordingSession(object):
             matches = cached_matches or self._collect_matches(frame, ordered)
             if matches:
                 target['matches'] = matches
+                # 按下那一刻的截图：弹窗直接在图上框出这几个，不用把浏览器翻回去。
+                # fill/press 没有那个时机，在这里补一张（见 _shot_for）。
+                shot = self._shot_for(kind, page, frame, matches, cached_shot, key)
+                if shot:
+                    target['shot'] = shot
         index = self._page_index(page)
 
         with self._lock:
@@ -2004,7 +2694,6 @@ class RecordingSession(object):
                 self._schedule_hud()
                 return
 
-            key = self._merge_key(snap, primary, frame)
             prev = self._steps[-1] if self._steps else None
             if (kind == 'fill' and prev and prev['type'] == 'press'
                     and prev.get('_key') == key and _press_only_edits_text(prev)):

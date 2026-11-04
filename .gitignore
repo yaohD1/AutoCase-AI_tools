@@ -46,3 +46,28 @@ yarn-error.log*
 .opencode/*
 !.opencode/prompts/
 .playwright-mcp/
+
+# ---- 录制 / 测试的运行时产物 ----
+# 越界改动的备份清单（guard.capture 导出的）、生成锁、校验用的临时配置
+.autocase/
+.autocase.verify.config.ts
+test-results/
+playwright-report/
+playwright-report-legacy/
+blob-report/
+coverage/
+*.tsbuildinfo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 本地临时目录（70MB 的 selenium 沙箱，之前只写在个人 .git/info/exclude 里，团队看不到）
+.tmp-spike/
+
+# ---- shots/：验证脚本要提交，截图和运行时导出不提交 ----
+# 下划线前缀是「临时」的约定（_check_xxx.png、_anim_xxx.png）；仓库里留存的是
+# 功能截图（agent-*.png 这类）和深浅色主题对照图（th-dark-* / th-light-*）。
+shots/_*.png
+shots/_*.json
+shots/_*.txt
+shots/_dialog_styles.html

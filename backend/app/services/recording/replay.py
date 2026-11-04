@@ -10,6 +10,7 @@ import time
 
 from playwright.sync_api import expect, sync_playwright
 
+from app.services.recording.ir import PAGE_READY
 from app.services.recording.locators import best_effort, build_locator, pick_for
 
 ASSERT_TIMEOUT_MS = 5000
@@ -129,6 +130,11 @@ def _poll_with_reload(intent, target, page, framework):
 def _assert_once(intent, target, page, framework, timeout):
     kind = intent['type']
     value = intent.get('value')
+    if kind == PAGE_READY:
+        # 和 Playwright 同口径：当前文档已经到这个状态就立刻返回，不再等——回放要的
+        # 正是这个行为，否则「已经加载完」也要白等满超时。
+        page.wait_for_load_state(intent.get('state') or 'load', timeout=timeout)
+        return None
     if kind == 'url_contains':
         page.wait_for_url(lambda url: value in url, timeout=timeout)
         return None

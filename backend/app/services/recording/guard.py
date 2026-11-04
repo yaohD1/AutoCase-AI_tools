@@ -1,4 +1,4 @@
-"""录制生成的范围检查：只检测「目标文件以外有没有被改动」，不做还原。
+"""录制生成的范围检查：检测「目标文件以外有没有被改动」，并支持按需手动还原。
 
 两套机制，按工作区能不能用 git 自动选择：
 
@@ -10,16 +10,29 @@
 - **指纹回退**（不是 git 仓库 / 没有 commit / git 不可用）：只走 `stat` 记 (size, mtime_ns)，
   不读文件内容。几百 MB 的工作区也只是秒内完成，不再存在「工作区过大无法备份」的失败。
 
-**只报告、不回滚**：回滚会把用户在这期间自己的编辑一起抹掉。真要撤销，git 本来就是更好的工具。
+**只报告、不自动还原**：模型确实可能需要写辅助文件（helper / fixture），自动删掉会把
+有用的东西一起删掉；而且在生成期间用户自己也可能在编辑，自动还原会误伤。
+
+但「只报告」不等于「什么都做不了」：`capture()` 会在生成结束时把越界文件在**快照时刻**的
+内容导出到 `.autocase/backups/<id>/`，`revert()` 按那份清单还原。导出是必须的——stash
+create 出来的 commit 是悬空的，git gc 之后 `git show <sha>:<path>` 就取不到了。
 """
+import json
 import os
+import re
 import subprocess
+import time
+import uuid
 from pathlib import Path
 
 from app.services.recording.detect import SKIP_DIRS
 
 # opencode serve 启动时自动导出的框架产物，不属于工作区内容。
-FRAMEWORK_ARTIFACT_PREFIXES = ('.claude/agents/', '.github/agents/', '.playwright-mcp/', '.autocase/')
+# `.autocase.verify.config.ts` 是「跑一遍」用的临时配置：正常跑完就删，
+# 这里兜住进程被杀的情况，免得一条残留配置被当成越界改动报给用户。
+# `.opencode/` 同理：serve 在 cwd 下会写插件/会话旁路文件，不该算到 agent 头上。
+FRAMEWORK_ARTIFACT_PREFIXES = ('.claude/agents/', '.github/agents/', '.playwright-mcp/',
+                               '.opencode/', '.autocase/', '.autocase.verify.config.ts')
 
 # 工具链（tsc / playwright / midscene / allure）自己写的产物目录。校验是我们自己跑的，
 # 这些目录里的东西不该算到 agent 头上。
@@ -206,6 +219,166 @@ def changed(snap):
 
 
 def violations(paths, target):
-    """除目标文件以外的改动。只用于报告，不回滚。"""
+    """除目标文件以外的改动。"""
     target = _norm(target)
     return [p for p in (_norm(rel) for rel in paths) if p != target]
+
+
+# ---- 越界快照与手动还原 ----
+
+BACKUP_DIR = '.autocase/backups'
+# 单个文件超过这个大小就不备份内容，只记一条 skip——避免把几百 MB 的产物读进内存。
+MAX_BACKUP_BYTES = 8 * 1024 * 1024
+SAFE_ID = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+
+
+def _git_bytes(root, *args):
+    """取二进制的 git 输出（`git show` 不能走 text=True，那会把内容按编码替换坏）。"""
+    try:
+        proc = subprocess.run(
+            ('git', '-C', str(root)) + args,
+            capture_output=True, timeout=GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _blob_size(root, ref):
+    proc = _git(root, 'cat-file', '-s', ref)
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(_out(proc))
+    except ValueError:
+        return None
+
+
+def _safe_rel(rel):
+    """只接受工作区内的相对路径：拒绝绝对路径、盘符和 `..`。"""
+    rel = _norm(rel)
+    if not rel or rel.startswith('/') or ':' in rel.split('/')[0]:
+        return None
+    if any(part in ('..', '.') for part in rel.split('/')):
+        return None
+    return rel
+
+
+def capture(snap, paths, backup_id=None):
+    """把 paths 在**快照时刻**的内容导出到 `.autocase/backups/<id>/`，供之后手动还原。
+
+    返回 (backup_id, entries)，entries 每项 `{path, action}`：
+    - `restore`：快照时刻有内容，已备份到 `files/`；
+    - `delete`：快照时刻不存在（这次是新建的），还原就是删掉；
+    - `skip`：拿不到原始内容（未跟踪文件 / 文件过大 / 不是 git 仓库）。
+
+    必须在生成刚结束时调用：`stash create` 出来的 commit 没有 ref，git gc 之后就取不到了。
+    没有越界改动时不建目录，直接返回 (None, [])。
+    """
+    root = Path(snap.root)
+    clean = [rel for rel in (_safe_rel(p) for p in paths) if rel]
+    if not clean:
+        return None, []
+    token = backup_id if (backup_id and SAFE_ID.match(backup_id)) else (
+        time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
+    folder = root / BACKUP_DIR / token
+    files_dir = folder / 'files'
+
+    entries = []
+    for rel in clean:
+        if snap.mode != 'git':
+            entries.append({'path': rel, 'action': 'skip',
+                            'reason': '工作区不是 git 仓库，拿不到这次改动之前的原始内容'})
+            continue
+        ref = '%s:%s' % (snap.base, rel)
+        size = _blob_size(root, ref)
+        if size is None:
+            if rel in snap.untracked:
+                # 快照时就存在、但没被 git 跟踪：只有 (size, mtime)，没存内容。
+                entries.append({'path': rel, 'action': 'skip',
+                                'reason': '这个文件原本未被 git 跟踪，只记了指纹没存内容'})
+            else:
+                entries.append({'path': rel, 'action': 'delete'})
+            continue
+        if size > MAX_BACKUP_BYTES:
+            entries.append({'path': rel, 'action': 'skip',
+                            'reason': '文件超过 %d MB，没有备份内容' % (MAX_BACKUP_BYTES // 1024 // 1024)})
+            continue
+        blob = _git_bytes(root, 'show', ref)
+        if blob is None:
+            entries.append({'path': rel, 'action': 'skip', 'reason': '读取快照内容失败'})
+            continue
+        target = files_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(blob)
+        entries.append({'path': rel, 'action': 'restore', 'size': len(blob)})
+
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'manifest.json').write_text(
+        json.dumps({'base': snap.base if snap.mode == 'git' else None,
+                    'mode': snap.mode, 'entries': entries}, ensure_ascii=False, indent=2),
+        encoding='utf-8')
+    return token, entries
+
+
+def read_manifest(root, backup_id):
+    """读一份备份清单；id 不合法或文件不在就返回 None。"""
+    if not backup_id or not SAFE_ID.match(str(backup_id)):
+        return None
+    path = Path(root) / BACKUP_DIR / str(backup_id) / 'manifest.json'
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+
+
+def revert(root, backup_id, paths=None):
+    """按清单把越界文件还原到这次生成之前的样子。
+
+    `paths` 为空表示还原清单里的全部。还原前先把**当前**内容存到 `current/`，
+    这样「还原」本身也是可逆的——模型写的东西不会被无声丢掉。
+    """
+    root = Path(root)
+    manifest = read_manifest(root, backup_id)
+    if manifest is None:
+        raise GuardError('找不到这份备份清单：%s' % backup_id)
+    folder = root / BACKUP_DIR / str(backup_id)
+    wanted = None
+    if paths:
+        wanted = {rel for rel in (_safe_rel(p) for p in paths) if rel}
+
+    reverted, skipped, failed = [], [], []
+    for entry in manifest.get('entries') or []:
+        rel = _safe_rel(entry.get('path'))
+        if rel is None:
+            continue
+        if wanted is not None and rel not in wanted:
+            continue
+        action = entry.get('action')
+        if action not in ('restore', 'delete'):
+            skipped.append({'path': rel, 'reason': entry.get('reason') or '没有可还原的原始内容'})
+            continue
+        live = root / rel
+        try:
+            # 先把当前内容留一份，误还原也捞得回来。
+            if live.is_file():
+                keep = folder / 'current' / rel
+                keep.parent.mkdir(parents=True, exist_ok=True)
+                keep.write_bytes(live.read_bytes())
+            if action == 'delete':
+                if live.exists():
+                    live.unlink()
+                reverted.append({'path': rel, 'action': 'deleted'})
+            else:
+                source = folder / 'files' / rel
+                if not source.is_file():
+                    failed.append({'path': rel, 'reason': '备份文件丢了'})
+                    continue
+                live.parent.mkdir(parents=True, exist_ok=True)
+                live.write_bytes(source.read_bytes())
+                reverted.append({'path': rel, 'action': 'restored'})
+        except OSError as exc:
+            failed.append({'path': rel, 'reason': str(exc)})
+    return {'reverted': reverted, 'skipped': skipped, 'failed': failed}

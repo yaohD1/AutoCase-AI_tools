@@ -12,7 +12,7 @@ Path(os.environ['AUTOMATION_WORKSPACE_ROOT'], 'proj').mkdir(parents=True, exist_
 
 from app import create_app  # noqa: E402
 from app.services.opencode_runner import OpenCodeRunner  # noqa: E402
-from app.services.recording import emit, progress, replay  # noqa: E402
+from app.services.recording import emit, emit_session, progress, replay  # noqa: E402
 from app.services.recording.session import RecordingSession  # noqa: E402
 
 MODEL = 'volcengine-plan/deepseek-v4-flash'
@@ -188,6 +188,23 @@ class GenerateRouteTest(unittest.TestCase):
         self.assertEqual(kwargs['previous_plan'], {'steps': [{'no': 1}]})
         self.assertEqual(progress.PROGRESS.snapshot()['status'], 'done')
         self.assertIsNone(progress.PROGRESS.snapshot()['result'], '规划结束不该伪装成一次写入结果')
+
+    def test_plan_route_remembers_the_plan_for_refresh_recovery(self):
+        """任务书要存在服务端：刷新页面后不用重新规划（重规划=重读一遍项目）。"""
+        session = self._stopped_session(steps=[{'no': 1}])
+        session.id = 'rec-refresh'
+        result = {'plan': {'steps': [{'no': 1, 'action': 'write'}]}, 'target_path': 'a.robot',
+                  'suggestion': None, 'reason': None, 'steps': 1, 'chars': 40}
+        self.addCleanup(emit_session.REGISTRY.close, 'rec-refresh', 'test')
+        with mock.patch.object(emit, 'plan', return_value=result) as planner:
+            r = self._plan()
+        self.assertEqual(r.status_code, 200, r.get_json())
+        # 路由要把会话对象交给 emit.plan：规划轮的读项目历史留在它里面
+        self.assertIsNotNone(planner.call_args[1]['session'])
+        self.assertIn('session', r.get_json())
+        saved = progress.PROGRESS.snapshot()['plan']
+        self.assertEqual(saved['result'], result)
+        self.assertEqual(saved['sig'], emit.steps_signature([{'no': 1}]))
 
     def test_plan_route_reports_failure(self):
         self._stopped_session(steps=[{'no': 1}])

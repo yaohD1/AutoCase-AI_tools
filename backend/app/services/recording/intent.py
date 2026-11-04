@@ -6,7 +6,8 @@
 import json
 import re
 
-from app.services.recording.ir import CONDITION_INTENT_TYPES, INTENT_TYPES, POLL_INTENT_TYPES
+from app.services.recording.ir import (CONDITION_INTENT_TYPES, DEFAULT_READY_SECONDS, INTENT_TYPES,
+                                       PAGE_READY, POLL_INTENT_TYPES, READY_STATES)
 
 # 需要目标元素的意图。url_contains / page_text_contains 不需要目标。sleep 只需要秒数。
 NEEDS_TARGET = {'visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled',
@@ -94,7 +95,7 @@ def validate(obj, aliases):
     if not isinstance(obj, dict):
         raise IntentError('意图必须是对象')
     kind = obj.get('type')
-    if kind not in INTENT_TYPES:
+    if kind not in INTENT_TYPES + (PAGE_READY,):
         raise IntentError('未知的意图类型：%r' % kind)
 
     intent = {'type': kind, 'target': None, 'value': None, 'seconds': None,
@@ -120,6 +121,18 @@ def validate(obj, aliases):
         if not 0 < seconds <= MAX_SLEEP_SECONDS:
             raise IntentError('sleep 秒数需在 0 到 %d 之间' % MAX_SLEEP_SECONDS)
         intent['seconds'] = seconds
+
+    if kind == PAGE_READY:
+        state = obj.get('state') or 'load'
+        if state not in READY_STATES:
+            raise IntentError('等待加载的状态只能是 %s' % ' / '.join(READY_STATES))
+        intent['state'] = state
+        # 只认超时，不认「等不到就刷新」：刷新会把这个文档的加载状态重置掉，
+        # 越刷越等不到，语义上也不成立。
+        intent.update(_poll_fields({k: v for k, v in obj.items() if k != 'reload'}))
+        if not intent['timeout']:
+            intent['timeout'] = DEFAULT_READY_SECONDS
+        return intent
 
     # 除 sleep 外都能带「最长等待」：填了就从立即断言变成轮询等待，不用选两次。
     if kind != 'sleep':

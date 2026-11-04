@@ -5,28 +5,85 @@
      3. 标签小（11.5px）值大（13~14px），层级靠字号和颜色拉开，不靠字重堆。
      4. 圆角只有两档：卡片 14、控件 8~9。
 
-   数值改这里就够了 —— 页面里不要再写死 #15181d / #8d97a6 这类字面量。 */
+   ---- 双主题 ----
+   :root 是浅色，[data-theme="dark"] 覆盖同一批变量 —— 页面里不允许再出现
+   #fff / #f4f6f9 / rgba(0,0,0,.06) 这类字面量，否则切到暗色就是一块块白补丁。
+   判断标准：如果这个颜色描述的是「表面 / 文字 / 线 / 语义」，
+   就必须走变量；只有「原型截图里的颜色」可以写死。
+
+   暗色不是把浅色反过来：页面底比卡片暗一档、卡片比浮层暗一档，
+   面板之间有层次才不会糊成一整块；文字也不上纯白（#e6eaf2 就够），
+   纯白在深底上会发光。 */
 
 :root {
+  color-scheme: light;
+
+  /* 表面：底 / 卡片 / 淡底块 / 画布 / 浮层 / 悬浮 */
+  --bg-page: #f5f7fa;
+  --bg-card: #ffffff;
+  --bg-sunken: #f4f6f9;
+  --bg-stage: #f6f7f9;
+  --bg-raised: #ffffff;
+  --bg-hover: rgba(0, 0, 0, .035);
+  --bg-active: rgba(0, 0, 0, .055);
+  --bg-inverse: #15181d;
+
   /* 文字 */
   --ink: #15181d;          /* 正文、当前值 */
   --ink-2: #3c4048;        /* 次级正文 */
   --muted: #8d97a6;        /* 标签、说明 */
   --faint: #b3bac5;        /* 占位、失效 */
+  --ink-inverse: #ffffff;  /* 深色块上的字 */
 
   /* 线 */
-  --line: rgba(0, 0, 0, .28);        /* 输入框下划线 */
-  --line-soft: rgba(0, 0, 0, .06);   /* 行分隔、卡片边 */
-  --line-faint: rgba(0, 0, 0, .04);  /* 表格行 */
+  --line: rgba(0, 0, 0, .28);         /* 输入框下划线（聚焦） */
+  --line-soft: rgba(0, 0, 0, .06);    /* 行分隔、卡片边 */
+  --line-faint: rgba(0, 0, 0, .04);   /* 表格行 */
+  --line-field: rgba(0, 0, 0, .09);   /* 字段之间 */
+  --line-field-hover: rgba(0, 0, 0, .16);
+  --line-ctl: #dfe3e8;                /* 按钮描边 */
+  --line-ctl-hover: #c3d6ee;
 
-  /* 语义色 */
+  /* 语义色：本体 + 淡底 + 淡底上的字 */
   --accent: #0071e3;
+  --accent-hover: #0064c8;
   --accent-soft: #eef4fd;
+  --accent-soft-hover: #e0efff;
+  --accent-ink: #0b62c4;
+  --accent-line: #dce9fa;
   --danger: #ff3b30;
+  --danger-hover: #d02a20;
+  --danger-soft: #fdeeed;
+  --danger-line: #ffc0bb;
+  --ok-line: #d9ecdf;
+  --warn-line: #f2e3c9;
   --ok: #1e7a46;
   --ok-soft: #edf7f1;
   --warn: #ad6800;
   --warn-soft: #fdf6ea;
+
+  /* 小方片 */
+  --chip-bg: #f4f6f9;
+  --chip-ink: #5b6472;
+
+  /* 代码 / 终端 / 日志面板：两套主题都保持深色，
+     暗色下只压深一点，否则它和卡片贴在一起分不出层次 */
+  --bg-code: #12161d;
+  --bg-code-ink: #d6dfeb;
+
+  /* 投影只留给弹窗和主按钮，其余一律不投 */
+  --shadow-dialog: 0 40px 90px -44px rgba(16, 24, 40, .45);
+  --shadow-primary: 0 1px 2px rgba(0, 113, 227, .2);
+  --shadow-primary-hover: 0 3px 10px rgba(0, 113, 227, .26);
+  --scrim: rgba(16, 24, 40, .38);
+  --focus-ring: rgba(0, 113, 227, .42);
+  --loading-mask: rgba(255, 255, 255, .68);
+  --scroll-thumb: #e6e9ef;
+  --scroll-thumb-hover: #d8dde5;
+
+  /* 顶栏：两套主题都是深色，暗色下再压一档，和页面区分开 */
+  --topbar: linear-gradient(135deg, #191c23 0%, #171d2b 55%, #16233a 100%);
+  --topbar-line: rgba(255, 255, 255, .07);
 
   /* 形状 */
   --radius-card: 14px;
@@ -39,6 +96,112 @@
 
   /* 尺寸 */
   --ctl-h: 32px;
+}
+
+/* ==================== 夜墨（暗色）==================== */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-page: #12161d;
+  --bg-card: #191e27;
+  --bg-sunken: #20262f;
+  --bg-stage: #1c222b;
+  --bg-raised: #1e242d;
+  --bg-hover: rgba(255, 255, 255, .05);
+  --bg-active: rgba(255, 255, 255, .085);
+  --bg-inverse: #e6eaf2;
+
+  --ink: #e6eaf2;
+  --ink-2: #c3cbd8;
+  --muted: #8b95a6;
+  --faint: #66707f;
+  --ink-inverse: #0d1117;
+
+  --line: rgba(255, 255, 255, .32);
+  --line-soft: rgba(255, 255, 255, .085);
+  --line-faint: rgba(255, 255, 255, .055);
+  --line-field: rgba(255, 255, 255, .11);
+  --line-field-hover: rgba(255, 255, 255, .22);
+  --line-ctl: #2d3540;
+  --line-ctl-hover: #3d556f;
+
+  --accent: #0a84ff;
+  --accent-hover: #3d9bff;
+  --accent-soft: rgba(10, 132, 255, .15);
+  --accent-soft-hover: rgba(10, 132, 255, .24);
+  --accent-ink: #74b4ff;
+  --accent-line: rgba(10, 132, 255, .28);
+  --danger: #ff6b61;
+  --danger-hover: #ff857c;
+  --danger-soft: rgba(255, 90, 80, .15);
+  --danger-line: rgba(255, 107, 97, .42);
+  --ok-line: rgba(78, 201, 138, .26);
+  --warn-line: rgba(226, 167, 78, .28);
+  --ok: #4ec98a;
+  --ok-soft: rgba(78, 201, 138, .14);
+  --warn: #e2a74e;
+  --warn-soft: rgba(226, 167, 78, .14);
+
+  --chip-bg: rgba(255, 255, 255, .07);
+  --chip-ink: #b6c0ce;
+
+  --bg-code: #0b0f14;
+  --bg-code-ink: #d6dfeb;
+
+  --shadow-dialog: 0 40px 90px -44px rgba(0, 0, 0, .8);
+  --shadow-primary: 0 1px 2px rgba(0, 0, 0, .35);
+  --shadow-primary-hover: 0 3px 10px rgba(10, 132, 255, .22);
+  --scrim: rgba(0, 0, 0, .62);
+  --focus-ring: rgba(10, 132, 255, .5);
+  --loading-mask: rgba(18, 22, 29, .7);
+  --scroll-thumb: #2f3742;
+  --scroll-thumb-hover: #3c4654;
+
+  --topbar: linear-gradient(135deg, #0b0e14 0%, #0c1119 55%, #0b1522 100%);
+  --topbar-line: rgba(255, 255, 255, .06);
+}
+
+/* ==================== Element Plus 变量对齐 ====================
+   Element 自己的 --el-* 里有几十个颜色（浮层、填充、描边、主色的九档浅色），
+   不接管就会出现「组件是 Element 的灰、页面是我们的灰」这种拼贴感，
+   暗色下尤其明显：下拉的选中行会变成一坨说不清的褐黄。
+   这里只对齐用得到的那一批，其余交给 element-plus/dark/css-vars.css。
+   选择器写成 :root, html.dark 是为了压过 Element 自己的 html.dark（同特异性、后加载）。 */
+:root,
+html.dark {
+  --el-color-primary: var(--accent);
+  --el-color-primary-light-3: color-mix(in srgb, var(--accent) 70%, var(--bg-card));
+  --el-color-primary-light-5: color-mix(in srgb, var(--accent) 50%, var(--bg-card));
+  --el-color-primary-light-7: color-mix(in srgb, var(--accent) 30%, var(--bg-card));
+  --el-color-primary-light-8: color-mix(in srgb, var(--accent) 20%, var(--bg-card));
+  --el-color-primary-light-9: color-mix(in srgb, var(--accent) 12%, var(--bg-card));
+  --el-color-primary-dark-2: color-mix(in srgb, var(--accent) 82%, #000);
+
+  --el-color-danger: var(--danger);
+  --el-color-danger-light-9: var(--danger-soft);
+  --el-color-success: var(--ok);
+  --el-color-success-light-9: var(--ok-soft);
+  --el-color-warning: var(--warn);
+  --el-color-warning-light-9: var(--warn-soft);
+
+  --el-bg-color: var(--bg-card);
+  --el-bg-color-page: var(--bg-page);
+  --el-bg-color-overlay: var(--bg-raised);
+  --el-text-color-primary: var(--ink);
+  --el-text-color-regular: var(--ink-2);
+  --el-text-color-secondary: var(--muted);
+  --el-text-color-placeholder: var(--faint);
+  --el-text-color-disabled: var(--faint);
+  --el-border-color: var(--line-ctl);
+  --el-border-color-light: var(--line-soft);
+  --el-border-color-lighter: var(--line-soft);
+  --el-border-color-extra-light: var(--line-faint);
+  --el-fill-color: var(--bg-sunken);
+  --el-fill-color-light: var(--bg-sunken);
+  --el-fill-color-lighter: var(--bg-sunken);
+  --el-fill-color-blank: var(--bg-card);
+  --el-mask-color: var(--scrim);
+  --el-box-shadow-light: none;
 }
 
 /* ==================== 页面通用小件 ==================== */
@@ -60,17 +223,17 @@
   height: 20px;
   padding: 0 7px;
   border-radius: var(--radius-chip);
-  background: #f4f6f9;
-  color: #5b6472;
+  background: var(--chip-bg);
+  color: var(--chip-ink);
   font-size: 11px;
   line-height: 1;
   white-space: nowrap;
 }
 .chip.is-ok { background: var(--ok-soft); color: var(--ok); }
 .chip.is-warn { background: var(--warn-soft); color: var(--warn); }
-.chip.is-danger { background: #fdeeed; color: #c9342b; }
-.chip.is-accent { background: var(--accent-soft); color: #0b62c4; }
-.chip.is-mute { background: #f4f6f9; color: var(--faint); }
+.chip.is-danger { background: var(--danger-soft); color: var(--danger); }
+.chip.is-accent { background: var(--accent-soft); color: var(--accent-ink); }
+.chip.is-mute { background: var(--chip-bg); color: var(--faint); }
 
 /* 等宽小字：路径、ID、URL 一律用它 */
 .mono { font-family: var(--mono); font-size: 12.5px; letter-spacing: -.01em; }

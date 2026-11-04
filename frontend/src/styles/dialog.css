@@ -28,11 +28,18 @@
      </el-dialog>
 */
 
+/* 「定位待确认」要真的横竖居中：Element 2.4 的 align-center 只给弹窗加了 margin:auto，
+   遮罩层自己还是 overflow:auto 的块级容器，纵向 auto margin 不会居中，弹窗会沉到底。
+   只作用于带 loc-overlay 的那一个，别影响别的弹窗。 */
+.loc-overlay .el-overlay-dialog { display: flex; align-items: center; justify-content: center; }
+.loc-overlay .el-dialog.loc-dialog { margin: 0; }
+
 .el-dialog.dlg {
   padding: 0;
   border-radius: var(--radius-card);
   overflow: hidden;
-  box-shadow: 0 40px 90px -44px rgba(16, 24, 40, .45), 0 0 0 1px var(--line-soft);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-dialog), 0 0 0 1px var(--line-soft);
   /* Element 默认留 50px 下边距，加上顶部 4vh 会把 footer 顶到折叠线以下 */
   margin-bottom: 24px;
 }
@@ -74,8 +81,8 @@
   border-radius: 7px;
   transition: background .14s ease;
 }
-.dlg .el-dialog__headerbtn:hover { background: #f2f4f7; }
-.dlg .el-dialog__close { color: #b3bac5; font-size: 15px; }
+.dlg .el-dialog__headerbtn:hover { background: var(--bg-sunken); }
+.dlg .el-dialog__close { color: var(--faint); font-size: 15px; }
 .dlg .el-dialog__headerbtn:hover .el-dialog__close { color: var(--ink-2); }
 
 /* ---------- 内容区 ---------- */
@@ -106,11 +113,19 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #f6f7f9;
+  background: var(--bg-stage);
   border: 1px solid var(--line-faint);
   border-radius: 10px;
   overflow: hidden;
   user-select: none;
+}
+
+/* 暗色下白底原型图会像一块灯箱，给一圈极细的边把边缘收住 */
+[data-theme="dark"] .dlg-stage img,
+[data-theme="dark"] .desc-image-viewer img,
+[data-theme="dark"] .dlg-thumbs img,
+[data-theme="dark"] .file-preview-item img {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .12);
 }
 
 .dlg-stage img {
@@ -132,7 +147,7 @@
   align-self: stretch;
   overflow: auto;
   padding: 16px 18px;
-  background: #fff;
+  background: var(--bg-card);
 }
 .dlg-doc pre {
   margin: 0;
@@ -174,7 +189,7 @@
   cursor: pointer;
   transition: background .14s ease, color .14s ease;
 }
-.zoom-btn:hover { background: #eef0f3; color: var(--ink); }
+.zoom-btn:hover { background: var(--bg-sunken); color: var(--ink); }
 .zoom-reset {
   height: 24px;
   padding: 0 7px;
@@ -183,11 +198,11 @@
   background: transparent;
   font: inherit;
   font-size: 11.5px;
-  color: #a8b1be;
+  color: var(--faint);
   cursor: pointer;
   transition: background .14s ease, color .14s ease;
 }
-.zoom-reset:hover { background: #eef0f3; color: var(--ink-2); }
+.zoom-reset:hover { background: var(--bg-sunken); color: var(--ink-2); }
 
 /* 缩略图 */
 .dlg-thumbs {
@@ -262,8 +277,8 @@
   cursor: pointer;
   transition: background .14s ease, color .14s ease;
 }
-.dlg-nav:hover:not(:disabled) { background: #f2f4f7; color: var(--ink); }
-.dlg-nav:disabled { color: #cdd3db; cursor: default; }
+.dlg-nav:hover:not(:disabled) { background: var(--bg-sunken); color: var(--ink); }
+.dlg-nav:disabled { color: var(--faint); cursor: default; }
 
 .dlg-scroll {
   flex: 1;
@@ -273,8 +288,8 @@
   padding-right: 4px;
 }
 .dlg-scroll::-webkit-scrollbar { width: 8px; }
-.dlg-scroll::-webkit-scrollbar-thumb { background: #e6e9ef; border-radius: 4px; }
-.dlg-scroll::-webkit-scrollbar-thumb:hover { background: #d8dde5; }
+.dlg-scroll::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
+.dlg-scroll::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 
 /* 弹窗里的字段比页面再紧一档：右栏要靠滚动才看得完时，
    每行省 3px 就能少滚一次 */
@@ -343,14 +358,14 @@
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #b6bdc7;
+  color: var(--faint);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
   transition: background .14s ease, color .14s ease;
 }
-.line-del:hover:not(:disabled) { background: #fff1f0; color: var(--danger); }
-.line-del:disabled { color: #e2e6eb; cursor: default; }
+.line-del:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+.line-del:disabled { color: var(--line-field); cursor: default; }
 
 /* 窄屏：左右改成上下，画布给固定高度，否则会被挤成一条 */
 @media (max-width: 900px) {

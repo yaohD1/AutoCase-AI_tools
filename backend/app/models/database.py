@@ -72,6 +72,12 @@ def migrate_db(app: Flask):
             ):
                 if name not in cols:
                     cur.execute(f"ALTER TABLE automation_generations ADD COLUMN {name} {definition}")
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='project_memories'")
+        if cur.fetchone():
+            cur.execute("PRAGMA table_info(project_memories)")
+            cols = [r[1] for r in cur.fetchall()]
+            if 'map_md' not in cols:
+                cur.execute("ALTER TABLE project_memories ADD COLUMN map_md TEXT")
         conn.commit()
         conn.close()
     except Exception:

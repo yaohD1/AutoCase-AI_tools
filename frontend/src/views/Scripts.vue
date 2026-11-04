@@ -678,8 +678,8 @@ function casesPayload() {
   animation: run-pulse 1.8s ease-in-out infinite;
 }
 @keyframes run-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 113, 227, .35); }
-  50% { box-shadow: 0 0 0 4px rgba(0, 113, 227, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 var(--focus-ring); }
+  50% { box-shadow: 0 0 0 4px transparent; }
 }
 
 /* ---------- 模式切换：下划线 tab，和首页同一套 ---------- */
@@ -733,7 +733,7 @@ function casesPayload() {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: #fff;
+  background: var(--bg-card);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-card);
 }
@@ -762,8 +762,8 @@ function casesPayload() {
   overscroll-behavior: contain;
 }
 .sp-card-body::-webkit-scrollbar { width: 8px; }
-.sp-card-body::-webkit-scrollbar-thumb { background: #e2e6ec; border-radius: 4px; }
-.sp-card-body::-webkit-scrollbar-thumb:hover { background: #d3d9e2; }
+.sp-card-body::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
+.sp-card-body::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 
 /* 需求输入要吃掉左卡剩余高度，而不是固定 10 行后留一片空白 */
 .sp-fill { flex: 1; min-height: 260px; display: flex; flex-direction: column; padding-top: 6px; }
@@ -803,10 +803,10 @@ function casesPayload() {
   line-height: 1.55;
   color: var(--faint);
 }
-.sp-root { font-family: var(--mono); font-size: 11px; color: #c3c9d2; }
+.sp-root { font-family: var(--mono); font-size: 11px; color: var(--faint); }
 .sp-label-aux { font-size: 11px; color: var(--faint); }
-.form-label-act:disabled { color: #ccd2da; cursor: not-allowed; }
-.form-label-act:disabled:hover { color: #ccd2da; }
+.form-label-act:disabled { color: var(--faint); cursor: not-allowed; }
+.form-label-act:disabled:hover { color: var(--faint); }
 
 /* 配置字段比通用表单再紧一档：一行标签 + 一行控件占 60px 才放得下九项。
    控件高度 34 → 32，字段上下留白 13/7 → 10/6。 */
@@ -826,7 +826,7 @@ function casesPayload() {
   grid-template-columns: 1fr 1fr;
   gap: 20px;
   padding-bottom: 5px;
-  border-bottom: 1px solid rgba(0, 0, 0, .09);
+  border-bottom: 1px solid var(--line-field);
 }
 .sp-pair .form-field { border-bottom: 0; padding-bottom: 0; }
 
@@ -838,7 +838,7 @@ function casesPayload() {
   gap: 2px;
   padding: 2px;
   margin: 2px 0 14px;
-  background: #f4f6f9;
+  background: var(--bg-sunken);
   border-radius: 7px;
 }
 .sp-src-btn {
@@ -855,7 +855,7 @@ function casesPayload() {
 }
 .sp-src-btn:hover { color: var(--ink-2); }
 .sp-src-btn.is-on {
-  background: #fff;
+  background: var(--bg-card);
   color: var(--ink);
   font-weight: 500;
   box-shadow: 0 0 0 1px var(--line-soft) inset;
@@ -873,7 +873,7 @@ function casesPayload() {
   display: grid;
   place-items: center;
   border-radius: 5px;
-  background: #f4f6f9;
+  background: var(--bg-sunken);
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
@@ -884,7 +884,7 @@ function casesPayload() {
 .fc-label { margin-bottom: 2px; font-size: 11.5px; color: var(--muted); }
 .fc-row { display: flex; align-items: center; gap: 8px; }
 .fc-row :deep(.el-input.form-input .el-input__wrapper),
-.fc-title :deep(.el-input.form-input .el-input__wrapper) { border-bottom-color: rgba(0, 0, 0, .09); }
+.fc-title :deep(.el-input.form-input .el-input__wrapper) { border-bottom-color: var(--line-field); }
 .fc-row-no {
   flex: none;
   width: 18px;
@@ -893,7 +893,7 @@ function casesPayload() {
   color: var(--faint);
   font-variant-numeric: tabular-nums;
 }
-.fc-row-no.is-mark { color: #b7c0cc; }
+.fc-row-no.is-mark { color: var(--faint); }
 .fc-del {
   flex: none;
   width: 22px;
@@ -901,13 +901,13 @@ function casesPayload() {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #a8b1be;
+  color: var(--faint);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
   transition: background .14s ease, color .14s ease;
 }
-.fc-del:hover:not(:disabled) { background: #f4f6f9; color: #e0352b; }
+.fc-del:hover:not(:disabled) { background: var(--bg-sunken); color: var(--danger); }
 .fc-del:disabled { opacity: .3; cursor: not-allowed; }
 .fc-add {
   margin: 2px 0 0 26px;
@@ -922,12 +922,12 @@ function casesPayload() {
   transition: color .14s ease, background .14s ease;
 }
 .fc-add:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
-.fc-add:disabled { color: #ccd2da; cursor: not-allowed; }
+.fc-add:disabled { color: var(--faint); cursor: not-allowed; }
 .fc-error {
   margin: 8px 0 4px 30px;
   font-size: 11.5px;
   line-height: 1.5;
-  color: #c9342b;
+  color: var(--danger);
 }
 .fc-add-case {
   flex: none;
@@ -938,7 +938,7 @@ function casesPayload() {
   width: 100%;
   height: 40px;
   margin: 14px 0 4px;
-  border: 1px dashed #d5dbe4;
+  border: 1px dashed var(--line-ctl);
   border-radius: 9px;
   background: transparent;
   font: inherit;
@@ -947,8 +947,8 @@ function casesPayload() {
   cursor: pointer;
   transition: border-color .14s ease, color .14s ease, background .14s ease;
 }
-.fc-add-case:hover:not(:disabled) { border-color: #b9c9dd; color: var(--accent); background: #fbfdff; }
-.fc-add-case:disabled { color: #ccd2da; cursor: not-allowed; }
+.fc-add-case:hover:not(:disabled) { border-color: var(--line-ctl-hover); color: var(--accent); background: var(--bg-hover); }
+.fc-add-case:disabled { color: var(--faint); cursor: not-allowed; }
 .fc-add-plus { font-size: 14px; line-height: 1; }
 .fc-add-hint { margin-left: 6px; font-size: 11px; color: var(--faint); }
 
@@ -958,12 +958,12 @@ function casesPayload() {
   padding: 0 6px;
   border-color: transparent;
   border-radius: var(--radius-chip);
-  background: #f4f6f9;
-  color: #5b6472;
+  background: var(--chip-bg);
+  color: var(--chip-ink);
   font-size: 11px;
 }
-.sp-card :deep(.el-select__selection .el-tag .el-tag__close) { color: #9aa3b1; }
-.sp-card :deep(.el-select__selection .el-tag .el-tag__close:hover) { background: #dfe4ea; color: var(--ink-2); }
+.sp-card :deep(.el-select__selection .el-tag .el-tag__close) { color: var(--faint); }
+.sp-card :deep(.el-select__selection .el-tag .el-tag__close:hover) { background: var(--bg-active); color: var(--ink-2); }
 
 /* ---------- 已选用例：核对区 ---------- */
 .picked {
@@ -998,13 +998,13 @@ function casesPayload() {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: #a8b1be;
+  color: var(--faint);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
   transition: background .14s ease, color .14s ease;
 }
-.picked-del:hover { background: #f4f6f9; color: #e0352b; }
+.picked-del:hover { background: var(--bg-sunken); color: var(--danger); }
 
 /* ---------- 校验结果 ---------- */
 .sp-note {
@@ -1012,13 +1012,13 @@ function casesPayload() {
   margin-top: 10px;
   padding: 8px 10px;
   border-radius: 7px;
-  background: #f8fafc;
+  background: var(--bg-sunken);
   font-size: 12px;
   line-height: 1.6;
   color: var(--muted);
 }
 .sp-note.is-ok { background: var(--ok-soft); color: var(--ok); }
-.sp-note.is-error { background: #fdeeed; color: #c9342b; }
+.sp-note.is-error { background: var(--danger-soft); color: var(--danger); }
 
 /* ---------- 底栏 ---------- */
 .sp-foot {
@@ -1061,7 +1061,7 @@ function casesPayload() {
   .sp-head { flex-direction: column; align-items: flex-start; gap: 12px; }
   .sp-head-actions { padding-bottom: 0; }
   .sp-pair { grid-template-columns: 1fr; gap: 0; padding-bottom: 0; border-bottom: 0; }
-  .sp-pair .form-field { border-bottom: 1px solid rgba(0, 0, 0, .09); padding-bottom: 7px; }
+  .sp-pair .form-field { border-bottom: 1px solid var(--line-field); padding-bottom: 7px; }
   .fc-block { margin-left: 0; }
   .fc-add { margin-left: 26px; }
 }
