@@ -139,12 +139,17 @@ class OpenCodeRunner:
         return resolved
 
     def _config_path(self):
-        project_root = Path(__file__).resolve().parents[3]
-        configured = self.app_config.get('OPENCODE_CONFIG') or str(project_root / 'opencode.json')
-        path = Path(configured).expanduser().resolve()
-        if not path.is_file():
-            raise ValueError('OpenCode config file was not found')
-        return path
+        # 显式指定优先（测试和自建脚本就是这么用的）。
+        configured = self.app_config.get('OPENCODE_CONFIG')
+        if configured:
+            path = Path(str(configured)).expanduser().resolve()
+            if not path.is_file():
+                raise ValueError('OpenCode config file was not found')
+            return path
+        # 默认走「进仓库的 opencode.json + 本地的 opencode.models.json」合并结果。
+        # 模型页改完配置后，下一次启动 serve 就会读到新的 provider。
+        from app.services import models_config
+        return models_config.runtime_config()
 
     def _cancel_path(self, generation_id):
         root = Path(self.app_config['AUTOMATION_CONTROL_FOLDER']).resolve()

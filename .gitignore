@@ -73,3 +73,8 @@ shots/_*.txt
 shots/_dialog_styles.html
 # opencode 每次调用生成的临时配置（含 MCP 定义），落在 cwd 时会被 git 看到
 opencode.emit-*.json
+
+# 模型配置：本地那份含明文密钥，绝不进仓库；runtime 是两份合并出来的临时产物
+opencode.models.json
+opencode.runtime.json
+opencode.runtime.emit-*.json

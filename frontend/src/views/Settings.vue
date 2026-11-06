@@ -23,67 +23,85 @@
       </nav>
 
       <div class="set-main">
-        <!-- ---------- AI 服务 ---------- -->
+        <!-- ---------- AI 服务：直接管理 opencode 的 provider / model ---------- -->
         <section v-if="activeTab === 'ai'" class="set-panel">
           <div class="panel-head">
-            <p class="panel-desc">所有 AI 调用都走这里的配置。标了 Vision 的才能用于原型图分析。</p>
-            <el-button type="primary" @click="openAddConfig">添加服务</el-button>
+            <p class="panel-desc">
+              模型直接来自 opencode 配置（<span class="mono">opencode.models.json</span>）。改完点「应用」生效，已在运行的会话需要重开。
+            </p>
+            <div class="head-acts">
+              <el-button :loading="applying" @click="applyModels">应用配置</el-button>
+              <el-button type="primary" @click="openProviderDialog()">新增服务</el-button>
+            </div>
           </div>
+          <p class="panel-note">
+            多模态 = 模型能读图，用于原型图分析和按截图生成用例。默认关闭，需要时点模型上的
+            <span class="mono">多模态</span> 打开；没打开的模型在「原型分析模型」里会置灰、选不了。
+          </p>
 
-          <div class="flat-table set-table">
-            <el-table :data="configs" v-loading="loadingConfigs">
-              <el-table-column label="服务商" min-width="190">
-                <template #default="{ row }">
-                  <div class="cell-stack">
-                    <span class="cell-main">{{ row.provider }}</span>
-                    <!-- 后端只返回「前 6 + 后 4」，这里直接显示。
-                         要换 Key 只能进编辑弹窗重填，列表不提供展开入口。 -->
-                    <span class="key-line">{{ displayKey(row.api_key) }}</span>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column label="模型" min-width="250">
-                <template #default="{ row }">
-                  <span class="mono cell-model">{{ row.model || '—' }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="采样" width="112" class-name="col-opt">
-                <template #default="{ row }">
-                  <span class="mono num">{{ row.temperature ?? '—' }} · {{ row.max_tokens ?? '—' }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="能力" width="88" class-name="col-opt">
-                <template #default="{ row }">
-                  <span :class="['cap', { 'is-vision': row.supports_vision !== false }]">
-                    {{ row.supports_vision !== false ? 'Vision' : '纯文本' }}
+          <div v-loading="loadingConfigs" class="prov-list">
+            <div v-for="p in providers" :key="p.id" :class="['prov-card', { 'is-hidden': p.disabled }]">
+              <div class="prov-head">
+                <div class="prov-title">
+                  <span class="prov-name mono">{{ p.id }}</span>
+                  <span :class="['src-tag', p.source === 'local' ? 'is-local' : 'is-global']">
+                    {{ p.source === 'local' ? '本地' : '全局' }}
                   </span>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="84">
-                <template #default="{ row }">
-                  <span :class="['cap', row.is_active ? 'is-on' : 'is-off']">
-                    {{ row.is_active ? '启用' : '停用' }}
-                  </span>
-                </template>
-              </el-table-column>
-              <el-table-column label="操作" width="150" align="right">
-                <template #default="{ row }">
-                  <div class="row-acts">
-                    <button type="button" class="row-act" @click="editConfig(row)">编辑</button>
-                    <button type="button" class="row-act" @click="toggleActive(row)">
-                      {{ row.is_active ? '停用' : '启用' }}
-                    </button>
-                    <button type="button" class="row-act is-danger" @click="deleteConfig(row.id)">删除</button>
-                  </div>
-                </template>
-              </el-table-column>
-              <template #empty>
-                <div class="table-empty">
-                  <p>还没有配置模型服务。</p>
-                  <p class="table-empty-hint">至少添加一个，首页的原型图分析和用例生成才能用。</p>
+                  <span v-if="p.disabled" class="src-tag is-off">已隐藏</span>
                 </div>
-              </template>
-            </el-table>
+                <div class="prov-acts">
+                  <button type="button" class="row-act" @click="openProviderDialog(p)">编辑</button>
+                  <button type="button" class="row-act" @click="openModelDialog(p)">加模型</button>
+                  <button type="button" class="row-act" @click="toggleHidden(p)">
+                    {{ p.disabled ? '取消隐藏' : '隐藏' }}
+                  </button>
+                  <button type="button" class="row-act is-danger" @click="removeProvider(p)">
+                    {{ p.source === 'local' ? '删除' : '还原' }}
+                  </button>
+                </div>
+              </div>
+              <div class="prov-meta">
+                <span class="mono prov-url">{{ p.base_url || '未填 Base URL' }}</span>
+                <span class="key-line">{{ p.key_masked || '未填 Key' }}</span>
+              </div>
+              <div class="model-chips">
+                <div
+                  v-for="m in p.models"
+                  :key="m.id"
+                  :class="['mchip', { 'is-default': defaultModel === `${p.id}/${m.id}` }]"
+                >
+                  <button
+                    type="button"
+                    class="mchip-main"
+                    :title="`点一下设为默认 · ${p.id}/${m.id}${m.name && m.name !== m.id ? ' · ' + m.name : ''}`"
+                    @click="setDefaultModel(p, m)"
+                  >
+                    <span class="mono mchip-name">{{ m.id }}</span>
+                    <span v-if="m.source === 'global'" class="mchip-tag">全局</span>
+                  </button>
+                  <span
+                    :class="['mchip-mm', { 'is-on': m.vision }]"
+                    :title="m.vision
+                      ? '已开启多模态：可用于原型图分析和按截图生成用例。点一下关闭'
+                      : '未开启多模态：不能读图，原型图分析和按截图生成用例会跳过它。点一下打开'"
+                    @click.stop="toggleVision(p, m)"
+                  >
+                    <span class="mchip-mm-text">多模态</span>
+                    <span class="mchip-mm-state">{{ m.vision ? '开' : '关' }}</span>
+                  </span>
+                  <span
+                    class="mchip-del"
+                    title="从列表移除"
+                    @click.stop="removeModel(p, m)"
+                  >×</span>
+                </div>
+                <span v-if="!p.models.length" class="mchip-empty">还没加模型</span>
+              </div>
+            </div>
+            <div v-if="!loadingConfigs && !providers.length" class="table-empty">
+              <p>还没有可用的模型服务。</p>
+              <p class="table-empty-hint">点右上角「新增服务」，填 Base URL 和 API Key，再往里加模型。</p>
+            </div>
           </div>
         </section>
 
@@ -189,10 +207,10 @@
       </div>
     </div>
 
-    <!-- ---------- 添加 / 编辑服务 ---------- -->
+    <!-- ---------- 新增 / 编辑模型服务 ---------- -->
     <el-dialog
-      v-model="showAddConfig"
-      :title="editingConfig ? '编辑服务' : '添加服务'"
+      v-model="showProviderDialog"
+      :title="editingProvider ? '编辑服务' : '新增服务'"
       width="480px"
       class="form-dialog"
       :close-on-click-modal="false"
@@ -200,50 +218,95 @@
       <div class="form-block">
         <div class="form-field">
           <div class="form-label">
-            <span>服务商</span>
-            <span v-if="editingConfig" class="form-note">不可修改</span>
+            <span>服务名</span>
+            <span class="form-note">就是 opencode 里的 provider ID</span>
           </div>
-          <div v-if="editingConfig" class="form-static mono">{{ configForm.provider }}</div>
-          <el-input v-else v-model="configForm.provider" class="form-input" placeholder="kimi / volcengine / deepseek" />
+          <div v-if="editingProvider" class="form-static mono">{{ providerForm.provider }}</div>
+          <el-input v-else v-model="providerForm.provider" class="form-input" placeholder="如 cctq-codex" />
+        </div>
+
+        <div class="form-field">
+          <div class="form-label">
+            <span>Base URL</span>
+            <span class="form-note">OpenAI 兼容地址，通常以 /v1 结尾</span>
+          </div>
+          <el-input v-model="providerForm.base_url" class="form-input" placeholder="https://xxx/v1" />
         </div>
 
         <div class="form-field">
           <div class="form-label">
             <span>API Key</span>
-            <span v-if="editingConfig" class="form-note">留空则不修改</span>
+            <span v-if="editingProvider" class="form-note">留空则不修改</span>
           </div>
           <el-input
-            v-model="configForm.api_key"
+            v-model="providerForm.api_key"
             type="password"
             show-password
             class="form-input"
-            :placeholder="editingConfig ? '不修改请留空' : 'sk-...'"
+            :placeholder="editingProvider ? '不修改请留空' : 'sk-...'"
           />
         </div>
 
         <div class="form-field">
           <div class="form-label">
-            <span>API Base</span>
-            <span class="form-note">可选</span>
+            <span>SDK 包</span>
+            <span class="form-note">一般不用改</span>
           </div>
-          <el-input v-model="configForm.api_base" class="form-input" placeholder="留空则用服务商默认地址" />
+          <el-input v-model="providerForm.npm" class="form-input" placeholder="@ai-sdk/openai" />
         </div>
+      </div>
 
+      <template #footer>
+        <div class="dlg-foot">
+          <div class="foot-left">
+            <el-button :loading="testing" @click="testProvider">测试连通</el-button>
+            <span v-if="testResult !== null" :class="['test-dot', testResult ? 'is-ok' : 'is-bad']">
+              {{ testResult ? '连接成功' : '连接失败' }}
+            </span>
+          </div>
+          <div class="foot-right">
+            <el-button @click="showProviderDialog = false">取消</el-button>
+            <el-button type="primary" @click="saveProvider">{{ editingProvider ? '保存' : '添加' }}</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- ---------- 给服务加模型 ---------- -->
+    <el-dialog
+      v-model="showModelDialog"
+      :title="`给 ${modelProvider ? modelProvider.id : ''} 添加模型`"
+      width="440px"
+      class="form-dialog"
+      :close-on-click-modal="false"
+    >
+      <div class="form-block">
         <div class="form-field">
-          <div class="form-label"><span>模型名称</span></div>
-          <el-input v-model="configForm.model" class="form-input" placeholder="如 kimi-k2.6" />
+          <div class="form-label">
+            <span>模型 ID</span>
+            <span class="form-note">发给服务商的 model 名</span>
+          </div>
+          <el-input v-model="modelForm.model" class="form-input" placeholder="如 gpt-6-luna" />
         </div>
 
         <div class="form-field">
           <div class="form-label">
-            <span>采样参数</span>
-            <span class="form-note">温度越高越发散</span>
+            <span>显示名</span>
+            <span class="form-note">留空就用模型 ID</span>
+          </div>
+          <el-input v-model="modelForm.name" class="form-input" placeholder="页面上显示的名字" />
+        </div>
+
+        <div class="form-field">
+          <div class="form-label">
+            <span>生成参数</span>
+            <span class="form-note">只影响用例生成，不影响 opencode</span>
           </div>
           <div class="form-duo">
             <div class="duo-item">
               <span class="duo-label">温度</span>
               <el-input-number
-                v-model="configForm.temperature"
+                v-model="modelForm.temperature"
                 :min="0" :max="1" :step="0.1" :precision="1"
                 controls-position="right"
                 class="form-num"
@@ -252,8 +315,8 @@
             <div class="duo-item">
               <span class="duo-label">Token</span>
               <el-input-number
-                v-model="configForm.max_tokens"
-                :min="100" :max="32000" :step="200"
+                v-model="modelForm.max_tokens"
+                :min="100" :max="64000" :step="200"
                 controls-position="right"
                 class="form-num is-wide"
               />
@@ -262,23 +325,18 @@
         </div>
 
         <div class="form-toggle">
-          <el-switch v-model="configForm.supports_vision" />
-          <span class="form-toggle-text">支持图片分析</span>
-          <span class="form-toggle-hint">{{ configForm.supports_vision ? '可用于原型图模式' : '只做文本生成' }}</span>
+          <el-switch v-model="modelForm.vision" />
+          <span class="form-toggle-text">多模态（能读图）</span>
+          <span class="form-toggle-hint">{{ modelForm.vision ? '可用于原型图分析和按截图生成用例' : '只做纯文本生成' }}</span>
         </div>
       </div>
 
       <template #footer>
         <div class="dlg-foot">
-          <div class="foot-left">
-            <el-button :loading="testing" @click="testConnection">测试连通</el-button>
-            <span v-if="testResult !== null" :class="['test-dot', testResult ? 'is-ok' : 'is-bad']">
-              {{ testResult ? '连接成功' : '连接失败' }}
-            </span>
-          </div>
+          <div class="foot-left"></div>
           <div class="foot-right">
-            <el-button @click="cancelEdit">取消</el-button>
-            <el-button type="primary" @click="saveConfig">{{ editingConfig ? '保存' : '添加' }}</el-button>
+            <el-button @click="showModelDialog = false">取消</el-button>
+            <el-button type="primary" @click="saveModel">添加</el-button>
           </div>
         </div>
       </template>
@@ -329,26 +387,34 @@ import api from '../api'
 
 const activeTab = ref('ai')
 
-const configs = ref([])
+/* ---------- 模型服务（opencode 配置） ----------
+   数据不是数据库，是项目根的 opencode.models.json。opencode 启动时读的是
+   「opencode.json + 这份」合并出来的 runtime 文件，所以这里的增删改会直接
+   影响命令行和生成链路，共用一个真源。 */
+const providers = ref([])
+const defaultModel = ref('')
 const loadingConfigs = ref(false)
-const showAddConfig = ref(false)
-const editingConfig = ref(null)
+const applying = ref(false)
+
+const showProviderDialog = ref(false)
+const editingProvider = ref(null)
+const providerForm = ref(emptyProviderForm())
 const testing = ref(false)
 const testResult = ref(null)
 
-function emptyConfigForm() {
-  return {
-    provider: 'volcengine',
-    api_key: '',
-    api_base: '',
-    model: '',
-    temperature: 0.7,
-    max_tokens: 2000,
-    supports_vision: true
-  }
+const showModelDialog = ref(false)
+const modelProvider = ref(null)
+const modelForm = ref(emptyModelForm())
+
+function emptyProviderForm() {
+  return { provider: '', base_url: '', api_key: '', npm: '@ai-sdk/openai' }
 }
 
-const configForm = ref(emptyConfigForm())
+function emptyModelForm() {
+  return { model: '', name: '', temperature: 0.7, max_tokens: 4000, vision: true }
+}
+
+const modelCount = computed(() => providers.value.reduce((n, p) => n + p.models.length, 0))
 
 const projectList = ref([])
 const loadingProjects = ref(false)
@@ -367,140 +433,187 @@ const editProjectDesc = ref('')
 const editSprintName = ref('')
 
 const tabs = computed(() => [
-  { name: 'ai', label: '模型服务', count: configs.value.length },
+  { name: 'ai', label: '模型服务', count: modelCount.value },
   { name: 'projects', label: '项目与迭代', count: projectList.value.length }
 ])
 
 onMounted(() => {
-  loadConfigs()
+  loadModels()
   loadProjectData()
 })
 
-/* ---------- Key 展示 ----------
-   后端 AIConfig.to_dict() 只会给「前 6 + 后 4」。
-   这里同时兼容旧接口的 `前20 + ***`：先剥掉尾部的星号再重新裁，
-   这样无论后端是哪个版本，列表里最多露出 10 位。 */
-function displayKey(key) {
-  if (!key) return '未设置'
-  const k = String(key).replace(/\*+$/, '')
-  if (!k) return '未设置'
-  if (k.includes('••')) return k
-  if (k.length <= 12) return '•'.repeat(k.length)
-  return `${k.slice(0, 6)}••••${k.slice(-4)}`
+function applyView(data) {
+  providers.value = data.providers || []
+  defaultModel.value = data.default || ''
 }
 
-/* ---------- AI 配置 ---------- */
-async function loadConfigs() {
+function failText(error, fallback) {
+  return error.response?.data?.error || error.message || fallback
+}
+
+async function loadModels() {
   loadingConfigs.value = true
   try {
-    const res = await api.getAIConfigs()
-    configs.value = res.data.configs
+    const { data } = await api.getModels()
+    applyView(data)
   } catch (error) {
-    ElMessage.error('加载配置失败')
+    ElMessage.error('加载模型配置失败：' + failText(error, '未知错误'))
   } finally {
     loadingConfigs.value = false
   }
 }
 
-function openAddConfig() {
-  editingConfig.value = null
-  configForm.value = emptyConfigForm()
+function openProviderDialog(provider = null) {
+  editingProvider.value = provider
+  providerForm.value = provider
+    ? { provider: provider.id, base_url: provider.base_url || '', api_key: '', npm: provider.npm || '@ai-sdk/openai' }
+    : emptyProviderForm()
   testResult.value = null
-  showAddConfig.value = true
+  showProviderDialog.value = true
 }
 
-function editConfig(config) {
-  editingConfig.value = config
-  configForm.value = {
-    provider: config.provider,
-    api_key: '',
-    api_base: config.api_base || '',
-    model: config.model || '',
-    temperature: config.temperature ?? 0.7,
-    max_tokens: config.max_tokens ?? 2000,
-    supports_vision: config.supports_vision !== false
-  }
-  testResult.value = null
-  showAddConfig.value = true
-}
-
-function cancelEdit() {
-  showAddConfig.value = false
-  editingConfig.value = null
-  configForm.value = emptyConfigForm()
-  testResult.value = null
-}
-
-async function saveConfig() {
-  const isEdit = !!editingConfig.value
-  if (!configForm.value.provider || !configForm.value.model) {
-    ElMessage.warning('请填写服务商和模型名称')
-    return
-  }
-  if (!isEdit && !configForm.value.api_key) {
-    ElMessage.warning('请填写 API Key')
-    return
-  }
+async function saveProvider() {
+  const form = providerForm.value
+  if (!form.provider.trim()) return ElMessage.warning('请填写服务名')
+  if (!editingProvider.value && !form.api_key.trim()) return ElMessage.warning('请填写 API Key')
   try {
-    const data = { ...configForm.value }
-    if (isEdit && !data.api_key) delete data.api_key
-    if (isEdit) {
-      await api.updateAIConfig(editingConfig.value.id, data)
-      ElMessage.success('已保存')
-    } else {
-      await api.createAIConfig(data)
-      ElMessage.success('已添加')
-    }
-    cancelEdit()
-    loadConfigs()
+    const payload = { base_url: form.base_url.trim(), api_key: form.api_key.trim(), npm: form.npm.trim() }
+    const { data } = editingProvider.value
+      ? await api.updateModelProvider(form.provider, payload)
+      : await api.createModelProvider({ provider: form.provider.trim(), ...payload })
+    applyView(data)
+    showProviderDialog.value = false
+    ElMessage.success('已保存')
   } catch (error) {
-    ElMessage.error('保存失败：' + (error.response?.data?.error || error.message))
+    ElMessage.error('保存失败：' + failText(error, '未知错误'))
   }
 }
 
-async function testConnection() {
-  if (!configForm.value.api_key) {
-    ElMessage.warning('请先输入 API Key')
-    return
-  }
+async function testProvider() {
+  const form = providerForm.value
+  if (!form.provider.trim()) return ElMessage.warning('请先填服务名')
   testing.value = true
   testResult.value = null
   try {
-    const res = await api.testAIConnection({
-      api_key: configForm.value.api_key,
-      api_base: configForm.value.api_base,
-      model: configForm.value.model
+    const { data } = await api.testModel({
+      provider: form.provider.trim(),
+      api_key: form.api_key.trim(),
+      base_url: form.base_url.trim()
     })
-    testResult.value = res.data.success
+    testResult.value = !!data.success
+    if (data.success) ElMessage.success('连接成功：' + (data.model || ''))
+    else ElMessage.error('连接失败：' + (data.error || '未知原因'))
   } catch (error) {
     testResult.value = false
-    ElMessage.error('连接失败：' + (error.response?.data?.error || error.message))
+    ElMessage.error('连接失败：' + failText(error, '未知错误'))
   } finally {
     testing.value = false
   }
 }
 
-async function toggleActive(config) {
+async function removeProvider(provider) {
+  const isLocal = provider.source === 'local'
   try {
-    await api.updateAIConfig(config.id, { is_active: !config.is_active })
-    ElMessage.success('状态已更新')
-    loadConfigs()
+    await ElMessageBox.confirm(
+      isLocal
+        ? `删除「${provider.id}」和它的全部模型？`
+        : `「${provider.id}」来自全局配置，这里只会移除本地覆盖，之后会恢复成全局的样子。`,
+      isLocal ? '删除服务' : '还原服务',
+      { type: 'warning', confirmButtonText: isLocal ? '删除' : '还原' }
+    )
+    const { data } = await api.deleteModelProvider(provider.id)
+    applyView(data)
+    ElMessage.success(isLocal ? '已删除' : '已还原')
   } catch (error) {
-    ElMessage.error('更新失败')
+    if (error !== 'cancel') ElMessage.error('操作失败：' + failText(error, '未知错误'))
   }
 }
 
-async function deleteConfig(id) {
+async function toggleHidden(provider) {
   try {
-    await ElMessageBox.confirm('删除后使用该配置的分析和生成都会失败，确定删除？', '删除服务', {
-      type: 'warning',
-      confirmButtonText: '删除'
-    })
-    await api.deleteAIConfig(id)
-    ElMessage.success('已删除')
-    loadConfigs()
+    const { data } = await api.hideModelProvider(provider.id, !provider.disabled)
+    applyView(data)
+    ElMessage.success(provider.disabled ? '已恢复' : '已隐藏')
   } catch (error) {
-    if (error !== 'cancel') ElMessage.error('删除失败')
+    ElMessage.error('操作失败：' + failText(error, '未知错误'))
+  }
+}
+
+function openModelDialog(provider) {
+  modelProvider.value = provider
+  modelForm.value = emptyModelForm()
+  showModelDialog.value = true
+}
+
+async function saveModel() {
+  const form = modelForm.value
+  if (!form.model.trim()) return ElMessage.warning('请填写模型 ID')
+  if (form.model.includes('/')) return ElMessage.warning('模型 ID 里不要带 /')
+  try {
+    const { data } = await api.createModel(modelProvider.value.id, {
+      model: form.model.trim(),
+      name: form.name.trim() || undefined,
+      temperature: form.temperature,
+      max_tokens: form.max_tokens,
+      vision: form.vision
+    })
+    applyView(data)
+    showModelDialog.value = false
+    ElMessage.success('已添加')
+  } catch (error) {
+    ElMessage.error('添加失败：' + failText(error, '未知错误'))
+  }
+}
+
+async function removeModel(provider, model) {
+  const tip = model.source === 'global'
+    ? `「${model.name}」是全局配置里带的，这里会把它从本项目的可用列表里移掉（全局文件不动）。`
+    : `从「${provider.id}」里删掉「${model.name}」？`
+  try {
+    await ElMessageBox.confirm(tip, '移除模型', { type: 'warning', confirmButtonText: '移除' })
+    const { data } = await api.deleteModel(provider.id, model.id)
+    applyView(data)
+    ElMessage.success('已移除')
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error('移除失败：' + failText(error, '未知错误'))
+  }
+}
+
+async function setDefaultModel(provider, model) {
+  const ref = `${provider.id}/${model.id}`
+  if (defaultModel.value === ref) return
+  try {
+    const { data } = await api.setDefaultModel(ref)
+    applyView(data)
+    ElMessage.success('默认模型已切到 ' + ref)
+  } catch (error) {
+    ElMessage.error('设置失败：' + failText(error, '未知错误'))
+  }
+}
+
+async function toggleVision(provider, model) {
+  // 这个开关直接决定 opencode 收不收图：不开的话，原型图分析和图生用例会在
+  // 「当前模型不支持图像输入」这一步被挡下来。所以改完立刻重建 runtime 配置，
+  // 不留「忘了点应用」的空档。
+  try {
+    const { data } = await api.updateModel(provider.id, model.id, { vision: !model.vision })
+    applyView(data)
+    await api.applyModels()
+    ElMessage.success(model.vision ? '已关闭多模态' : '已开启多模态')
+  } catch (error) {
+    ElMessage.error('设置失败：' + failText(error, '未知错误'))
+  }
+}
+
+async function applyModels() {
+  applying.value = true
+  try {
+    const { data } = await api.applyModels()
+    ElMessage.success(data.hint || '配置已生效')
+  } catch (error) {
+    ElMessage.error('应用失败：' + failText(error, '未知错误'))
+  } finally {
+    applying.value = false
   }
 }
 
@@ -762,6 +875,7 @@ async function confirmDeleteSprint(sprint) {
 /* 窄屏时这句说明比按钮长得多，不压住按钮就会被挤出容器 */
 .panel-desc {
   min-width: 0;
+  flex: 1;
 }
 
 .panel-desc {
@@ -1092,4 +1206,237 @@ async function confirmDeleteSprint(sprint) {
     padding: 4px 16px 12px;
   }
 }
+/* ---------- 模型服务：按 provider 分组的卡片 ----------
+   不用表格是因为信息是两层的：provider 一行元数据、下面一组模型。
+   塞进 el-table 只能靠展开行，读起来比这更乱。 */
+.head-acts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.prov-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 60px;
+}
+
+.prov-card {
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  background: var(--bg-card);
+  padding: 12px 14px 13px;
+  transition: border-color .16s ease, opacity .16s ease;
+}
+
+.prov-card:hover {
+  border-color: var(--line-ctl);
+}
+
+.prov-card.is-hidden {
+  opacity: .55;
+}
+
+.prov-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.prov-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.prov-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.src-tag {
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--line-soft);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.src-tag.is-local {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.src-tag.is-off {
+  color: var(--danger);
+  border-color: var(--danger-line);
+  background: var(--danger-soft);
+}
+
+.prov-acts {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: none;
+}
+
+.prov-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.prov-url {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.model-chips {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-top: 11px;
+}
+
+.panel-note {
+  margin: -4px 0 12px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+/* 一个模型 = 一个容器：左边点名字设默认，右边多模态开关各管各的。
+   以前整块是一个 button，开关只能做成里面一个 span 假装按钮，看不见也点不准。 */
+.mchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 5px 3px 3px;
+  border: 1px solid var(--line-ctl);
+  border-radius: 7px;
+  background: var(--bg-sunken);
+  color: var(--ink-2);
+  font-size: 12px;
+  transition: border-color .14s ease, color .14s ease, background .14s ease;
+}
+
+.mchip:hover {
+  border-color: var(--accent-line);
+}
+
+.mchip.is-default {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.mchip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 3px 2px 5px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.mchip-main:hover {
+  color: var(--ink);
+}
+
+.mchip.is-default .mchip-main:hover {
+  color: var(--accent);
+}
+
+.mchip-name {
+  font-size: 12px;
+}
+
+.mchip-tag {
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--muted);
+}
+
+.mchip.is-default .mchip-tag {
+  background: var(--bg-card);
+}
+
+/* 多模态开关：写清「开 / 关」两个字，不只靠颜色区分——色弱用户和截图里
+   都还能看出状态。关闭时是虚线灰框，一眼能看出「这里可以点开」。 */
+.mchip-mm {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px dashed var(--line-ctl);
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color .14s ease, border-color .14s ease, background .14s ease;
+}
+
+.mchip-mm:hover {
+  border-color: var(--accent-line);
+  background: var(--bg-card);
+  color: var(--accent);
+}
+
+.mchip-mm.is-on {
+  border-style: solid;
+  border-color: var(--accent-line);
+  background: var(--bg-card);
+  color: var(--accent);
+}
+
+.mchip.is-default .mchip-mm.is-on {
+  background: var(--bg-card);
+}
+
+.mchip-mm-state {
+  font-weight: 500;
+}
+
+/* 删除按钮做成小圆点，hover 才红：模型 chip 是「可点选」的，
+   常驻的红色叉号会让整排看起来像待清理的垃圾。 */
+.mchip-del {
+  font-size: 13px;
+  line-height: 1;
+  color: var(--faint);
+  padding: 0 1px;
+}
+
+.mchip-del:hover {
+  color: var(--danger);
+}
+
+.mchip-empty {
+  font-size: 12px;
+  color: var(--faint);
+}
+
 </style>

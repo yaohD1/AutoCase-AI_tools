@@ -5,7 +5,7 @@ import shutil
 import zipfile
 from pathlib import Path
 
-from app.adapters import GeneralAdapter
+from app.services.oc_text import TextWorker, parse_json
 
 
 ACTION_SYSTEM_PROMPT = '''你是资深 Playwright 自动化工程师。
@@ -119,7 +119,9 @@ class AutomationScriptGenerator:
         return root, workspace
 
     def _get_actions(self, testcase, config, ai_config):
-        if not ai_config or not ai_config.api_key:
+        # 只要有模型引用就能跑：鉴权在 opencode 那边，这里不再看 api_key。
+        model_ref = getattr(ai_config, 'ref', None) if ai_config else None
+        if not model_ref:
             return _fallback_actions(testcase, config.get('base_url'))
         prompt = json.dumps({
             'title': testcase.title,
@@ -128,9 +130,9 @@ class AutomationScriptGenerator:
             'expected': testcase.expected or ''
         }, ensure_ascii=False, indent=2)
         try:
-            actions = GeneralAdapter(ai_config).generate_structured_json(
-                prompt, ACTION_SYSTEM_PROMPT, max_tokens=max(ai_config.max_tokens or 4096, 4096)
-            )
+            raw = TextWorker.shared(self.app_config).ask(
+                model_ref, ACTION_SYSTEM_PROMPT, prompt, timeout=180)
+            actions = parse_json(raw)
             if isinstance(actions, dict):
                 actions = actions.get('actions', [])
             if not isinstance(actions, list):

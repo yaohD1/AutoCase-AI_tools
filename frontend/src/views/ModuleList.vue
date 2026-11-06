@@ -283,9 +283,12 @@ const genIsDragging = ref(false)
 let genDragStart = { x: 0, y: 0 }
 
 const aiConfigList = ref([])
+const defaultModelRef = ref('')
 const moduleGenModelSupportsVision = computed(() => {
-  const activeConfig = aiConfigList.value.find(c => c.is_active)
-  return activeConfig?.supports_vision !== false
+  // 模块生成默认用配置里的默认模型；判断它能不能看图，决定是否附上原型图。
+  const activeConfig = aiConfigList.value.find(c => c.id === defaultModelRef.value)
+    || aiConfigList.value[0]
+  return activeConfig?.vision !== false
 })
 
 function onSelectionChange(val) {
@@ -339,9 +342,11 @@ async function loadProjects() {
 }
 
 async function loadAIConfigs() {
+  // 模型列表来自「设置 → 模型服务」（opencode 配置），不是数据库。
   try {
-    const res = await api.getAIConfigs()
-    aiConfigList.value = res.data.configs || []
+    const res = await api.getModels()
+    aiConfigList.value = res.data.models || []
+    defaultModelRef.value = res.data.default || ''
   } catch {}
 }
 

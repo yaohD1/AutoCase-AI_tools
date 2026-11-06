@@ -3,10 +3,12 @@ import os
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
 from app.models import (
-    db, TestCase, Image, Project, AIConfig, Sprint, PendingModule,
+    db, TestCase, Image, Project, Sprint, PendingModule,
     AutomationConfig, AutomationGeneration
 )
+from app.services import models_config
 from app.services.case_generator import CaseGenerator
+from app.services.oc_text import TextError
 
 testcase_bp = Blueprint('testcase', __name__)
 
@@ -102,16 +104,14 @@ def analyze_image():
     if not image_id and not image_ids:
         return jsonify({'error': 'image_id or image_ids required'}), 400
     
-    ai_config = None
-    if config_id:
-        ai_config = AIConfig.query.get(config_id)
-    if not ai_config:
-        ai_config = AIConfig.query.filter_by(provider=provider, is_active=True).first()
-    if not ai_config:
-        return jsonify({'error': 'AI config not found'}), 404
-    
+    # 模型来自「设置 → 模型服务」里的 opencode 配置。config_id 现在就是
+    # `provider/model`；老调用方只传 provider 时退一步按服务名解析。
+    resolved = models_config.resolve(config_id) or models_config.resolve(provider)
+    if not resolved:
+        return jsonify({'error': '没有可用的模型，请先在「设置 → 模型服务」里配置'}), 404
+
     try:
-        generator = CaseGenerator(ai_config, project_id=data.get('project_id'))
+        generator = CaseGenerator(resolved, project_id=data.get('project_id'))
         if image_ids and len(image_ids) > 1:
             paths = []
             for iid in image_ids:
@@ -168,18 +168,14 @@ def generate_testcases():
                 if not first_image:
                     first_image = img
     
-    ai_config = None
-    if config_id:
-        ai_config = AIConfig.query.get(config_id)
-    if not ai_config:
-        ai_config = AIConfig.query.filter_by(provider=provider, is_active=True).first()
-    if not ai_config:
-        return jsonify({'error': 'AI config not found'}), 404
-    
+    resolved = models_config.resolve(config_id) or models_config.resolve(provider)
+    if not resolved:
+        return jsonify({'error': '没有可用的模型，请先在「设置 → 模型服务」里配置'}), 404
+
     try:
-        generator = CaseGenerator(ai_config, project_id=project_id)
+        generator = CaseGenerator(resolved, project_id=project_id)
         is_smart = smart_mode or not case_types or len(case_types) == 0
-        actual_vision = use_vision and bool(image_paths) and generator.adapter.supports_vision
+        actual_vision = use_vision and bool(image_paths) and generator.supports_vision
         if modules:
             testcases = generator.generate_from_modules(modules, case_types, case_count, description, is_smart, image_paths if actual_vision else None)
         else:
@@ -240,6 +236,171 @@ def generate_testcases():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+def _resolve_images(image_id=None, image_ids=None):
+    """把 image_id / image_ids 解析成本地路径，返回 (paths, 第一张 Image 记录)。"""
+    paths, first = [], None
+    if image_id:
+        first = Image.query.get(image_id)
+        if first:
+            paths.append(first.file_path)
+    for iid in (image_ids or []):
+        img = Image.query.get(iid)
+        if img:
+            paths.append(img.file_path)
+            if not first:
+                first = img
+    return paths, first
+
+
+def _save_cases(project_id, sprint_id, cases, first_image, provider, generated_at=None):
+    """把用例写库。两段式链路用这一份，字段和老 /generate 保持一致。"""
+    image_source_val = first_image.filename if first_image else ''
+    image_id_val = first_image.id if first_image else ''
+    ts = datetime.utcnow()
+    if generated_at:
+        try:
+            ts = datetime.fromisoformat(generated_at)
+        except Exception:
+            ts = datetime.utcnow()
+
+    for case_data in cases:
+        db.session.add(TestCase(
+            project_id=project_id,
+            module=case_data.get('module', ''),
+            test_point=case_data.get('test_point', ''),
+            title=case_data.get('title', ''),
+            priority=case_data.get('priority', 'P2'),
+            preconditions=case_data.get('preconditions', ''),
+            steps=json.dumps(case_data.get('steps', []), ensure_ascii=False),
+            expected=case_data.get('expected', ''),
+            case_type=case_data.get('case_type', 'functional'),
+            image_source=image_source_val,
+            image_id=image_id_val,
+            ai_provider=provider,
+            status='pending',
+            sprint_id=sprint_id,
+            created_at=ts,
+        ))
+    db.session.commit()
+    return len(cases)
+
+
+def _save_modules(project_id, sprint_id, image_id, modules):
+    """按用户确认的模块清单写模块库。
+
+    老流程靠「模块审批」把模块写进 pending_modules；新流程里弹窗确认本身就是审批，
+    所以这里直接落 approved，否则「查看模块列表」那张表会空掉。
+    """
+    seen = {}
+    for module in modules:
+        name = str(module.get('module') or '').replace('模块：', '').strip()
+        if not name:
+            continue
+        seen[name] = module
+
+    for name, module in seen.items():
+        query = PendingModule.query.filter_by(project_id=project_id, module=name)
+        if sprint_id:
+            query = query.filter_by(sprint_id=sprint_id)
+        existing = query.first()
+        fields = {
+            'ui_elements': _join(module.get('ui_elements')),
+            'function_description': str(module.get('function_description') or ''),
+            'interaction_flow': str(module.get('interaction_flow') or ''),
+            'test_focus': _join(module.get('test_focus')),
+            'case_types': ','.join(module.get('case_types') or []),
+            'case_count': module.get('case_count') or 10,
+            'smart_mode': bool(module.get('smart_mode')),
+            'status': 'approved',
+        }
+        if existing:
+            for key, value in fields.items():
+                setattr(existing, key, value)
+            existing.updated_at = datetime.utcnow()
+            continue
+        db.session.add(PendingModule(
+            project_id=project_id,
+            sprint_id=sprint_id or '',
+            image_id=image_id or '',
+            module=name,
+            **fields
+        ))
+    db.session.commit()
+
+
+def _join(value):
+    if isinstance(value, (list, tuple)):
+        return ', '.join(str(v) for v in value if str(v).strip())
+    return str(value or '')
+
+
+@testcase_bp.route('/analyze-session', methods=['POST'])
+def analyze_session():
+    """分析原型并挂起会话：返回模块和令牌，用户改完再调 /generate-session。
+
+    会话留着是为了第二轮不用重传图片、模型也记得自己刚拆过什么。
+    令牌丢了或会话过期都不要紧，生成接口会自己降级成「新开会话 + 重发图」。
+    """
+    data = request.get_json() or {}
+    image_id = data.get('image_id')
+    image_ids = data.get('image_ids')
+    config_id = data.get('config_id')
+    description = data.get('description', '')
+
+    if not image_id and not image_ids:
+        return jsonify({'error': 'image_id or image_ids required'}), 400
+
+    image_paths, _ = _resolve_images(image_id, image_ids)
+    if not image_paths:
+        return jsonify({'error': 'Image not found'}), 404
+
+    resolved = models_config.resolve(config_id)
+    if not resolved:
+        return jsonify({'error': '没有可用的模型，请先在「设置 → 模型服务」里配置'}), 404
+
+    try:
+        generator = CaseGenerator(resolved, project_id=data.get('project_id'))
+        modules, token = generator.analyze_in_session(image_paths, description)
+        return jsonify({'success': True, 'modules': modules, 'token': token}), 200
+    except TextError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'error': '分析失败：%s' % str(exc)}), 500
+
+
+@testcase_bp.route('/generate-session', methods=['POST'])
+def generate_session():
+    """接续挂起的会话，按用户确认的模块清单生成并落库。"""
+    data = request.get_json() or {}
+    project_id = data.get('project_id')
+    sprint_id = data.get('sprint_id', '')
+    token = data.get('token')
+    modules = data.get('modules') or []
+    config_id = data.get('config_id')
+    description = data.get('description', '')
+    generated_at = data.get('generated_at')
+
+    if not project_id:
+        return jsonify({'error': 'project_id required'}), 400
+    if not modules:
+        return jsonify({'error': 'modules required'}), 400
+
+    image_paths, first_image = _resolve_images(data.get('image_id'), data.get('image_ids'))
+    resolved = models_config.resolve(config_id)
+    if not resolved:
+        return jsonify({'error': '没有可用的模型，请先在「设置 → 模型服务」里配置'}), 404
+
+    generator = CaseGenerator(resolved, project_id=project_id)
+    try:
+        cases, meta = generator.generate_in_session(token, modules, description, image_paths)
+    except TextError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    count = _save_cases(project_id, sprint_id, cases, first_image, resolved.ref, generated_at)
+    _save_modules(project_id, sprint_id, first_image.id if first_image else '', modules)
+    return jsonify(dict(success=True, count=count, **meta)), 201
+
 
 @testcase_bp.route('/cases', methods=['GET'])
 def get_testcases():

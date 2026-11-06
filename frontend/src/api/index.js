@@ -66,6 +66,13 @@ export default {
   generateTestcases(data) {
     return api.post('/generate', data)
   },
+  // 首页：分析时挂起会话，用户改完模块再用同一个会话接着生成
+  analyzeSession(data) {
+    return api.post('/analyze-session', data, { timeout: 600000 })
+  },
+  generateSession(data) {
+    return api.post('/generate-session', data, { timeout: 900000 })
+  },
   analyzeImage(data) {
     return api.post('/analyze-image', data)
   },
@@ -129,21 +136,39 @@ batchDeleteTestcases(ids) {
     return api.get(`/documents/${filename}/content`)
   },
 
-  // AI配置
-  getAIConfigs() {
-    return api.get('/ai-configs')
+  // 模型服务（直接管理 opencode 的 provider / model）
+  getModels() {
+    return api.get('/models')
   },
-  createAIConfig(data) {
-    return api.post('/ai-configs', data)
+  createModelProvider(data) {
+    return api.post('/models/providers', data)
   },
-  updateAIConfig(id, data) {
-    return api.put(`/ai-configs/${id}`, data)
+  updateModelProvider(provider, data) {
+    return api.put(`/models/providers/${encodeURIComponent(provider)}`, data)
   },
-  testAIConnection(data) {
-    return api.post('/ai-configs/test-connection', data)
+  deleteModelProvider(provider) {
+    return api.delete(`/models/providers/${encodeURIComponent(provider)}`)
   },
-  deleteAIConfig(id) {
-    return api.delete(`/ai-configs/${id}`)
+  hideModelProvider(provider, hidden) {
+    return api.post(`/models/providers/${encodeURIComponent(provider)}/hidden`, { hidden })
+  },
+  createModel(provider, data) {
+    return api.post(`/models/providers/${encodeURIComponent(provider)}/models`, data)
+  },
+  updateModel(provider, model, data) {
+    return api.patch(`/models/providers/${encodeURIComponent(provider)}/models/${encodeURIComponent(model)}`, data)
+  },
+  deleteModel(provider, model) {
+    return api.delete(`/models/providers/${encodeURIComponent(provider)}/models/${encodeURIComponent(model)}`)
+  },
+  setDefaultModel(model) {
+    return api.put('/models/default', { model })
+  },
+  testModel(data) {
+    return api.post('/models/test', data)
+  },
+  applyModels() {
+    return api.post('/models/apply')
   },
 
   // 知识库

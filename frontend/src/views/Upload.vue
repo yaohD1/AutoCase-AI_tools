@@ -102,8 +102,9 @@
                 <el-option
                   v-for="config in filteredAIConfigs"
                   :key="config.id"
-                  :label="getProviderLabel(config)"
+                  :label="modelLabel(config)"
                   :value="config.id"
+                  :disabled="config.vision === false"
                 />
               </el-select>
               <!-- 选中模型后才出现的参数区：属于这个字段的附属信息，
@@ -111,14 +112,6 @@
               <div v-if="currentAnalyzeModel" class="up-model">
                 <div class="up-model-head">
                   <span class="up-model-name">{{ currentAnalyzeModel.model || '-' }}</span>
-                  <el-input
-                    v-if="editingAnalyzeModel"
-                    v-model="currentAnalyzeModel.model"
-                    size="small"
-                    class="up-model-input"
-                    @blur="editingAnalyzeModel = false; saveModelConfig(currentAnalyzeModel)"
-                  />
-                  <button v-else type="button" class="up-model-act" @click="editingAnalyzeModel = true">编辑</button>
                 </div>
                 <div class="up-model-meta">
                   <span class="up-model-k">温度</span>
@@ -155,14 +148,6 @@
               <div v-if="currentGenModel" class="up-model">
                 <div class="up-model-head">
                   <span class="up-model-name">{{ currentGenModel.model || '-' }}</span>
-                  <el-input
-                    v-if="editingGenModel"
-                    v-model="currentGenModel.model"
-                    size="small"
-                    class="up-model-input"
-                    @blur="editingGenModel = false; saveModelConfig(currentGenModel)"
-                  />
-                  <button v-else type="button" class="up-model-act" @click="editingGenModel = true">编辑</button>
                 </div>
                 <div class="up-model-meta">
                   <span class="up-model-k">温度</span>
@@ -185,6 +170,7 @@
                 <div class="up-model-api">{{ currentGenModel.api_base || '-' }}</div>
               </div>
             </div>
+
           </div>
         </div>
 
@@ -307,9 +293,12 @@
       <el-input v-model="knowledgeViewContent" type="textarea" :rows="20" readonly />
     </el-dialog>
 
+    <!-- 进度的三段都是真事件：上传完成、分析返回、生成返回。
+         段内没有后端信号，所以进度条按已用时长做指数缓行，越接近段尾越慢，
+         永远不会自己走到 100%——真正的收尾只由接口返回来触发。 -->
     <el-dialog
       v-model="showProgressDialog"
-      :title="generateStep === 'uploading' ? '上传图片' : 'AI 图片分析'"
+      :title="progressTitle"
       width="420px"
       top="18vh"
       :close-on-click-modal="false"
@@ -318,14 +307,31 @@
       class="progress-dialog"
     >
       <div class="progress-content">
-        <div class="ios-spinner">
-          <div v-for="i in 12" :key="i" class="ios-bar" :style="{ transform: `rotate(${i * 30}deg)`, animationDelay: `${i * 0.08}s` }" />
+        <ol class="pv-steps">
+          <li
+            v-for="step in progressSteps"
+            :key="step.key"
+            :class="['pv-step', 'is-' + step.state]"
+          >
+            <span class="pv-dot">
+              <svg v-if="step.state === 'done'" viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
+                <path d="M2.6 6.3 L4.7 8.4 L9.4 3.7" fill="none" stroke="currentColor"
+                      stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              <span v-else-if="step.state === 'active'" class="pv-pulse" />
+            </span>
+            <span class="pv-title">{{ step.title }}</span>
+            <span class="pv-note" :title="step.note">{{ step.note }}</span>
+          </li>
+        </ol>
+
+        <div class="pv-track">
+          <div class="pv-fill" :style="{ width: progressPercent + '%' }" />
         </div>
-        <div class="progress-text">
-          {{ generateStep === 'uploading' ? '正在上传图片...' : 'AI 正在分析原型图' }}
-        </div>
-        <div class="progress-sub">
-          {{ generateStep === 'uploading' ? '请稍候' : '通常需要 30-60 秒，图片越复杂耗时越长' }}
+
+        <div class="pv-foot">
+          <span>第 {{ activeStep + 1 }} / {{ progressSteps.length }} 步</span>
+          <span class="pv-elapsed">已用 {{ elapsedText }}</span>
         </div>
       </div>
     </el-dialog>
@@ -547,10 +553,11 @@
       </div>
     </el-dialog>
 
+
     <el-dialog v-model="showModuleReview" class="dlg" width="min(1120px, 94vw)" top="4vh" :close-on-click-modal="false">
       <template #header>
         <div class="el-dialog__title">模块审核</div>
-        <div class="dlg-sub">AI 拆分出 {{ modules.length }} 个模块 · 逐个确认后一起生成用例</div>
+        <div class="dlg-sub">AI 拆分出 {{ modules.length }} 个模块 · 可改名、删减、调条数，确认后接着这次对话生成</div>
       </template>
 
       <div v-if="modules.length > 0" class="dlg-split">
@@ -659,7 +666,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, PictureFilled, Document, Loading, Delete, Close, Operation } from '@element-plus/icons-vue'
@@ -741,9 +748,115 @@ const modules = ref([])
 const currentModuleIndex = ref(0)
 const moduleForms = ref([])
 const uploadedImageIds = ref([])
+// 分析那一轮挂起的会话令牌。用户在弹窗里改模块期间它一直有效，
+// 点生成时带回后端，让 AI 在同一个会话里接着干活（图不用重传）。
+const sessionToken = ref('')
 const analyzing = ref(false)
 const generateStep = ref('')
 const showProgressDialog = computed(() => !!generateStep.value)
+
+// ---- 生成进度：三段真事件 + 段内缓行 ----
+// 后端一次请求到底、中间不回传事件，前端真正知道的只有三个节点：
+// 图片传完、分析接口返回、生成接口返回。段内按已用时长做指数缓行，
+// 越接近段尾越慢、永远走不到段尾 —— 100% 不由动画负责，弹窗一关就是结束了。
+const PROGRESS_SEGMENTS = [
+  { key: 'uploading', title: '上传图片', tau: 3 },
+  { key: 'analyzing', title: '分析原型图', tau: 22 },
+  { key: 'generating', title: '生成测试用例', tau: 55 }
+]
+
+const progressElapsed = ref(0)
+let progressTimer = null
+let progressStartedAt = 0
+
+const activeStep = computed(() => {
+  const i = PROGRESS_SEGMENTS.findIndex(s => s.key === generateStep.value)
+  return i < 0 ? 0 : i
+})
+
+const progressTitle = computed(() => PROGRESS_SEGMENTS[activeStep.value].title)
+
+// 每一步占三分之一，段内按时长缓行。上限压到 90%：最后那 10% 留给接口真正返回，
+// 动画自己绝不宣布完成。
+const progressPercent = computed(() => {
+  const seg = PROGRESS_SEGMENTS[activeStep.value]
+  const ratio = 1 - Math.exp(-progressElapsed.value / seg.tau)
+  const done = (activeStep.value + ratio) / PROGRESS_SEGMENTS.length
+  return Math.min(done * 100, 90)
+})
+
+const elapsedText = computed(() => {
+  const s = Math.floor(progressElapsed.value)
+  return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`
+})
+
+const uploadedTotalSize = computed(() => {
+  const bytes = fileList.value.reduce((sum, f) => sum + (f.size || f.raw?.size || 0), 0)
+  if (!bytes) return ''
+  return bytes < 1048576
+    ? `${Math.max(1, Math.round(bytes / 1024))} KB`
+    : `${(bytes / 1048576).toFixed(1)} MB`
+})
+
+// 每步右侧那句话：已完成、进行中、未开始各一句，都是当下能确定的事实
+const progressSteps = computed(() => {
+  const images = fileList.value.length
+  const size = uploadedTotalSize.value
+  const mods = moduleForms.value.length || modules.value.length
+  const notes = [
+    {
+      done: [images ? `${images} 张` : '', size].filter(Boolean).join(' · ') || '已完成',
+      live: '正在读取图片',
+      todo: ''
+    },
+    {
+      done: mods ? `拆出 ${mods} 个模块` : '已完成',
+      live: '正在识别控件、划分功能区域',
+      todo: '待图片上传完成'
+    },
+    {
+      done: '已完成',
+      live: mods ? `正在按 ${mods} 个模块生成` : '正在生成用例',
+      todo: '待你确认模块后开始'
+    }
+  ]
+  return PROGRESS_SEGMENTS.map((seg, i) => {
+    const state = i < activeStep.value ? 'done' : i === activeStep.value ? 'active' : 'todo'
+    const note = notes[i]
+    return {
+      key: seg.key,
+      title: seg.title,
+      state,
+      note: state === 'active' ? note.live : state === 'done' ? note.done : note.todo
+    }
+  })
+})
+
+function startProgress() {
+  stopProgress()
+  progressStartedAt = Date.now()
+  progressElapsed.value = 0
+  progressTimer = setInterval(() => {
+    progressElapsed.value = (Date.now() - progressStartedAt) / 1000
+  }, 200)
+}
+
+function stopProgress() {
+  if (progressTimer) {
+    clearInterval(progressTimer)
+    progressTimer = null
+  }
+}
+
+// 一轮等待从「上传」开始计时，中途由 uploading 切到 analyzing 不重置；
+// 弹窗一关就停表，用户确认模块之后的第二轮再从 0 开始计。
+watch(generateStep, (next, prev) => {
+  if (!next) {
+    stopProgress()
+    return
+  }
+  if (!prev) startProgress()
+})
 const pendingModuleCount = ref(0)
 const pendingModules = ref([])
 const showModuleApproval = ref(false)
@@ -752,8 +865,6 @@ const moduleApprovalPassing = ref(false)
 const moduleApprovalFailing = ref(false)
 const modulePassing = ref(false)
 const moduleFailing = ref(false)
-const editingAnalyzeModel = ref(false)
-const editingGenModel = ref(false)
 
 const form = ref({
   projectId: '',
@@ -777,7 +888,7 @@ const canGenerate = computed(() => {
 
 const genModelSupportsVision = computed(() => {
   const config = aiConfigs.value.find(c => c.id === form.value.genConfigId)
-  return config?.supports_vision !== false
+  return config?.vision !== false
 })
 
 const cropOverlayStyle = computed(() => {
@@ -828,8 +939,14 @@ const HEAD_COPY = {
 const headCopy = computed(() => HEAD_COPY[uploadMode.value] || HEAD_COPY.image)
 
 const filteredAIConfigs = computed(() => {
-  return aiConfigs.value.filter(c => c.supports_vision !== false)
+  // 原型图分析必须能读图。没开多模态的模型留在列表里但置灰——直接隐藏的话，
+  // 用户看到的是「一个都没有」，反而不知道要去设置页把多模态打开。
+  return aiConfigs.value
 })
+
+function modelLabel(config) {
+  return getProviderLabel(config) + (config.vision === false ? '（未开启多模态）' : '')
+}
 
 const currentFile = computed(() => {
   return fileList.value[currentFileIndex.value]
@@ -848,6 +965,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('paste', handlePaste)
+  stopProgress()
 })
 
 function onProjectChange() {
@@ -977,22 +1095,28 @@ async function loadProjects() {
 
 async function saveModelConfig(config) {
   if (!config || !config.id) return
+  // id 是 provider/model，拆开传给模型服务接口。改的只是采样参数，模型 ID 不动。
+  const slash = config.id.indexOf('/')
+  if (slash <= 0) return
+  const provider = config.id.slice(0, slash)
+  const model = config.id.slice(slash + 1)
   try {
-    await api.updateAIConfig(config.id, {
-      model: config.model,
+    await api.updateModel(provider, model, {
       temperature: config.temperature,
-      max_tokens: config.max_tokens
+      max_tokens: config.max_tokens,
+      vision: config.vision
     })
   } catch {
   }
 }
 
 async function loadAIConfigs() {
+  // 模型列表现在来自「设置 → 模型服务」里的 opencode 配置，id 形如 provider/model。
   try {
-    const res = await api.getAIConfigs()
-    aiConfigs.value = (res.data.configs || []).filter(c => c.is_active)
+    const res = await api.getModels()
+    aiConfigs.value = res.data.models || []
   } catch (error) {
-    ElMessage.error('加载AI配置失败')
+    ElMessage.error('加载模型列表失败')
   }
 }
 
@@ -1024,9 +1148,7 @@ async function createSprint() {
 }
 
 function getProviderLabel(config) {
-  const name = config.provider || config.id
-  const model = config.model ? ` / ${config.model}` : ''
-  return `${name}${model}`
+  return `${config.provider} / ${config.label || config.model || ''}`.trim()
 }
 
 function handlePaste(e) {
@@ -1062,6 +1184,7 @@ function switchMode(mode) {
   fileList.value = []
   imageDescriptions.value = []
   currentDocContent.value = ''
+  sessionToken.value = ''
   form.value.analyzeConfigId = ''
   form.value.genConfigId = ''
 }
@@ -1097,6 +1220,7 @@ async function createProject() {
 function handleFileChange(file, newFileList) {
   const oldLen = fileList.value.length
   fileList.value = newFileList
+  sessionToken.value = ''
   if (newFileList.length > oldLen) {
     imageDescriptions.value.push('')
     interactionPaths.value = [{ name: '', hint: '', description: '', steps: [''] }]
@@ -1111,6 +1235,8 @@ function handleFileChange(file, newFileList) {
 function handleFileRemove(file, newFileList) {
   fileList.value = newFileList
   imageDescriptions.value = newFileList.map((_, i) => imageDescriptions.value[i] || '')
+  // 图换了，之前那个挂起会话分析的就不是这批图了，别再拿它接续
+  sessionToken.value = ''
 }
 
 function removeFile(index) {
@@ -1443,8 +1569,9 @@ async function generateCases() {
       } else {
         payload.image_id = uploadedImageIds.value[0]
       }
-      const res = await api.analyzeImage(payload)
+      const res = await api.analyzeSession(payload)
       modules.value = res.data.modules || []
+      sessionToken.value = res.data.token || ''
       moduleForms.value = modules.value.map(m => ({
         module: m.module || '',
         ui_elements: (m.ui_elements || []).join(', '),
@@ -1484,91 +1611,51 @@ async function confirmModules() {
     return
   }
   confirming.value = true
+  generating.value = true
+  showModuleReview.value = false
+  generateStep.value = 'generating'
   try {
-    generating.value = true
-    const imageId = uploadedImageIds.value[0] || ''
-
-    await api.savePendingModules(moduleForms.value.map(m => ({
+    const interactionText = formatInteractionPaths(interactionPaths.value)
+    const baseDesc = imageDescriptions.value[0] || ''
+    const fullDescription = interactionText + (baseDesc ? '\n\n## 功能介绍\n' + baseDesc : '')
+    const payload = {
       project_id: form.value.projectId,
       sprint_id: form.value.sprintId || '',
-      image_id: imageId,
-      module: m.module || '',
-      ui_elements: m.ui_elements || '',
-      function_description: m.function_description || '',
-      interaction_flow: m.interaction_flow || '',
-      test_focus: m.test_focus || '',
-      case_types: (m.case_types || []).join(','),
-      case_count: m.case_count || 10,
-      smart_mode: m.smart_mode || false
-    })))
-
-    const pendingResult = await api.getPendingModules({
-      project_id: form.value.projectId,
-      sprint_id: form.value.sprintId || ''
-    })
-    const pendingList = (pendingResult.data.modules || []).filter(m => m.status === 'pending')
-    for (const mod of moduleForms.value) {
-      const matched = pendingList.find(m => m.module === mod.module)
-      if (matched?.id) {
-        await api.approvePendingModule(matched.id, {
-          module: mod.module,
-          ui_elements: mod.ui_elements,
-          function_description: mod.function_description,
-          interaction_flow: mod.interaction_flow,
-          test_focus: mod.test_focus,
-          case_types: (mod.case_types || []).join(','),
-          case_count: mod.case_count || 10,
-          smart_mode: mod.smart_mode || false
-        })
-      }
+      config_id: form.value.genConfigId,
+      // 令牌失效也不要紧：后端会自己新开一个会话、重发原图，结果一样只是慢一点
+      token: sessionToken.value,
+      description: fullDescription,
+      generated_at: new Date().toISOString(),
+      modules: moduleForms.value.map(toModulePayload)
+    }
+    if (form.value.linkedAnalysis && uploadedImageIds.value.length > 1) {
+      payload.image_ids = uploadedImageIds.value
+    } else {
+      payload.image_id = uploadedImageIds.value[0]
     }
 
-    const promises = []
-    const modelSupportsVision = genModelSupportsVision.value
-    const hasMultipleImages = uploadedImageIds.value.length > 1
-    const genInteractionText = formatInteractionPaths(interactionPaths.value)
-    const genBaseDesc = imageDescriptions.value[0] || ''
-    const batchTime = new Date().toISOString()
-    for (let j = 0; j < moduleForms.value.length; j++) {
-      const mod = moduleForms.value[j]
-      const payload = {
-        project_id: form.value.projectId,
-        config_id: form.value.genConfigId,
-        case_types: mod.smart_case_type ? [] : (mod.case_types || []),
-        case_count: mod.case_count || 10,
-        description: genInteractionText + (genBaseDesc ? '\n\n## 功能介绍\n' + genBaseDesc : ''),
-        sprint_id: form.value.sprintId || '',
-        generated_at: batchTime,
-        modules: [{
-          image_id: uploadedImageIds.value[0] || '',
-          module: mod.module,
-          ui_elements: mod.ui_elements.split(',').map(s => s.trim()).filter(Boolean),
-          function_description: mod.function_description,
-          interaction_flow: mod.interaction_flow,
-          test_focus: mod.test_focus.split(',').map(s => s.trim()).filter(Boolean)
-        }],
-        smart_mode: mod.smart_mode || false
-      }
-      if (mod.use_vision && modelSupportsVision) {
-        if (hasMultipleImages) {
-          payload.image_ids = uploadedImageIds.value
-        } else {
-          payload.image_id = uploadedImageIds.value[0]
-        }
-      }
-      promises.push(api.generateTestcases(payload))
-    }
-    await Promise.all(promises)
-    showModuleReview.value = false
+    const res = await api.generateSession(payload)
     generateStep.value = ''
+    sessionToken.value = ''
+    loadStatusCount()
+    loadPendingModuleCount()
 
-    ElMessageBox.alert('生成完成，请到用例列表进行审批', '成功', {
+    const count = res.data.count || 0
+    if (res.data.degraded && res.data.partial) {
+      ElMessage.warning(`已生成 ${count} 条用例，但中途有一批没生成完`)
+    } else if (res.data.degraded) {
+      ElMessage.info(`已生成 ${count} 条用例（等待超时，已重新开会话生成）`)
+    }
+    ElMessageBox.alert(`已生成 ${count} 条用例，请到用例列表审批`, '成功', {
       confirmButtonText: '前往查看',
       callback: () => {
         router.push({ path: '/cases', query: { project_id: form.value.projectId, sprint_id: form.value.sprintId, tab: 'pending' } })
       }
     })
   } catch (error) {
+    generateStep.value = ''
+    // 生成失败别把用户改好的模块弄丢，弹窗原样还给他
+    showModuleReview.value = true
     ElMessage.error('生成失败：' + (error.response?.data?.error || error.message))
   } finally {
     generating.value = false
@@ -1576,6 +1663,26 @@ async function confirmModules() {
   }
 }
 
+// 弹窗里的模块是「逗号分隔的字符串」，后端要数组。条数和类型都按模块各自带上，
+// 一次请求就能按每模块不同要求生成。
+function toModulePayload(mod) {
+  const split = (value) => String(value || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+  return {
+    module: mod.module || '',
+    ui_elements: split(mod.ui_elements),
+    function_description: mod.function_description || '',
+    interaction_flow: mod.interaction_flow || '',
+    test_focus: split(mod.test_focus),
+    case_types: mod.smart_case_type ? [] : (mod.case_types || []),
+    case_count: mod.case_count || 10,
+    smart_mode: mod.smart_mode || false,
+    smart_case_type: mod.smart_case_type || false,
+    use_vision: mod.use_vision || false
+  }
+}
 function prevModule() {
   if (currentModuleIndex.value > 0) {
     currentModuleIndex.value--
@@ -1645,7 +1752,6 @@ function onModuleDrag(e) {
 }
 
 function endModuleDrag() { moduleIsDragging.value = false }
-
 function goToCases() {
   router.push({ path: '/cases', query: { project_id: form.value.projectId, sprint_id: form.value.sprintId } })
 }
@@ -2702,48 +2808,122 @@ async function deleteKnowledgeFile(row) {
 }
 
 .progress-content {
-  text-align: center;
-  padding: 32px 0 16px;
+  padding: 2px 0 6px;
 }
 
-.progress-text {
-  margin-top: 24px;
-  font-size: 14px;
-  color: var(--ink-2);
+/* 三列：圆点 / 步骤名 / 说明。说明紧跟步骤名，不推右 ——
+   推到最右会留下三百来像素的空白，眼睛要在两头来回跳 */
+.pv-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pv-step {
+  display: grid;
+  grid-template-columns: 16px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.pv-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  flex: none;
+  transition: background-color .25s ease, border-color .25s ease;
+}
+
+.pv-step.is-done .pv-dot {
+  background: var(--accent);
+  color: var(--ink-inverse);
+}
+
+.pv-step.is-active .pv-dot {
+  border: 2px solid var(--accent);
+  background: var(--bg-card);
+}
+
+.pv-step.is-todo .pv-dot {
+  border: 1.5px solid var(--line-ctl);
+}
+
+.pv-pulse {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pv-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes pv-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pv-pulse { animation: none; }
+  .pv-fill { transition: none; }
+}
+
+.pv-title {
+  font-size: 13px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pv-step.is-todo .pv-title {
+  color: var(--faint);
+}
+
+.pv-step.is-active .pv-title {
   font-weight: 500;
 }
 
-.progress-sub {
-  margin-top: 8px;
-  font-size: 12px;
+.pv-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pv-step.is-todo .pv-note {
+  color: var(--faint);
+}
+
+.pv-track {
+  height: 3px;
+  margin: 15px 0 9px;
+  border-radius: 2px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+
+.pv-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width .4s linear;
+}
+
+.pv-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11.5px;
   color: var(--muted);
 }
 
-.ios-spinner {
-  width: 36px;
-  height: 36px;
-  position: relative;
-  margin: 0 auto;
-}
-
-.ios-bar {
-  position: absolute;
-  left: 50%;
-  top: 8%;
-  width: 6%;
-  height: 18%;
-  margin-left: -3%;
-  background: var(--accent);
-  border-radius: 2px;
-  transform-origin: 50% 350%;
-  opacity: 0.05;
-  animation: ios-fade 1.2s linear infinite;
-}
-
-@keyframes ios-fade {
-  0%, 100% { opacity: 0.05; }
-  10% { opacity: 1; }
-  50% { opacity: 0.05; }
+.pv-elapsed {
+  font-variant-numeric: tabular-nums;
 }
 
 /* 窄屏（1366 的笔记本开两栏、或者窗口拖窄）：配置区与上传区上下堆叠，

@@ -1,4 +1,4 @@
-"""AI 配置列表里的 Key 脱敏。
+"""模型服务列表里的 Key 脱敏（实现已搬到 models_config）。
 
 原来的写法是 `api_key[:20] + '***'`：看着像脱敏，其实常见 key 也就 30~40 位，
 20 位已经覆盖大半；短 key（比如 11 位的测试 key）会整段原样返回。
@@ -6,7 +6,7 @@
 """
 import unittest
 
-from app.models.ai_config import mask_key
+from app.services.models_config import mask_key
 
 
 class MaskKeyTest(unittest.TestCase):

@@ -32,13 +32,14 @@
   - 淡入用 `--boot-off`（`useBoot.js` 算出的延迟）而不是「揭幕后补类」：补类会让元素先以 opacity 1 亮一帧。延迟要比幕布起手**早 PRE=160ms** —— CSS 动画的 `startTime` 是首帧样式算完的那一刻，实测比写类晚 100ms 出头。
 - `frontend/src/router/index.js`：路由入口。`scrollBehavior` 换页回顶（后退/前进仍由浏览器恢复），末尾有 `/:pathMatch(.*)*` 回落首页。
 - `frontend/src/views/Upload.vue`：首页、图片/文档上传、知识库入口、模块分析和用例生成。
+  - 生成进度是「三段真事件 + 段内缓行」：上传完成、分析返回、生成返回是仅有的三个真信号，段内后端不回传事件。所以 `progressPercent` 用 `1 - exp(-t/tau)` 指数逼近、整体上限压到 90%，最后那 10% 只由接口返回触发。**不要把它改成"真进度"**——后端一次请求到底，中间没有任何可读的中间态；同理也不要往里塞假的子步骤文案。
 - `frontend/src/views/CaseList.vue`：已审批用例、用例编辑、待审审批、原型图查看和 XMind 导出。
 - `frontend/src/views/ModuleList.vue`：模块列表和模块审批。
 - `frontend/src/views/Scripts.vue`：Agent 探索（`/scripts`）。一屏工作台：页头 + 下划线 tab（按需求 / 按用例）+ 左任务 / 右 Agent 配置两列 + 底栏唯一的蓝色「启动 Agent」。「任务记录」是页头右上角的独立按钮，不是配置卡下面的一张列表。
 - `frontend/src/views/AutomationRecords.vue`：任务记录（`/scripts/records`），列表页骨架（`.list-page`），项目 / 状态两个筛选 + 表格 + 前端分页（10 条/页），点行进详情。
 - `frontend/src/views/AutomationGenerationDetail.vue`：任务详情（`/scripts/generations/:id`），启动 Agent 后落在这里。
 - `frontend/src/views/RecordingRecords.vue`：生成记录（`/recording/records`）。一屏两栏：左 320px 记录列表（文件名 + 目录/时间 + 状态方片），右详情（步骤 / 文件预览 / Agent 说明）。提交盒钉在右下角，列表和预览各自滚；`≤1080px` 改上下排列、整页滚动。
-- `frontend/src/views/Settings.vue`：AI 服务与项目/迭代管理。左侧竖排导航 + 右侧面板（不锁一屏）。API Key 只展示后端 `mask_key()` 给的前 6 + 后 4，前端 `displayKey()` 只做兜底，不要再二次打码。
+- `frontend/src/views/Settings.vue`：模型服务与项目/迭代管理。左侧竖排导航 + 右侧面板（不锁一屏）。模型服务按 provider 分组展示，数据来自 `opencode.models.json`（见下面「模型配置」），Key 由后端 `mask_key()` 给前 6 + 后 4，前端不再二次打码。
 - `frontend/src/api/index.js`：所有前端 API 封装。
 - `frontend/src/styles/tokens.css`：设计 token + **双主题**。`:root` 是浅色，`[data-theme="dark"]` 是夜墨暗色。四组：表面（`--bg-page/card/sunken/stage/raised/hover/code`）、文字（`--ink/ink-2/muted/faint`）、线（`--line*/line-ctl`）、语义（`--accent*/danger*/ok*/warn*`）。
   - **页面里不准再写颜色字面量**（`#fff`、`#f4f6f9`、`rgba(0,0,0,.06)`）。只有两种情况可以写死：原型截图里的颜色、深色面板上本来就该是白的字/图标。
@@ -67,7 +68,7 @@
 - `backend/app/services/case_generator.py`：AI 用例生成业务逻辑。
 - `backend/app/services/automation_generator.py`：旧版自然语言动作渲染器，历史兼容代码；新自动化任务不再走这里。
 - `backend/app/services/opencode_runner.py`：启动 OpenCode orchestrator、写入任务 manifest、收集 Git 变更和生成归档。
-- `backend/app/adapters/`：AI 适配器，`GeneralAdapter` 支持通用 OpenAI 兼容接口和结构化 JSON。
+- `backend/app/services/oc_text.py`：opencode 的纯文本/图片调用器（`TextWorker` 常驻 serve），用例生成、模块分析、脚本动作生成都走它。旧的 `backend/app/adapters/` 已删除。
 - `backend/app/utils/`：提示词、知识库检索、文档和校验工具。
 
 ### 数据和运行目录
@@ -79,9 +80,87 @@
 
 ## 核心业务流
 
-- 用例生成：上传文件 → AI 分析模块 → 模块审批 → 生成待审用例 → 用例审批 → 已审批用例。
+- 用例生成（首页）：上传原型图 → `/analyze-session` 拆模块并**挂起会话** → 用户在模块审核弹窗里改名字、删模块、调类型和条数 → `/generate-session` 在**同一个会话**里接续生成 → 用例审批。模块确认清单同时写入模块库（approved）。
+- 用例生成（模块库）：模块审批通过的模块 → 按模块选类型和条数 → `/generate`（带 `modules`）生成。
 - 自动化脚本：输入自然语言需求 → Python 按顺序驱动三个 OpenCode 会话：planner 探索和规划（校验 Seed 行和用例标题）→ generator 生成 spec → healer 执行测试并修复 → 写入服务端 Git 工作区。阶段间的文件衔接和占位符替换由 `opencode_runner.py` 完成，不再有 orchestrator agent。
 - 图片审批：`TestCase.image_id/image_source` 和 `PendingModule.image_id` 负责原型图关联；“附带原图”只决定是否把图片送给 AI，不应影响审批页展示。
+
+## 首页生成：会话挂起（不要改成两段独立会话）
+
+中间层（模块审核弹窗）是产品的核心：用户要能在生成前改名、删模块、调类型和条数。
+它和「AI 拆模块」必须是同一轮对话，否则等于放弃可控性。
+
+实现：`session_pool` 存令牌 → 会话元数据（`session_id`/`base_url`/`model`/图片路径），
+`case_generator.analyze_in_session()` 拆完模块把会话**留着不删**，
+`generate_in_session()` 拿令牌在同一个会话里发「用户已确认的模块清单」。
+
+实测（模型 `4rount-hyper/gpt-6-luna`）：
+
+| 页面 | 同会话接续 | 新会话重发图 | 删掉的模块漏出 | 改名命中 |
+|---|---|---|---|---|
+| 登录页 | 184s / 30 条 | 249s / 25 条 | 0 | 5/5 |
+| 作业编辑页 | 170s / 24 条 | 192s / 24 条 | 0 | 5/5 |
+
+挂起 2 分钟后，模型仍答得出第一轮没提过的占位文字（“请输入手机号或邮箱”），
+说明图还在上下文里；让它复述第一轮列过的控件，10 个全对。
+
+三条必须守住的约束：
+
+- **serve 不能被回收**：回收后会话发消息直接 500（临时工作目录被删）。`TextWorker.hold()` 在
+  有挂起会话时挡住空闲回收，`release()` 在最后一个会话用完时解除。
+- **令牌可能在别的进程**：`session_pool` 是进程内字典，多 worker 部署时拿不到。
+  `generate_in_session()` 拿不到就走 `_generate_fresh()`：新开会话 + 重发图 + 用户清单，
+  标 `degraded=true`，前端不打断用户。
+- **一次别出太多**：单次请求超过约 40 条会顶到 300s 超时（实测 88 条直接失败）。
+  `split_batches()` 按模块切批，仍在同一会话里连发，用户看到的还是「一次生成」。
+
+另外：**不要**让模型在同一个会话里「审自己刚生成的用例」——它会只补 1-2 条
+（同页面 13 条 vs 跨会话 26 条）。两段式自省必须换新会话、把用例当外部材料。
+
+## 模型配置（opencode）
+
+模型不在数据库里，就是 opencode 的原生配置。三层：
+
+- `opencode.json`（进仓库）：agent 定义、mcp、写权限。**不要往这里写 provider/key。**
+- `opencode.models.json`（gitignore，含明文 key）：`provider` / `model` / `autocase` 三段。设置页只改这一份。
+- `opencode.runtime.json`（gitignore，自动生成）：上面两份的合并结果，`OPENCODE_CONFIG` 指向它。
+
+读取链路：`opencode_runner._config_path()` 默认返回 `models_config.runtime_config()`；`_emit_config()` 再从这份合并配置里抠出 `recording-emitter` 改权限，所以临时权限配置天然带着 provider。测试/脚本传了 `OPENCODE_CONFIG` 时仍以显式值为准。
+
+四条实测结论（1.18.31，改之前先看）：
+
+- 项目级 provider 与全局 `~/.config/opencode/opencode.json` 是**深合并**，全局有的模型删不掉。
+- 模型上的 `disabled: true` 会被 opencode **直接丢弃**，不生效。
+- 要砍某个模型必须用 provider 级 **`whitelist`**（实测 `opencode models` 立刻只剩白名单里的）；整块隐藏用 `disabled_providers`。
+- `OPENCODE_CONFIG` 与工作区自带的 `opencode.json` 是**叠加**的，不是替换。
+
+用例生成也走 opencode：`models_config.resolve('provider/model')` 给出 `ResolvedModel`，`case_generator` 用 `oc_text.TextWorker` 发 `/session/:id/message`。不再直连 provider——直连那套的 `api_base` 语义是「完整端点」，而配置里存的是 base URL，少了 `/chat/completions` 就整条 404（这个 bug 真的发生过）。旧的 `ai_configs` 表和 `app/adapters/` 都已删除。
+
+### 图片能力（vision）
+
+opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`，没有就直接回
+「当前模型不支持图像输入」，**请求根本不会发出去**。所以：
+
+- 设置页每个模型 chip 上的「多模态 开/关」是个开关，写 `autocase.models[].vision`；
+- `_sync_modalities()` 在生成 runtime 配置时把开关翻译成 `modalities`；
+- `_vision_flag()` 反过来以 `modalities` 为真相（用户没显式设过时），保证界面和实际一致；
+- 默认值是「不支持」——宁可让用户去勾，也不要界面写能看图、实际被拒。
+
+实测：`4rount-hyper/gpt-6-luna` 开图后读截图 9.9s 正确；`cctq-codex/gpt-6-luna` 同图 33.8s，
+所以默认推 4rount-hyper。
+
+### 调用开销与坑
+
+- `TextWorker` 是进程级单例、常驻 serve、空闲 30 分钟回收；一次调用约 9s，其中 5–7s 是
+  「这个 serve 的第一次模型调用」，所以别每次新建进程。
+- 结构化输出只能用 `format: {"type":"json_schema","schema":{...}}`（结果在 `info.structured`），
+  `{"type":"json"}` 会 400 `Expected OutputFormat`。但 json_schema 比纯文本慢 3–4 倍
+  （2 条用例 44s vs 9s），所以默认用纯文本 + `parse_json` 稳健解析。
+- `PromptTemplates.IMAGE_ANALYSIS_PROMPT` 正文里有 JSON 示例，对它调 `.format()` 会
+  `KeyError: '
+    "module"'`；用 `.replace('{count}', ...)`，单图直接换 SINGLE 模板。
+
+改配置后不会热生效：`/api/models/apply` 只重建 runtime 文件，正在跑的 serve 要等下一次生成才会重启。
 
 ## 录制（自动化工具）
 
