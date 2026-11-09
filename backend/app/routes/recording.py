@@ -105,6 +105,9 @@ def start_recording():
             ask_config=_opencode_config(),
             # 动作库按项目存：同一个工作区下次录制能直接看到上次封装的动作。
             workspace=_recording_workspace(body),
+            # 这次录制要按哪个框架生成：之后所有定位 / 规划 / 生成都以它为兜底，
+            # 不再各自默认 playwright-ts（面板丢了参数也不会静默换写法）。
+            framework=(body.get('framework') or '').strip() or None,
         )
     except RecordingBusy as exc:
         return _error(str(exc), 409)
@@ -312,7 +315,8 @@ def highlight_recording_step():
     if index is not None and not isinstance(index, int):
         return _error('index 必须是整数', 400)
     return _mutate(lambda session: session.highlight(
-        int(body['no']), index=index, framework=body.get('framework') or 'playwright-ts'))
+        int(body['no']), index=index,
+        framework=body.get('framework') or getattr(session, 'framework', None) or 'playwright-ts'))
 
 
 @recording_bp.route('/automation/recording/highlight/clear', methods=['POST'])
@@ -391,7 +395,8 @@ def locate_recording_step(no):
         return _error('浏览器已关闭，无法再看当前页面', 409)
     body = request.get_json(silent=True) or {}
     try:
-        result = session.locate(no, framework=body.get('framework') or 'playwright-ts')
+        result = session.locate(no, framework=body.get('framework')
+                                or getattr(session, 'framework', None) or 'playwright-ts')
     except RecordingError as exc:
         return _error(str(exc), 409)
     return jsonify(result), 200
@@ -681,7 +686,10 @@ def _prepare_generation(body):
     if session.status not in ('stopped', 'idle_timeout', 'closed'):
         return None, _error('请先停止录制', 409)
     model = (body.get('model') or '').strip()
-    framework = (body.get('framework') or '').strip()
+    # 前端没带（面板刷新、旧书签、直接调接口）时用这次录制本身的框架：
+    # 兜底成 playwright-ts 会让「录制时选 RF、生成时写 Playwright」这种情况没人发现。
+    framework = ((body.get('framework') or '').strip()
+                 or (getattr(session, 'framework', None) or ''))
     target_path = (body.get('target_path') or '').strip()
     title = (body.get('title') or '').strip() or 'recorded flow'
     if '/' not in model:

@@ -4,7 +4,7 @@
     <header class="sp-head">
       <div class="sp-head-main">
         <div class="eyebrow">AGENT · OPENCODE</div>
-        <h1 class="sp-title">Agent 探索</h1>
+        <h1 class="sp-title">Agent 自动化测试</h1>
         <p class="sp-sub">给一段需求和一个真实页面，Agent 会自己打开浏览器探索、写出 Playwright 脚本，跑失败了自己修。</p>
       </div>
       <div class="sp-head-actions">

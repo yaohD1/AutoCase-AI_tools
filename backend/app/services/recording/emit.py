@@ -104,6 +104,9 @@ FRAMEWORK_RULES = {
         '    并在 *** Keywords *** 里定义 Reload And Check：先 Reload Page，再用一个**小于 interval** 的超时判断'
         '（interval 为 5s 就写 3s）。内层超时若大于等于 interval，单次判断就吃满整个节奏，轮询会退化成慢速串行。\n'
         '    条件不是可见性时（文字包含、地址包含等），Reload And Check 里换成对应的 Should 断言即可。\n'
+        '    这个关键字里只放 Reload Page 和判断，**不要重放前面的点击 / 输入**：'
+        '每轮都会多花几秒，还会反复提交表单被风控拦掉。刷新后必须重新操作才能复现时，'
+        '按「刷新 → 重新操作 → 立即断言」拆成三步录，而不是塞进轮询关键字。\n'
         '    不要用 Sleep 拼循环，也不要用 FOR 手写重试。\n'
         '- 等页面加载（intent.type 为 page_ready）：Selenium 没有等价 API，用 Wait For Condition 判 readyState。\n'
         '  intent.state 为 load → Wait For Condition    return document.readyState === "complete"    ${intent.timeout}s\n'
@@ -155,6 +158,13 @@ FRAMEWORK_RULES = {
         '    url_contains → page.url().includes(value)；'
         'page_text_contains → ((await page.locator("body").innerText()) || "").includes(value)。\n'
         '    也不要用 while(true) 手写循环。\n'
+        '    **poll 回调里只能有 reload 和那一句即时判断，不许把前面的点击 / 输入重放一遍。**'
+        '实测重放一轮 2.9 秒、只 reload 0.3 秒，30 秒超时里能跑的轮数从六十多轮掉到三轮，'
+        '而且每轮都会再提交一次表单，很快被对方的风控拦掉。\n'
+        '    刷新会清空表单、导致「必须重新操作才能复现」时，这仍然是录制时该解决的事：'
+        '正确的步骤是「刷新 → 重新操作 → 立即断言」三步，不是把操作塞进 poll 里。'
+        '遇到这种断言，按规则写 reload + 判断，并在 poll 上方加一行注释：\n'
+        '    // TODO: 该条件刷新后需重新操作才会出现，建议拆成「刷新 / 重新操作 / 立即断言」三步\n'
     ),
 }
 
@@ -263,6 +273,12 @@ def _steps_for_prompt(steps, framework, actions=None):
             item['nav_to'] = step['nav_to']
         if step.get('intent'):
             item['intent'] = step['intent']
+            # 轮询刷新是写手最容易自作主张的一步：它会把「刷新后要重新登录」推断成
+            # 「把登录操作也写进轮询回调」，实测每轮从 0.3 秒涨到 2.9 秒，还会反复提交
+            # 表单被风控拦掉。长规则里说一遍压不住，所以贴着这一步的数据再说一次。
+            if (step['intent'] or {}).get('reload'):
+                item['poll_rule'] = ('轮询回调里只写 reload + 一句即时判断，'
+                                     '不要重放前面的点击 / 输入')
         if step.get('dialog'):
             item['dialog'] = step['dialog']
         if step.get('seconds') is not None:
@@ -457,6 +473,10 @@ PLAN_RULES = (
     'click / fill 这类步骤不要自己加断言。不要写定位表达式——'
     '录制时已经把定位算准了，写手会直接用 dispatch 里的 locator，'
     '你猜的跟它不一致反而要让写手在两个版本之间打架。\n'
+    '- intent.reload 为 true 的等待步骤，note 只描述「反复刷新，直到条件成立」。'
+    '不要写「刷新后重新登录 / 重新填表再提交」——写手会照着把整段操作重放进轮询回调，'
+    '每轮多花两三秒，还会反复提交表单被风控拦掉。真需要重新操作才能复现的，'
+    '在 note 里写明「刷新后需重新操作」，让写手按 TODO 标出来，由用户决定要不要拆步骤。\n'
     '- 同一流程可能已经有旧版本：project_facts.previous_outputs 就是 AutoCase 以前为它生成的文件，'
     '它们不是项目惯例。遇到时不要覆盖旧版本，另起一个新文件名（在原名后加动作后缀），'
     '并在 risks 里写一句「已存在旧版本 xxx，本次写新文件」。'
@@ -1028,6 +1048,8 @@ def _prompt(payload, resumed=False):
         head
         + LOCATOR_RULES
         + FRAMEWORK_RULES.get(payload.get('framework'), '')
+        # 紧挨着数据说：规则写在几百行上面时模型会漏，字段就在它要写的这一步旁边时不会。
+        + 'steps 里带 poll_rule 字段的那一步，poll_rule 就是硬约束，必须照做。\n'
         + '```json\n' + json.dumps(payload, ensure_ascii=False, indent=2) + '\n```\n'
     )
 

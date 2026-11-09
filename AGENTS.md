@@ -13,9 +13,9 @@
 ### 前端
 
 - `frontend/src/App.vue`：全局壳层、顶部导航（品牌 + 深浅色切换 + 设置）、全局 Element 覆盖。
-- `frontend/src/styles/motion.css`：全站动效，只做两件事 —— 首页首帧入场（页头 0ms 起手 → 240ms 画线 340ms → tab 400ms → 工具条 480ms → 卡片 560ms，每块 620ms、上移 16px、`cubic-bezier(.16,1,.3,1)`）、路由切换淡入（`.page-enter-*`，240ms、上移 4px）+ 内容区顶部 1px 导航线（`.nav-line`）。
+- `frontend/src/styles/motion.css`：全站动效，只做两件事 —— 首页首帧入场（页头 0ms 起手 → 240ms 画线 340ms → tab 400ms → 入口卡 480ms → 卡片 560ms，每块 620ms、上移 16px、`cubic-bezier(.16,1,.3,1)`）、路由切换淡入（`.page-enter-*`，240ms、上移 4px）+ 内容区顶部 1px 导航线（`.nav-line`）。
   - 首页那条「线条先行」是 `.mode-tabs::after`（tab 行下的 1px 横线）做 `scaleX`。**选择器必须带 `::after`**：挂到 `.enter-rule`（nav 本身）上会把整行横向压扁，宽度算成 0。
-  - tab 文字单独动（`.mode-tab` / `.mode-jump`），容器不整体淡入 —— 父级 `opacity` 会连伪元素一起淡，线就抽不出来了。
+  - tab 文字单独动（`.mode-tab`），容器不整体淡入 —— 父级 `opacity` 会连伪元素一起淡，线就抽不出来了。
   - 页头必须 0ms 起手。让它等线画完再出现的话，前 0.3 秒页面全空、只有一条线悬着，像渲染坏了。
   - **只写 enter，不写 leave**：离开动画一存在，旧页面还没走完新页面就压上来，`keep-alive` 的缓存切换会跟着抖。
   - 一律关在 `@media (prefers-reduced-motion: no-preference)` 里；`reduce` 下 `.nav-line` 必须 `display:none`，否则会留一根永远亮着的蓝线。
@@ -35,7 +35,8 @@
   - 生成进度是「三段真事件 + 段内缓行」：上传完成、分析返回、生成返回是仅有的三个真信号，段内后端不回传事件。所以 `progressPercent` 用 `1 - exp(-t/tau)` 指数逼近、整体上限压到 90%，最后那 10% 只由接口返回触发。**不要把它改成"真进度"**——后端一次请求到底，中间没有任何可读的中间态；同理也不要往里塞假的子步骤文案。
 - `frontend/src/views/CaseList.vue`：已审批用例、用例编辑、待审审批、原型图查看和 XMind 导出。
 - `frontend/src/views/ModuleList.vue`：模块列表和模块审批。
-- `frontend/src/views/Scripts.vue`：Agent 探索（`/scripts`）。一屏工作台：页头 + 下划线 tab（按需求 / 按用例）+ 左任务 / 右 Agent 配置两列 + 底栏唯一的蓝色「启动 Agent」。「任务记录」是页头右上角的独立按钮，不是配置卡下面的一张列表。
+- `frontend/src/views/Scripts.vue`：Agent 自动化测试（`/scripts`）。一屏工作台：页头 + 下划线 tab（按需求 / 按用例）+ 左任务 / 右 Agent 配置两列 + 底栏唯一的蓝色「启动 Agent」。「任务记录」是页头右上角的独立按钮，不是配置卡下面的一张列表。
+  - 首页入口和「自动化工具」并排成两张等宽卡（`.tool-entries`），不再是一行跳转文字——那一版比通栏弱一个量级，等于没有入口。两个入口都是跳到别的工作台，所以**不要塞进 `.mode-tabs`**：那三个 tab 是页内切换，混进去会让人以为点完还能切回来。
 - `frontend/src/views/AutomationRecords.vue`：任务记录（`/scripts/records`），列表页骨架（`.list-page`），项目 / 状态两个筛选 + 表格 + 前端分页（10 条/页），点行进详情。
 - `frontend/src/views/AutomationGenerationDetail.vue`：任务详情（`/scripts/generations/:id`），启动 Agent 后落在这里。
 - `frontend/src/views/RecordingRecords.vue`：生成记录（`/recording/records`）。一屏两栏：左 320px 记录列表（文件名 + 目录/时间 + 状态方片），右详情（步骤 / 文件预览 / Agent 说明）。提交盒钉在右下角，列表和预览各自滚；`≤1080px` 改上下排列、整页滚动。
@@ -187,13 +188,18 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
 
 - 暂停录制（`POST /api/automation/recording/pause` `{paused:true|false}`）：浏览器保持可用但不再记步骤，同 Playwright codegen 的 Pause。前端在 `recorder.js` 里用 `state.paused` 直接拦掉 click/input/change（不产生 IPC），Python 侧 `_handle_event` 还有一层兜底（`pick` 例外，拾取照常）；暂停期间不判 idle 超时。状态在 `snapshot().paused`。
 - 结束录制只有「停止录制」（`POST /api/automation/recording/stop`），**没有**取消按钮：`session.cancel()` 仅作为内部「中止且不重校验定位」的快捷出口（测试 teardown 在用），不再暴露 HTTP 路由。
-- 普通模式（`/recording`，不带 `panel`/`embed`）是**一屏工作区**：左列「目标与配置」（约 400px，超高自己滚），右列「录制步骤 + 生成」（步骤列表吃满剩余高度、内部滚动，生成卡贴底）；整页 `height:calc(100dvh - 116px)`，不出页面级滚动条。页头只放「生成记录 / 返回首页」，**开始录制 / 停止录制放在步骤卡工具栏最左**（紧跟暂停、拾取），别再加回页头。
-  - 高度链必须传到底：root(flex) → `.page-col`(flex:1 min-height:0) → `.recording-body`(grid，**必须 `grid-template-rows:minmax(0,1fr)`**，否则 auto 行会按内容撑破固定高度、把生成卡推出视口)。
-  - 配置表单在 400px 窄列里是单列；Python 解释器收进「高级设置」；工作区检测结果内联成一行 chips（`.detect-inline`），不再常驻右栏。
-  - 坑：`.el-form-item__content` 默认是横向 flex，输入框后的提示和检测结果会被挤到同一行，需要显式改 `flex-direction:column`。
-  - 面板/嵌入模式 600px 宽：`.recording-body` 回落成纵向 flex，配置仍单列；空状态用 `.steps-empty` 一行提示（不要 el-empty 大插画）；未停止录制时「生成」卡用 `.gen-compact` 一行摘要，停止后才展开 `.checklist`。
+- 关闭浏览器（`POST /api/automation/recording/close`）：后端在真正关窗口**之前**就把 `browser_open=false` 的快照回给请求线程（面板可能就活在要关的那个浏览器里）。前端必须**直接用这个响应** `applySession(data)`；再拉一次 `/current` 会和 `_shutdown()` 赛跑，拿回的还是 `true`，按钮要多停 1~2 秒，用户会以为「点一次没反应」再点一次，那时线程已结束，只会拿到 409「录制已结束」。
+- 普通模式（`/recording`，不带 `panel`/`embed`）是**一屏工作区**：左边「录制步骤」吃满宽度（1440 下约 1024px），右列 336px 是「准备与生成」——顶部三条配置摘要（起始地址 / 框架 / 目标文件，点开抽屉）、中间检查项与生成结果（超高自己滚）、底部操作区：回放校验 + **钉住**的生成按钮（回放明细 132px 自己滚，别把主按钮顶出去）。整页 `height:calc(100dvh - 100px)`，不出页面级滚动条。
+  - **配置不再是常驻一列**：页头「配置」按钮打开右侧 480px 抽屉，遮罩 / Esc / 关闭按钮收起；地址或工作区没填时按钮是主色，把人先引过去。抽屉里字段一个没少，只是卡头藏掉（外层已有标题），开始录制钉在抽屉底部。
+  - 抽屉用 `position:fixed` 的 `.cfg-shell` + `translateX(100%)` 滑出，**面板 / 嵌入模式下同一个 DOM 退化成 `display:contents` 的内联卡**（`.cfg-shell.is-inline`），所以配置卡只写一份，别复制第二份模板。
+  - 生成按钮和回放校验在 `.rail-foot`（`flex:none`），检查项与生成结果在 `.rail-scroll`（`flex:1; overflow-y:auto`）：两者混在一起，结果一长按钮就被推出视口——这正是旧版「生成按钮埋在最底部」的原因。回放放底部是因为它和生成同属收尾动作，留在中间会在按钮上方留一块空档。
+  - 左侧空出来的宽度归步骤区；`.rail-brief` 那三条摘要是「配置列被撤掉」的补偿，**面板 / 嵌入模式里隐藏**（那里自己就能展开配置）。
+  - 高度链必须传到底：root(flex) → `.page-col`(flex:1 min-height:0) → `.recording-body`(grid 单列，**必须 `grid-template-rows:minmax(0,1fr)`**) → `.main-layout`(普通模式才是 `grid-template-columns:minmax(0,1fr) 336px`，面板模式仍是纵向 flex)。少一环，步骤卡会被 `minmax(0,1fr)` 压成 0 高。
+  - 配置抽屉里仍是单列静物式表单；Python 解释器收进「高级设置」；工作区检测结果内联成一行 chips（`.detect-inline`）。坑：`.el-form-item__content` 默认横向 flex，输入框后的提示会被挤到同一行，需要显式 `flex-direction:column`。
+  - 空状态（`.steps-empty.is-roomy`）除了文案还给一颗「配置并开始录制」，直接开抽屉；工具栏首屏不重复「开始」，避免和抽屉里那颗抢主行动。
+  - 面板/嵌入模式 600px 宽：`.recording-body` 回落成纵向 flex，配置仍单列；`.side-rail` 是步骤下面一张普通卡（`flex:none`、`rail-scroll` 不内滚）。空状态用 `.steps-empty` 一行提示（不要 el-empty 大插画）；未停止录制时「生成」卡用 `.gen-compact` 一行摘要，停止后才展开 `.checklist`。
   - **`.is-panel`（split 兜底布局的独立面板窗口）的 `.page-col` 必须自己吃高度**：`.recording-page.is-panel .page-col { flex:1; min-height:0; display:flex; flex-direction:column }`。漏了这条，下面几层 `flex:1` / `min-height:0` 全部无处可依，步骤一多整列被撑到 1951px，再被 `#app.is-panel-mode .el-main{overflow:hidden}` 裁掉——表现是「步骤列表滚不动、底下的步骤也点不到」，但 `.el-card__body` 上明明写着 `overflow-y:auto`。嵌入模式和独立整页各自的 `.page-col` 规则不同，别合并。
-  - 窄屏（≤1100px）单列后必须解除 `height:calc(100dvh-116px)` 并把 `grid-template-rows` 改回 `auto`：否则第一行（配置卡）会被 `minmax(0,1fr)` 压成 0 高，配置整块看不见。
+  - 窄屏（≤1100px）必须解除 `height:calc(100dvh-100px)`，并把 `.main-layout` 改回单列、右栏 `height:auto`、`.rail-scroll` 不内滚：否则步骤卡会被压扁，右栏卡在页面级滚动里被裁。
 - 「收起」= 面板的精简模式（`stepsCollapsed`，不持久化，默认展开）。只在 `compactMode` 显示，按钮在步骤卡标题右侧（状态标签旁，`Fold`/`Expand` 图标）：
   - 步骤行只留铅笔，`v-if="!stepsCollapsed"` 掉上移/下移/删除（排序改用拖住编号拖拽，防误删）；`.is-lean .step` 收紧 padding。
   - 工具栏切 `.toolbar.is-lean`：3 列等宽网格 + 通栏细线分组，录制中 6 个按钮正好 3+3；未录制只有 5 个，主按钮 `.lean-wide` 占两列补齐整行，右边界与下一行「添加等待」对齐。
@@ -262,9 +268,17 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
   - 窄屏（≤900）要覆盖 dialog.css 的 `.dlg-viewer{height:280px}` 成 `height:auto` + `.dlg-stage{flex:none}`：聚焦后的截图是一条横带，撑满固定高度就会上下各留一大块灰。
   - 用 `locator.click()` 写测试时截图会丢：它把 down/up 挤在一起，`precount` 那条 binding 还没到 Python 页面就被 click 带走了。测试里要 `mouse.down()` → 停 100ms → `mouse.up()`（见 `test_recording_shot._click_like_a_human`）。真人点击天然有这段间隔。
   - 生成前还剩 `blockers` 时不再弹确认框放行，而是直接把这几步排队弹出来，选完才能写（`executePlan` 里 `startLocReview()` + return）。
+  - **弹窗的生命周期 = 录制的生命周期**：只在 `status === 'recording'` 且浏览器还开着时自动弹；`applySession()` 里一旦发现录制停了、浏览器关了、会话 404 或线程已结束，立刻 `dropLocConfirm()`（只清本地状态，不调后端——这时后端已经只会回 409「录制已结束」）。没有这条，弹窗会变成一块没有关闭按钮的遮罩，把整页锁死，用户只能刷新。
+  - **自动弹的和手动「逐条看」打开的要分开**（`locAuto`）：前者一停录就收；后者是用户自己要看的，只要浏览器还活着就留着，否则 `applySession()` 每 2 秒轮询会把它刚打开就关掉。
+  - 两个动作（选候选 / 允许降级）的 `catch` 里要认 `录制已结束 | 没有录制`：命中就收起弹窗并给一条 info，而不是原地 toast——弹窗还在，用户就没法继续操作。
 - 生成入口只有一个任务、两个窗口：主界面 `/recording` 和录制面板 `/recording?panel=1` 都能点「生成并写入工作区」，状态放服务端（`services/recording/progress.py`，随 `snapshot()` 的 `emit` 字段返回），任一处点击后另一处最迟 2 秒变成同一份进度并禁用按钮；后到的请求被 `PROGRESS.start()` 拦成 409（不是错误，前端按提示跟着进度走）。
   - 阶段由 `emit.generate(progress=...)` 打点：prepare → detect → snapshot → writing → check → validate（校验失败退回 repair 再 validate）→ run（执行失败退回 run_repair）→ record → done。百分比只给基准值，前端按 `stage_at` 指数逼近 `cap` 插值（`emitPercent`），避免模型写脚本那几分钟里进度条卡死或提前满格。
   - **停止录制后不能停轮询**：`syncPolling()` 把 stopped/idle_timeout/closed 降到 2 秒继续轮，否则两个窗口都收不到生成进度；`pollEnabled` 只由 keep-alive 的 onDeactivated 关。
+  - **两个窗口的配置不是同一份**：面板是另一个浏览器实例（split 模式用系统 Edge + `tempfile.mkdtemp()` 的一次性 profile，embed 模式用受控 Chromium 打开 `?embed=1`），本地存储完全隔离，只在点「开始录制」那一刻由 `_prefill` 把 7 个字段拼进 URL 快照过去，之后两边各改各的、没有回传通道。所以面板里的「录制起始地址 / 工作区 / 解释器」是只读的（改了对本次录制没有意义，只会让下一次莫名其妙换值），只留「生成框架 / 模型 / 目标文件 / 用例名称」可改，并在卡片顶部挂一条 `.cfg-note` 说明「只对本次生成生效」。**不要给面板加隐式回写**：两边同时打开时没有冲突仲裁，会互相覆盖。
+  - **框架的权威顺序：用户选择 > 自动检测**。`config.frameworkSource`（`user` / `auto`，随配置一起持久化）决定 `detectWorkspace()` 能不能写 `config.framework`：`user` 时只更新检测 chip 并露出一行「项目里检测到 X，当前按 Y 生成 + 改为 X」，绝不覆盖；面板 URL 里带来的 `framework` 一律算 `user`（那是点开始录制那一刻用户选的）。没有这条守卫时，进页面 / 选完工作区 / 点「检测」都会把 RF 静默改回 Playwright，还会被 `watch(config)` 写回 localStorage——用户的选择再也留不住（实测：`midscene-ui-test` 检测成 `playwright-ts`，本地存 RF，2.5 秒后变 Playwright 且本地被改写）。
+  - **后端会话也记框架**：`RecordingSession.framework` 由 `/start` 写入、随 `snapshot()` 返回；`/highlight`、`/steps/<no>/locate`、`/plan`、`/generate` 缺 `framework` 时用它兜底，**不再默认 `playwright-ts`**——面板刷新或旧书签丢了参数，定位也不会静默换一套写法。请求里显式带了就以请求为准（用户中途换框架要能生效）。
+  - **`chosen` 只在当前框架内有效**：用户可能在 Playwright 下挑过候选、之后切到 RF，那条 desc 属于另一套候选池。`emit._pick_locator` 不认它，前端 `chosenOf(target)` 也必须一起过滤（`locatorText` / `effectiveStatus` / `reviewable` / `needsLocConfirm` / 截图序号），否则界面会显示「已选定 + Playwright 写法」，而脚本里写的是另一条。
+
   - 失败原因写进 `emit.error`，冲突（目标文件已存在）`reset()` 成 idle——那是让用户选覆盖或改名，不是失败。
 - `recording-emitter` 的写权限有两种范围（`_emit_config(..., scope=)`）：
   - **`workspace`（默认，产品走这条）**：`edit` / `write` 对**整个工作区** allow，只把 `.git`、`.opencode`、`node_modules` deny 掉——能写 git hook 等于能执行任意命令，能改 `.opencode` 等于能改自己的权限规则。规则是「最后命中者生效」，所以 `*` 在前、这三条 deny 在后。

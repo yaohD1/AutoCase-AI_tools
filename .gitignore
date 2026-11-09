@@ -70,6 +70,10 @@ coverage/
 shots/_*.png
 shots/_*.json
 shots/_*.txt
+# 运行日志和跑批导出：都是一次性产物。_*.json 只匹配 shots/ 直接子级，
+# _ab_out/ 这种子目录要单独写一条。
+shots/_*.log
+shots/_ab_out/
 shots/_dialog_styles.html
 # opencode 每次调用生成的临时配置（含 MCP 定义），落在 cwd 时会被 git 看到
 opencode.emit-*.json
@@ -78,3 +82,7 @@ opencode.emit-*.json
 opencode.models.json
 opencode.runtime.json
 opencode.runtime.emit-*.json
+
+# WorkBuddy 的本地记忆：每个会话一份工作记录，跟代码无关。
+# 已经跟踪的历史 md 不受影响，这里只挡新生成的。
+.workbuddy/

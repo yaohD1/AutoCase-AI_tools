@@ -186,215 +186,259 @@
         </p>
       </div>
       <div class="page-actions">
+        <el-button :icon="Setting" :type="configReady ? 'default' : 'primary'" @click="configOpen = true">
+          配置
+        </el-button>
         <el-button :icon="Tickets" @click="$router.push('/recording/records')">生成记录</el-button>
         <el-button @click="$router.push('/')">返回首页</el-button>
       </div>
     </div>
 
-    <!-- 左配置 / 右步骤+生成：一屏内看完，生成记录单独成页 -->
+    <!-- 主区（步骤）+ 右侧收尾栏；配置收进页头抽屉，生成记录单独成页 -->
     <div class="recording-body">
     <!-- 目标与配置：默认是一张「规格摘要」，点某一行才就地展开编辑。
          六个常驻输入框会把 400px 的侧栏塞成注册表单，读不出轻重。 -->
-    <el-card v-show="!compactMode || configExpanded" class="panel-card config-card">
-      <template #header>
-        <div class="section-header">
-          <span class="card-title">录制配置</span>
-          <span class="cfg-saved">已记住上次设置</span>
-        </div>
-      </template>
-
-      <div class="cfg-form">
-        <!-- 唯一必填项：字号比其余值大一档，视线先落在这里 -->
-        <div :class="['cfg-field', 'cfg-field--hero', { 'is-editing': cfgEditing === 'baseUrl' }]">
-          <div class="cfg-label">录制起始地址</div>
-          <div v-if="cfgEditing !== 'baseUrl'" class="cfg-view" @click="beginEdit('baseUrl')">
-            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.baseUrl }]">{{ config.baseUrl || '填写被测系统地址' }}</span>
-            <span class="cfg-hint">编辑</span>
+      <!-- 配置收进右侧抽屉：字段一个没少，只是不再常驻占掉三分之一宽度。
+           面板 / 嵌入模式下抽屉退化成内联块（is-inline），还是原来那张卡。 -->
+      <div :class="['cfg-shell', compactMode ? 'is-inline' : { 'is-open': configOpen }]">
+        <div v-if="!compactMode" class="cfg-backdrop" @click="configOpen = false"></div>
+        <div class="cfg-drawer">
+          <div v-if="!compactMode" class="cfg-drawer-head">
+            <span class="cfg-drawer-title">录制配置</span>
+            <span class="cfg-drawer-note">开始录制前确认</span>
+            <button type="button" class="cfg-drawer-close" title="关闭（Esc）" @click="configOpen = false">✕</button>
           </div>
-          <el-input
-            v-else
-            :ref="el => setEditRef('baseUrl', el)"
-            v-model="config.baseUrl"
-            class="cfg-input"
-            placeholder="http://127.0.0.1:8080/login"
-            clearable
-            @blur="endEdit"
-            @keyup.enter="endEdit"
-            @keyup.esc="endEdit"
-          />
-        </div>
+        <el-card v-show="!compactMode || configExpanded" class="panel-card config-card">
+          <template #header>
+            <div class="section-header">
+              <span class="card-title">{{ compactMode ? '本次录制的配置' : '录制配置' }}</span>
+              <!-- 面板是另一个浏览器实例、临时 profile，关窗即删，说「已记住上次设置」是假的 -->
+              <span v-if="compactMode" class="cfg-saved">不会保存</span>
+              <span v-else class="cfg-saved">已记住上次设置</span>
+            </div>
+          </template>
 
-        <!-- 工作区只能从根目录里挑：手填的路径写错，要到生成时才炸 -->
-        <div class="cfg-field">
-          <div class="cfg-label" :title="'必须是 ' + (workspaceRoot || 'AUTOMATION_WORKSPACE_ROOT') + ' 内的目录'">工作区</div>
-          <div class="cfg-view is-static">
-            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.workspace }]">{{ config.workspace || '还没有选择工作区' }}</span>
-            <span class="cfg-acts">
-              <button type="button" class="cfg-act" @click="openWorkspacePicker">更换</button>
-              <button type="button" class="cfg-act" :disabled="!config.workspace || detecting" @click="detectWorkspace">
-                {{ detecting ? '检测中' : '检测' }}
-              </button>
-            </span>
+          <!-- 面板里的配置和主窗口不是同一份：开始录制那一刻快照过来的，之后各改各的。
+               不说清楚，用户在面板里改完回到主窗口看不到，会以为没生效。 -->
+          <div v-if="compactMode" class="cfg-note">
+            这里的改动只对本次生成生效，下次录制沿用主窗口的设置。
           </div>
-          <div v-if="detect" class="cfg-detect">
-            <span :class="['cfg-chip', detect.framework ? 'is-ok' : '']">{{ frameworkName(detect.framework) }}</span>
-            <span :class="['cfg-chip', detect.python ? 'is-ok' : 'is-warn']" :title="detect.python || ''">
-              Python {{ detect.python ? tailPath(detect.python) : '未找到' }}
-            </span>
-            <span :class="['cfg-chip', detect.seleniumlibrary_version ? 'is-ok' : 'is-warn']">
-              SeleniumLibrary {{ detect.seleniumlibrary_version || '未检测到' }}
-            </span>
-            <details v-if="(detect.samples && detect.samples.length) || (detect.evidence && detect.evidence.length)" class="cfg-details">
-              <summary>依据与参考文件</summary>
-              <div v-for="sample in detect.samples || []" :key="sample.path" class="detect-sample">{{ sample.path }}</div>
-              <div v-for="(item, idx) in detect.evidence || []" :key="idx" class="evidence-line">
-                <span class="evidence-kind">{{ item.kind }}</span>
-                <span>{{ item.value === null ? '—' : item.value }}</span>
-                <span class="evidence-source">{{ item.source }}</span>
+
+          <div class="cfg-form">
+            <!-- 唯一必填项：字号比其余值大一档，视线先落在这里 -->
+            <div :class="['cfg-field', 'cfg-field--hero', { 'is-editing': cfgEditing === 'baseUrl' }]">
+              <div class="cfg-label">录制起始地址</div>
+              <!-- 面板里只读：地址在开始录制那一刻就已经打开了，改它不会让浏览器跳转，
+                   只会让下一次录制莫名其妙换地址。 -->
+              <div v-if="compactMode" class="cfg-view is-static">
+                <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.baseUrl }]">{{ config.baseUrl || '—' }}</span>
+                <span class="cfg-ro">只读</span>
               </div>
-            </details>
-          </div>
-        </div>
-
-        <!-- 项目记忆：录制一开始后台读的那份「这个项目怎么写测试」。
-             放在工作区下面是因为它跟着工作区走；默认只露一行状态，
-             展开才看细节——用户要的是「凭什么这么写」，不是一个新的配置项。 -->
-        <div v-if="config.workspace" :class="['cfg-field', 'cfg-memory', { 'is-busy': memoryPolling }]">
-          <div class="cfg-label">
-            项目记忆
-            <span class="cfg-acts">
-              <button type="button" class="cfg-act" :disabled="memoryPolling || !config.model" @click="refreshMemory">
-                {{ memoryBusy ? '学习中' : '重学' }}
-              </button>
-            </span>
-          </div>
-          <div class="cfg-view is-static">
-            <span :class="['cfg-chip', memoryChip.tone]">{{ memoryChip.text }}</span>
-            <span class="cfg-mem-hint">{{ memoryChip.hint }}</span>
-          </div>
-          <details v-if="memoryMap || memoryFacts.length" class="cfg-details">
-            <summary>{{ memoryMap ? '项目地图' : '已经学到什么' }}</summary>
-            <pre v-if="memoryMap" class="cfg-map">{{ memoryMap }}</pre>
-            <template v-else>
-              <div v-for="item in memoryFacts" :key="item.key" class="cfg-mem-line" :class="{ 'is-warn': item.warn }">
-                <span class="cfg-mem-key">{{ item.label }}</span>
-                <span class="cfg-mem-text">{{ item.text }}</span>
+              <div v-else-if="cfgEditing !== 'baseUrl'" class="cfg-view" @click="beginEdit('baseUrl')">
+                <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.baseUrl }]">{{ config.baseUrl || '填写被测系统地址' }}</span>
+                <span class="cfg-hint">编辑</span>
               </div>
-            </template>
-            <button type="button" class="cfg-act cfg-mem-forget" @click="forgetMemory">删掉这份记忆</button>
-          </details>
-        </div>
+              <el-input
+                v-else
+                :ref="el => setEditRef('baseUrl', el)"
+                v-model="config.baseUrl"
+                class="cfg-input"
+                placeholder="http://127.0.0.1:8080/login"
+                clearable
+                @blur="endEdit"
+                @keyup.enter="endEdit"
+                @keyup.esc="endEdit"
+              />
+            </div>
 
-        <!-- 只有两个取值，分段比下拉少一次点击，也让「当前用哪套」永远可见 -->
-        <div class="cfg-field">
-          <div class="cfg-label">生成框架</div>
-          <div class="cfg-seg" role="radiogroup" aria-label="生成框架">
-            <button
-              v-for="item in FRAMEWORKS"
-              :key="item.value"
-              type="button"
-              role="radio"
-              :aria-checked="config.framework === item.value"
-              :class="['cfg-seg-item', { 'is-on': config.framework === item.value }]"
-              @click="config.framework = item.value"
-            >{{ item.short }}</button>
-          </div>
-        </div>
+            <!-- 工作区只能从根目录里挑：手填的路径写错，要到生成时才炸 -->
+            <div class="cfg-field">
+              <div class="cfg-label" :title="'必须是 ' + (workspaceRoot || 'AUTOMATION_WORKSPACE_ROOT') + ' 内的目录'">工作区</div>
+              <div class="cfg-view is-static">
+                <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.workspace }]">{{ config.workspace || '还没有选择工作区' }}</span>
+                <span class="cfg-acts">
+                  <!-- 面板里不给「更换」：录制已经开始了，中途换工作区不会重新读项目，
+                       改了只会在下一次录制里生效，等于给用户埋一个看不见的坑。-->
+                  <button v-if="!compactMode" type="button" class="cfg-act" @click="openWorkspacePicker">更换</button>
+                  <button type="button" class="cfg-act" :disabled="!config.workspace || detecting" @click="detectWorkspace">
+                    {{ detecting ? '检测中' : '检测' }}
+                  </button>
+                </span>
+              </div>
+              <div v-if="detect" class="cfg-detect">
+                <span :class="['cfg-chip', detect.framework ? 'is-ok' : '']">{{ frameworkName(detect.framework) }}</span>
+                <span :class="['cfg-chip', detect.python ? 'is-ok' : 'is-warn']" :title="detect.python || ''">
+                  Python {{ detect.python ? tailPath(detect.python) : '未找到' }}
+                </span>
+                <span :class="['cfg-chip', detect.seleniumlibrary_version ? 'is-ok' : 'is-warn']">
+                  SeleniumLibrary {{ detect.seleniumlibrary_version || '未检测到' }}
+                </span>
+                <!-- 检测结果和用户选的框架不一致：只提示，不擅自改。点不点由用户决定。 -->
+                <div v-if="detect.framework && detect.framework !== config.framework" class="cfg-detect-note">
+                  <span>项目里检测到 {{ frameworkShort(detect.framework) }}，当前按 {{ frameworkShort(config.framework) }} 生成</span>
+                  <button type="button" class="cfg-act" @click="adoptDetectedFramework">改为 {{ frameworkShort(detect.framework) }}</button>
+                </div>
+                <details v-if="(detect.samples && detect.samples.length) || (detect.evidence && detect.evidence.length)" class="cfg-details">
+                  <summary>依据与参考文件</summary>
+                  <div v-for="sample in detect.samples || []" :key="sample.path" class="detect-sample">{{ sample.path }}</div>
+                  <div v-for="(item, idx) in detect.evidence || []" :key="idx" class="evidence-line">
+                    <span class="evidence-kind">{{ item.kind }}</span>
+                    <span>{{ item.value === null ? '—' : item.value }}</span>
+                    <span class="evidence-source">{{ item.source }}</span>
+                  </div>
+                </details>
+              </div>
+            </div>
 
-        <div :class="['cfg-field', { 'is-editing': cfgEditing === 'model' }]">
-          <div class="cfg-label">模型</div>
-          <div v-if="cfgEditing !== 'model'" class="cfg-view" @click="beginEdit('model')">
-            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.model }]">{{ config.model || '还没选择模型' }}</span>
-            <span class="cfg-hint">{{ config.model ? '更换' : '选择' }}</span>
-          </div>
-          <el-select
-            v-else
-            :ref="el => setEditRef('model', el)"
-            v-model="config.model"
-            class="cfg-select"
-            filterable
-            placeholder="选择模型"
-            @change="endEdit"
-            @visible-change="open => { if (!open) endEdit() }"
-          >
-            <el-option v-for="m in modelOptions" :key="m.value" :label="m.value" :value="m.value" />
-          </el-select>
-        </div>
+            <!-- 项目记忆：录制一开始后台读的那份「这个项目怎么写测试」。
+                 放在工作区下面是因为它跟着工作区走；默认只露一行状态，
+                 展开才看细节——用户要的是「凭什么这么写」，不是一个新的配置项。 -->
+            <div v-if="config.workspace" :class="['cfg-field', 'cfg-memory', { 'is-busy': memoryPolling }]">
+              <div class="cfg-label">
+                项目记忆
+                <span class="cfg-acts">
+                  <button type="button" class="cfg-act" :disabled="memoryPolling || !config.model" @click="refreshMemory">
+                    {{ memoryBusy ? '学习中' : '重学' }}
+                  </button>
+                </span>
+              </div>
+              <div class="cfg-view is-static">
+                <span :class="['cfg-chip', memoryChip.tone]">{{ memoryChip.text }}</span>
+                <span class="cfg-mem-hint">{{ memoryChip.hint }}</span>
+              </div>
+              <details v-if="memoryMap || memoryFacts.length" class="cfg-details">
+                <summary>{{ memoryMap ? '项目地图' : '已经学到什么' }}</summary>
+                <pre v-if="memoryMap" class="cfg-map">{{ memoryMap }}</pre>
+                <template v-else>
+                  <div v-for="item in memoryFacts" :key="item.key" class="cfg-mem-line" :class="{ 'is-warn': item.warn }">
+                    <span class="cfg-mem-key">{{ item.label }}</span>
+                    <span class="cfg-mem-text">{{ item.text }}</span>
+                  </div>
+                </template>
+                <button type="button" class="cfg-act cfg-mem-forget" @click="forgetMemory">删掉这份记忆</button>
+              </details>
+            </div>
 
-        <div :class="['cfg-field', { 'is-editing': cfgEditing === 'targetPath' }]">
-          <div class="cfg-label" title="留空则由任务书按项目约定决定位置">目标文件</div>
-          <div v-if="cfgEditing !== 'targetPath'" class="cfg-view" @click="beginEdit('targetPath')">
-            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.targetPath }]">{{ config.targetPath || '留空，由任务书决定' }}</span>
-            <span class="cfg-acts">
-              <button type="button" class="cfg-act" :disabled="!config.workspace.trim()" @click.stop="openTargetPicker">浏览</button>
-            </span>
-          </div>
-          <el-input
-            v-else
-            :ref="el => setEditRef('targetPath', el)"
-            v-model="config.targetPath"
-            class="cfg-input"
-            :placeholder="targetPlaceholder"
-            clearable
-            @blur="endEdit"
-            @keyup.enter="endEdit"
-            @keyup.esc="endEdit"
-          />
-        </div>
+            <!-- 只有两个取值，分段比下拉少一次点击，也让「当前用哪套」永远可见 -->
+            <div class="cfg-field">
+              <div class="cfg-label">
+                生成框架
+                <span v-if="config.frameworkSource === 'auto'" class="cfg-src">自动识别，可手动改</span>
+              </div>
+              <div class="cfg-seg" role="radiogroup" aria-label="生成框架">
+                <button
+                  v-for="item in FRAMEWORKS"
+                  :key="item.value"
+                  type="button"
+                  role="radio"
+                  :aria-checked="config.framework === item.value"
+                  :class="['cfg-seg-item', { 'is-on': config.framework === item.value }]"
+                  @click="pickFramework(item.value)"
+                >{{ item.short }}</button>
+              </div>
+            </div>
 
-        <div :class="['cfg-field', { 'is-editing': cfgEditing === 'title' }]">
-          <div class="cfg-label">用例名称</div>
-          <div v-if="cfgEditing !== 'title'" class="cfg-view" @click="beginEdit('title')">
-            <span :class="['cfg-text', { 'is-empty': !config.title }]">{{ config.title || '例如：登录成功' }}</span>
-            <span class="cfg-hint">编辑</span>
-          </div>
-          <el-input
-            v-else
-            :ref="el => setEditRef('title', el)"
-            v-model="config.title"
-            class="cfg-input"
-            placeholder="例如：登录成功"
-            maxlength="200"
-            clearable
-            @blur="endEdit"
-            @keyup.enter="endEdit"
-            @keyup.esc="endEdit"
-          />
-        </div>
+            <div :class="['cfg-field', { 'is-editing': cfgEditing === 'model' }]">
+              <div class="cfg-label">模型</div>
+              <div v-if="cfgEditing !== 'model'" class="cfg-view" @click="beginEdit('model')">
+                <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.model }]">{{ config.model || '还没选择模型' }}</span>
+                <span class="cfg-hint">{{ config.model ? '更换' : '选择' }}</span>
+              </div>
+              <el-select
+                v-else
+                :ref="el => setEditRef('model', el)"
+                v-model="config.model"
+                class="cfg-select"
+                filterable
+                placeholder="选择模型"
+                @change="endEdit"
+                @visible-change="open => { if (!open) endEdit() }"
+              >
+                <el-option v-for="m in modelOptions" :key="m.value" :label="m.value" :value="m.value" />
+              </el-select>
+            </div>
 
-        <!-- 高级项折成一行：值直接写在右侧，不用展开也知道当前用的是哪个解释器 -->
-        <button type="button" class="cfg-adv" @click="showAdvanced = !showAdvanced">
-          <span :class="['cfg-caret', { 'is-open': showAdvanced }]">
-            <el-icon :size="10"><ArrowDown /></el-icon>
-          </span>
-          <span>Python 解释器</span>
-          <span class="cfg-adv-value">{{ config.python ? tailPath(config.python) : '自动查找 .venv' }}</span>
-        </button>
-        <div v-if="showAdvanced" :class="['cfg-field', 'cfg-field--sub', { 'is-editing': cfgEditing === 'python' }]">
-          <div class="cfg-label">解释器路径（留空则自动查找项目里的 .venv）</div>
-          <div v-if="cfgEditing !== 'python'" class="cfg-view" @click="beginEdit('python')">
-            <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.python }]">{{ config.python || '自动' }}</span>
-            <span class="cfg-hint">编辑</span>
+            <div :class="['cfg-field', { 'is-editing': cfgEditing === 'targetPath' }]">
+              <div class="cfg-label" title="留空则由任务书按项目约定决定位置">目标文件</div>
+              <div v-if="cfgEditing !== 'targetPath'" class="cfg-view" @click="beginEdit('targetPath')">
+                <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.targetPath }]">{{ config.targetPath || '留空，由任务书决定' }}</span>
+                <span class="cfg-acts">
+                  <button type="button" class="cfg-act" :disabled="!config.workspace.trim()" @click.stop="openTargetPicker">浏览</button>
+                </span>
+              </div>
+              <el-input
+                v-else
+                :ref="el => setEditRef('targetPath', el)"
+                v-model="config.targetPath"
+                class="cfg-input"
+                :placeholder="targetPlaceholder"
+                clearable
+                @blur="endEdit"
+                @keyup.enter="endEdit"
+                @keyup.esc="endEdit"
+              />
+            </div>
+
+            <div :class="['cfg-field', { 'is-editing': cfgEditing === 'title' }]">
+              <div class="cfg-label">用例名称</div>
+              <div v-if="cfgEditing !== 'title'" class="cfg-view" @click="beginEdit('title')">
+                <span :class="['cfg-text', { 'is-empty': !config.title }]">{{ config.title || '例如：登录成功' }}</span>
+                <span class="cfg-hint">编辑</span>
+              </div>
+              <el-input
+                v-else
+                :ref="el => setEditRef('title', el)"
+                v-model="config.title"
+                class="cfg-input"
+                placeholder="例如：登录成功"
+                maxlength="200"
+                clearable
+                @blur="endEdit"
+                @keyup.enter="endEdit"
+                @keyup.esc="endEdit"
+              />
+            </div>
+
+            <!-- 高级项折成一行：值直接写在右侧，不用展开也知道当前用的是哪个解释器 -->
+            <button type="button" class="cfg-adv" @click="showAdvanced = !showAdvanced">
+              <span :class="['cfg-caret', { 'is-open': showAdvanced }]">
+                <el-icon :size="10"><ArrowDown /></el-icon>
+              </span>
+              <span>Python 解释器</span>
+              <span class="cfg-adv-value">{{ config.python ? tailPath(config.python) : '自动查找 .venv' }}</span>
+            </button>
+            <div v-if="showAdvanced" :class="['cfg-field', 'cfg-field--sub', { 'is-editing': cfgEditing === 'python' }]">
+              <div class="cfg-label">解释器路径（留空则自动查找项目里的 .venv）</div>
+              <!-- 面板里只读：解释器在录制开始时已经用来起过检测了，临时换一个不会重新检测 -->
+              <div v-if="compactMode" class="cfg-view is-static">
+                <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.python }]">{{ config.python || '自动' }}</span>
+                <span class="cfg-ro">只读</span>
+              </div>
+              <div v-else-if="cfgEditing !== 'python'" class="cfg-view" @click="beginEdit('python')">
+                <span :class="['cfg-text', 'cfg-mono', { 'is-empty': !config.python }]">{{ config.python || '自动' }}</span>
+                <span class="cfg-hint">编辑</span>
+              </div>
+              <el-input
+                v-else
+                :ref="el => setEditRef('python', el)"
+                v-model="config.python"
+                class="cfg-input"
+                placeholder="例如 D:/proj/.venv/Scripts/python.exe"
+                clearable
+                @blur="endEdit"
+                @keyup.enter="endEdit"
+                @keyup.esc="endEdit"
+              />
+            </div>
           </div>
-          <el-input
-            v-else
-            :ref="el => setEditRef('python', el)"
-            v-model="config.python"
-            class="cfg-input"
-            placeholder="例如 D:/proj/.venv/Scripts/python.exe"
-            clearable
-            @blur="endEdit"
-            @keyup.enter="endEdit"
-            @keyup.esc="endEdit"
-          />
+
+          <!-- 首屏的主行动放在配置末尾：它用的是上面这些设置，不该长在另一张卡里 -->
+          <div v-if="!isRecording && !steps.length && !compactMode" class="cfg-foot">
+            <el-button type="primary" class="cfg-start" :loading="starting" @click="startFromConfig">开始录制</el-button>
+          </div>
+        </el-card>
         </div>
       </div>
-
-      <!-- 首屏的主行动放在配置末尾：它用的是上面这些设置，不该长在另一张卡里 -->
-      <div v-if="!isRecording && !steps.length && !compactMode" class="cfg-foot">
-        <el-button type="primary" class="cfg-start" :loading="starting" @click="startRecording">开始录制</el-button>
-      </div>
-    </el-card>
 
     <div class="main-layout">
       <!-- 录制步骤 -->
@@ -420,14 +464,14 @@
 
         <!-- 工具栏分两组：左边「现在对浏览器做什么」，右边「往步骤里插什么」。
              组本身是一块浅色底，按钮常态无边框，悬停才浮起——少一档样式，视觉就不会碎。 -->
-        <!-- 首屏还没有会话时，这一排全是禁用按钮：不显示，注意力留给左边的「开始录制」。
+        <!-- 首屏还没有会话时，这一排全是禁用按钮：不显示，注意力留给页头的「配置」。
              面板/嵌入模式靠工具栏开始，所以那里始终保留。 -->
         <div v-if="compactMode || session || steps.length" :class="['toolbar', { 'is-lean': stepsCollapsed }]">
           <div class="toolbar-group">
             <!-- 录制 / 拾取 / 关闭浏览器：这一组都不改步骤，改的是浏览器状态 -->
-            <!-- 首屏（还没有步骤）把主行动放在配置卡末尾，这里就不再重复一个「开始」；
+            <!-- 首屏（还没有步骤）把主行动放在配置抽屉末尾，这里就不再重复一个「开始」；
                  面板/嵌入模式没有完整配置卡，仍由工具栏承担。 -->
-            <el-button v-if="!isRecording && (steps.length || compactMode)" class="lean-wide" type="primary" :icon="VideoCamera" :loading="starting" @click="startRecording">开始</el-button>
+            <el-button v-if="!isRecording && (steps.length || compactMode)" class="lean-wide" type="primary" :icon="VideoCamera" :loading="starting" @click="onStartClick">开始</el-button>
             <!-- 停止用实心红 + 白色方块，这是录制的通用记号；暂停/继续用浅色描边，避免两个重色按钮打架。
                  条件必须写全：上面那个「开始」在首屏是隐藏的，用 v-else 会让「停止」接在隐藏分支上。 -->
             <el-button v-else-if="isRecording" type="danger" :loading="stopping" title="停止录制，步骤保留；浏览器不会关" @click="stopRecording">
@@ -557,7 +601,8 @@
           <span v-if="compactMode">还没有步骤 · 点「开始」后，在弹出的浏览器里操作</span>
           <template v-else>
             <div class="steps-empty-title">还没有步骤</div>
-            <div class="steps-empty-sub">点左侧「开始录制」，会在独立窗口打开被测页面。你在页面上点过、输入过的内容，会一条条出现在这里。</div>
+            <div class="steps-empty-sub">先在右上角「配置」里填好起始地址和工作区。点「开始录制」会在独立窗口打开被测页面，你在页面上点过、输入过的内容会一条条出现在这里。</div>
+            <el-button class="steps-empty-cta" type="primary" :icon="Setting" @click="configOpen = true">配置并开始录制</el-button>
           </template>
         </div>
 
@@ -694,7 +739,7 @@
                   <el-tag size="small" :type="statusTone(effectiveStatus(step))" effect="light" :title="statusHint(step)">
                     {{ statusLabel(effectiveStatus(step)) }}
                   </el-tag>
-                  <span v-if="step.target.chosen && step.target.chosen.index_invalid" class="chosen-warn"
+                  <span v-if="chosenOf(step.target)?.index_invalid" class="chosen-warn"
                         title="你选的序号，在停止录制时的页面上已经不存在了：生成出来会点不到，需要重新选">序号已失效</span>
                   <!-- 图标按钮这类控件：你点的是里层的图形，但脚本点的是元素的中心，
                        中心被挡住时 Playwright 会拒绝点击。录制时已自动改用能点到的父容器。 -->
@@ -1047,12 +1092,31 @@
       </el-card>
 
       <!-- 生成：面板模式下录制中就藏起来，停止后再出现（面板空间留给步骤） -->
-      <el-card v-if="session && (!compactMode || isStopped)" class="panel-card generate-card">
-        <template #header>
-          <div class="section-header">
-            <span class="card-title">生成</span>
-          </div>
-        </template>
+      <aside v-if="session && (!compactMode || isStopped)" class="side-rail">
+        <div class="rail-head">
+          <span class="card-title">准备与生成</span>
+          <span class="rail-steps">{{ steps.length }} 步</span>
+        </div>
+
+        <div class="rail-scroll">
+
+        <!-- 配置收进抽屉后，栏里留三条最常核对的：从哪开始、按什么框架、写到哪。
+             点一下就地打开抽屉，不用回页头找按钮。 -->
+        <button type="button" class="rail-brief" title="打开配置" @click="configOpen = true">
+          <span class="rb-row">
+            <span class="rb-k">起始地址</span>
+            <span class="rb-v rb-mono" :class="{ 'is-empty': !(config.baseUrl || '').trim() }">{{ (config.baseUrl || '').trim() || '未填写' }}</span>
+          </span>
+          <span class="rb-row">
+            <span class="rb-k">生成框架</span>
+            <span class="rb-v">{{ frameworkShort(config.framework) }}</span>
+          </span>
+          <span class="rb-row">
+            <span class="rb-k">目标文件</span>
+            <span class="rb-v rb-mono" :class="{ 'is-empty': !(config.targetPath || '').trim() }">{{ (config.targetPath || '').trim() || '由任务书决定' }}</span>
+          </span>
+          <span class="rb-edit">改</span>
+        </button>
 
         <div v-if="isStopped" class="checklist">
           <div :class="['check', { ok: steps.length > 0 }]">
@@ -1093,6 +1157,85 @@
           <span v-if="blockers.length" class="gen-compact-bad">· {{ blockers.length }} 处定位待确认</span>
         </div>
 
+        <div v-if="shownError" class="gen-error">
+          <div class="gen-error-title">{{ shownError.message }}</div>
+          <ul v-if="shownError.details && shownError.details.length" class="gen-error-list">
+            <li v-for="(item, idx) in shownError.details" :key="idx">{{ detailText(item) }}</li>
+          </ul>
+        </div>
+
+        <div v-if="shownResult" class="gen-result">
+          <div class="gen-result-title">已写入 {{ shownResult.path }}</div>
+          <div class="field-hint">
+            {{ shownResult.validated ? '校验通过' : '未校验' }}
+            <template v-if="shownResult.run && shownResult.run.ran">
+              · {{ shownResult.run.ok ? `已跑通 ${shownResult.run.total || 1} 个用例` : '但真跑没过' }}
+              <template v-if="shownResult.run.ok && shownResult.run.duration_ms">
+                · {{ (shownResult.run.duration_ms / 1000).toFixed(1) }}s
+              </template>
+            </template>
+            <template v-else-if="shownResult.run"> · 未执行</template>
+            · 框架 {{ frameworkName(shownResult.framework) }}
+          </div>
+          <div v-if="shownResult.run && !shownResult.run.ok" class="gen-degraded">
+            <div class="gen-degraded-title">
+              {{ shownResult.run.ran ? '类型检查过了，但真跑没过' : `没能执行验证：${shownResult.run.reason || '未知原因'}` }}
+            </div>
+            <ul v-if="shownResult.run.errors && shownResult.run.errors.length">
+              <li v-for="(item, idx) in shownResult.run.errors" :key="idx">{{ item }}</li>
+            </ul>
+            <div v-if="shownResult.run.note" class="field-hint">{{ shownResult.run.note }}</div>
+            <pre v-if="!shownResult.run.ran && shownResult.run.tail" class="gen-run-tail">{{ shownResult.run.tail }}</pre>
+            <div class="field-hint">文件已保留，可以直接改，或撤销这次写入。</div>
+          </div>
+          <div v-if="shownResult.degraded && shownResult.degraded.length" class="gen-degraded">
+            <div class="gen-degraded-title">{{ shownResult.degraded.length }} 步使用了降级定位，请回放确认</div>
+            <ul>
+              <li v-for="item in shownResult.degraded" :key="item.no">
+                第 {{ item.no }} 步「{{ item.alias }}」：匹配 {{ item.matches }} 个，取第 {{ (item.nth ?? 0) + 1 }} 个
+              </li>
+            </ul>
+          </div>
+          <div v-if="shownResult.outside && shownResult.outside.length" class="gen-degraded">
+            <div class="gen-degraded-title">
+              目标文件以外还有 {{ shownResult.outside.length }} 个文件被改动（已保留，可逐个还原）
+            </div>
+            <ul class="gen-outside-list">
+              <li v-for="item in shownResult.outside" :key="item">
+                <code>{{ item }}</code>
+                <el-button
+                  text
+                  size="small"
+                  :loading="reverting === item"
+                  :disabled="!shownResult.backup_id || !!reverting"
+                  @click="revertOutside([item])"
+                >还原</el-button>
+              </li>
+            </ul>
+            <div class="field-hint">
+              脚本需要的辅助文件（helper / fixture）保留即可；还原会把这次改动之前的内容写回去。
+            </div>
+            <div class="gen-outside-actions">
+              <el-button
+                size="small"
+                :loading="reverting === '__all__'"
+                :disabled="!shownResult.backup_id || !!reverting"
+                @click="revertOutside(shownResult.outside)"
+              >全部还原</el-button>
+              <span v-if="!shownResult.backup_id" class="field-hint">这份结果没有可还原的备份</span>
+            </div>
+          </div>
+          <div class="gen-result-actions">
+            <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: shownResult.generation_id } })">
+              查看生成记录
+            </el-button>
+            <span class="field-hint">预览文件内容、提交到 Git 或撤销这次写入</span>
+          </div>
+        </div>
+
+        </div>
+
+        <div class="rail-foot">
         <!-- 回放校验：跑的是内存里的录制 IR，不是生成的脚本，所以暂停或停止后就能跑，
              不需要先经过「生成」。按钮放在这里，不要再塞回生成结果卡片里。 -->
         <div v-if="canReplay && steps.length" class="replay-block">
@@ -1201,82 +1344,8 @@
           写入只在任务书里触发；改了录制步骤需要重新生成任务书。
         </div>
 
-        <div v-if="shownError" class="gen-error">
-          <div class="gen-error-title">{{ shownError.message }}</div>
-          <ul v-if="shownError.details && shownError.details.length" class="gen-error-list">
-            <li v-for="(item, idx) in shownError.details" :key="idx">{{ detailText(item) }}</li>
-          </ul>
         </div>
-
-        <div v-if="shownResult" class="gen-result">
-          <div class="gen-result-title">已写入 {{ shownResult.path }}</div>
-          <div class="field-hint">
-            {{ shownResult.validated ? '校验通过' : '未校验' }}
-            <template v-if="shownResult.run && shownResult.run.ran">
-              · {{ shownResult.run.ok ? `已跑通 ${shownResult.run.total || 1} 个用例` : '但真跑没过' }}
-              <template v-if="shownResult.run.ok && shownResult.run.duration_ms">
-                · {{ (shownResult.run.duration_ms / 1000).toFixed(1) }}s
-              </template>
-            </template>
-            <template v-else-if="shownResult.run"> · 未执行</template>
-            · 框架 {{ frameworkName(shownResult.framework) }}
-          </div>
-          <div v-if="shownResult.run && !shownResult.run.ok" class="gen-degraded">
-            <div class="gen-degraded-title">
-              {{ shownResult.run.ran ? '类型检查过了，但真跑没过' : `没能执行验证：${shownResult.run.reason || '未知原因'}` }}
-            </div>
-            <ul v-if="shownResult.run.errors && shownResult.run.errors.length">
-              <li v-for="(item, idx) in shownResult.run.errors" :key="idx">{{ item }}</li>
-            </ul>
-            <div v-if="shownResult.run.note" class="field-hint">{{ shownResult.run.note }}</div>
-            <pre v-if="!shownResult.run.ran && shownResult.run.tail" class="gen-run-tail">{{ shownResult.run.tail }}</pre>
-            <div class="field-hint">文件已保留，可以直接改，或撤销这次写入。</div>
-          </div>
-          <div v-if="shownResult.degraded && shownResult.degraded.length" class="gen-degraded">
-            <div class="gen-degraded-title">{{ shownResult.degraded.length }} 步使用了降级定位，请回放确认</div>
-            <ul>
-              <li v-for="item in shownResult.degraded" :key="item.no">
-                第 {{ item.no }} 步「{{ item.alias }}」：匹配 {{ item.matches }} 个，取第 {{ (item.nth ?? 0) + 1 }} 个
-              </li>
-            </ul>
-          </div>
-          <div v-if="shownResult.outside && shownResult.outside.length" class="gen-degraded">
-            <div class="gen-degraded-title">
-              目标文件以外还有 {{ shownResult.outside.length }} 个文件被改动（已保留，可逐个还原）
-            </div>
-            <ul class="gen-outside-list">
-              <li v-for="item in shownResult.outside" :key="item">
-                <code>{{ item }}</code>
-                <el-button
-                  text
-                  size="small"
-                  :loading="reverting === item"
-                  :disabled="!shownResult.backup_id || !!reverting"
-                  @click="revertOutside([item])"
-                >还原</el-button>
-              </li>
-            </ul>
-            <div class="field-hint">
-              脚本需要的辅助文件（helper / fixture）保留即可；还原会把这次改动之前的内容写回去。
-            </div>
-            <div class="gen-outside-actions">
-              <el-button
-                size="small"
-                :loading="reverting === '__all__'"
-                :disabled="!shownResult.backup_id || !!reverting"
-                @click="revertOutside(shownResult.outside)"
-              >全部还原</el-button>
-              <span v-if="!shownResult.backup_id" class="field-hint">这份结果没有可还原的备份</span>
-            </div>
-          </div>
-          <div class="gen-result-actions">
-            <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: shownResult.generation_id } })">
-              查看生成记录
-            </el-button>
-            <span class="field-hint">预览文件内容、提交到 Git 或撤销这次写入</span>
-          </div>
-        </div>
-      </el-card>
+      </aside>
 
       <!-- 任务书正文：长文档（表格 + 风险 + 意见）塞不进 420–600 宽的编排面板，
            入口在生成卡里，这里只负责铺开读。浮层打开时后端会把面板窗口铺宽——
@@ -1655,7 +1724,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Expand, Files, Fold, FolderOpened, Loading, Plus, Refresh, Search, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Expand, Files, Fold, FolderOpened, Loading, Plus, Refresh, Search, Setting, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -1718,6 +1787,13 @@ const RF_ORDER = ['rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_id
 const FRAGILE_KINDS = ['css', 'rf_css']
 
 const config = reactive(loadConfig())
+
+// 配置不再常驻占一栏：页头一颗按钮打开右侧抽屉，字段一个没少。
+// 地址和工作区是开始录制的前提，缺一项就把按钮做成主色，先把人引过去。
+const configOpen = ref(false)
+const configReady = computed(
+  () => !!String(config.baseUrl || '').trim() && !!String(config.workspace || '').trim()
+)
 
 // ---- 配置行：默认只读，点开才就地展开 ----
 // 六个输入框常驻会把 400px 的侧栏塞成注册表单；默认只显示「值」，
@@ -1859,6 +1935,8 @@ function applyPanelQuery() {
   if (typeof query.workspace === 'string' && query.workspace) config.workspace = query.workspace
   if (typeof query.framework === 'string' && FRAMEWORKS.some(item => item.value === query.framework)) {
     config.framework = query.framework
+    // 面板 URL 里的框架是「开始录制那一刻用户选的那个」，属于用户意志：挂载后不许被检测改掉。
+    config.frameworkSource = 'user'
   }
   // 目标文件/标题/解释器也必须在开始录制时带过来：录制窗口是独立 profile，
   // 用户在主窗口填的这三项不会出现在这里；目标文件为空时生成按钮会一直不可用。
@@ -1918,10 +1996,14 @@ let tickTimer = null
 // targetPath 故意不持久化：它跟具体项目绑定，留着上一次的值等于替用户把路径锁死，
 // 下次换个项目还是那个路径，又回到「用户盲填、模型不敢改」的老问题。每次默认留空。
 function loadConfig() {
-  const defaults = { baseUrl: '', workspace: '', framework: 'robot-selenium', targetPath: '', model: '', title: '', python: '' }
+  // frameworkSource 记录「这个框架是谁定的」：'user' = 用户自己点过 / 面板 URL 明确带过来的；
+  // 'auto' = 还没人选过，允许工作区检测预填。没有它的话，检测结果会把用户的选择一路覆盖
+  // 并写回 localStorage，用户下次进来又是另一个框架。
+  const defaults = { baseUrl: '', workspace: '', framework: 'robot-selenium', frameworkSource: 'auto', targetPath: '', model: '', title: '', python: '' }
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
     delete saved.targetPath
+    saved.frameworkSource = saved.frameworkSource === 'user' ? 'user' : 'auto'
     return { ...defaults, ...saved }
   } catch {
     return defaults
@@ -2041,7 +2123,7 @@ function reviewable(step) {
   const target = step.target
   if (!target || target.degraded) return false
   // 亲手确认过的不用再看
-  if (target.chosen && target.chosen.desc) return false
+  if (chosenOf(target)) return false
   // 没有截图、页面又已经翻走：弹出来也只能干看，选不了，不进队列。
   if (!target.shot && (target.page_gone || target.unverified)) return false
   // 点完自己就没了的（下拉项、菜单项）：有截图照样能选，没图就跳过。
@@ -2182,7 +2264,7 @@ const executeBlockReason = computed(() => {
 function degradePlan(step) {
   const target = step.target || {}
   // 用户选过的就是实际会生成的那条，确认框不能按自动选择去描述。
-  const picked = target.chosen
+  const picked = chosenOf(target)
   if (picked && picked.desc) {
     const hit = (target.candidates || []).find(c => c.desc === picked.desc)
     if (hit && hit.count > 1) return { locator: picked.desc, count: hit.count, index: picked.index }
@@ -2236,6 +2318,12 @@ function applySession(data) {
     if (data.pick) togglePick(false, true)
     // 停止后浏览器还开着，拾取靠轮询拿结果；拿到就收，别一直在后台拉。
     if (data.status !== 'recording' && data.status !== 'starting') stopPolling()
+  }
+  // 这个弹窗只属于「正在录制」：停止 / 关浏览器 / 超时之后一律收掉，别让它留在页面上挡路。
+  // 例外是用户自己点「逐条看」打开的那份——那是他要看的，只要浏览器还活着就留着。
+  if (!canAnswerLoc()) dropLocConfirm('录制已结束，这一步的定位已留到步骤列表')
+  else if (locAuto && locConfirm.value && data.status !== 'recording') {
+    dropLocConfirm('录制已结束，这一步的定位已留到步骤列表')
   }
   trackLocConfirm(fresh, data)
   seenStepNos = new Set((data.steps || []).map(s => s.no))
@@ -2420,6 +2508,9 @@ const locVerdict = computed(() => {
 // 只是靠结构路径碰巧唯一的（结构定位），两者都要当场选——后者正是「事后回列表
 // 已经框错了」的主要来源。页面已翻走 / 元素已消失的步骤不弹，那时选了也是瞎选。
 const locConfirm = ref(null)     // { no, label, desc, count, items, picked, note, loading, gone, returnUrl }
+// 自动弹的（录制中）和用户点「逐条看」打开的（停止后）不是一回事：
+// 前者一停录就必须收掉，后者是用户自己要看的，只要浏览器还活着就留着。
+let locAuto = true
 const locQueue = ref([])         // 等待确认的步骤号，录得快时会排队
 const locPicking = ref(false)
 const locDegrading = ref(false)
@@ -2442,7 +2533,7 @@ function needsLocConfirm(step) {
   const target = step.target
   if (!target || target.degraded) return false
   // 已经亲手确认过的步骤不再打扰。
-  if (target.chosen && target.chosen.desc) return false
+  if (chosenOf(target)) return false
   const status = effectiveStatus(step)
   if (status !== 'ambiguous' && status !== 'suspect') return false
   // 有「按下鼠标那一刻」的截图：页面跑没跑、元素有没有被这一下点击带走，都不影响在图上选。
@@ -2457,13 +2548,30 @@ function withIndex(items) {
   return (items || []).map((item, i) => ({ ...item, index: typeof item.index === 'number' ? item.index : i }))
 }
 
+// 这个弹窗只属于「还活着的录制」：浏览器一关，后面所有命令都会 409「录制已结束」，
+// 弹窗既选不了也关不掉，遮罩会把整页锁死。所以只要录制不能再回答，就立刻收掉。
+function canAnswerLoc() {
+  if (!session.value || session.value.browser_open === false) return false
+  return !['closed', 'failed', 'cancelled'].includes(session.value.status)
+}
+
+// 只清本地状态，不碰后端（后端这时可能已经不可用了）。
+function dropLocConfirm(reason) {
+  if (!locConfirm.value && !locQueue.value.length) return
+  locConfirm.value = null
+  locQueue.value = []
+  hoverLoc.value = null
+  if (reason) ElMessage.info(reason)
+}
+
 function trackLocConfirm(fresh, data) {
   // 停录/暂停期间不再弹：那已经不是「当场」了，硬弹只会打断收尾。
   if (data.status !== 'recording' || data.paused) return
+  if (!canAnswerLoc()) return
   const hits = fresh.filter(needsLocConfirm).map(s => s.no)
   if (!hits.length) return
   locQueue.value = [...locQueue.value, ...hits.filter(no => no !== locConfirm.value?.no)]
-  if (!locConfirm.value) openNextLocConfirm()
+  if (!locConfirm.value) openNextLocConfirm(true)
 }
 
 // 停止后逐条过一遍：录制中漏掉的（页面跑掉了、当场点了「稍后再选」）在这里补齐。
@@ -2474,17 +2582,28 @@ function startLocReview() {
     ElMessage.info('没有需要确认的步骤')
     return
   }
+  // 「逐条看」要靠浏览器重新框选 / 翻回那一页；浏览器关了就只能走录制时的快照，
+  // 打开也只会是一张点不动的卡。
+  if (!canAnswerLoc()) {
+    ElMessage.info('浏览器已关闭，没法逐条确认了；可以在步骤行里看当时记下的定位')
+    return
+  }
   locQueue.value = hits.filter(no => no !== locConfirm.value?.no)
-  if (!locConfirm.value) openNextLocConfirm()
+  if (!locConfirm.value) openNextLocConfirm(false)
 }
 
-async function openNextLocConfirm() {
+async function openNextLocConfirm(auto = true) {
   if (locConfirm.value || !locQueue.value.length) return
+  // 排队期间录制可能已经结束（上一条点完到这一条之间有 220ms），别再开。
+  if (!canAnswerLoc()) {
+    dropLocConfirm()
+    return
+  }
   const [no, ...rest] = locQueue.value
   locQueue.value = rest
   const step = steps.value.find(s => s.no === no)
   if (!step) {
-    openNextLocConfirm()
+    openNextLocConfirm(auto)
     return
   }
   const snap = step.target?.matches
@@ -2492,6 +2611,7 @@ async function openNextLocConfirm() {
   // 等于替用户把页面滚了），弹窗自己就能说清楚。
   const shot = step.target?.shot
   hoverLoc.value = null
+  locAuto = auto
   locConfirm.value = {
     no,
     label: stepDescription(step),
@@ -2501,7 +2621,7 @@ async function openNextLocConfirm() {
     count: snap?.count || 0,
     items: withIndex(snap?.items),
     // 录制时点的是第几个：用来在图上把「原来那一下」标出来。没选过就取主候选的序号。
-    active: step.target?.chosen?.index ?? step.target?.primary?.index ?? null,
+    active: chosenOf(step.target)?.index ?? step.target?.primary?.index ?? null,
     picked: null,
     note: '',
     shot,
@@ -2756,7 +2876,11 @@ async function degradeLocConfirm() {
     applySession(data)
     closeLocConfirm()
   } catch (error) {
-    ElMessage.warning(errorText(error))
+    if (!canAnswerLoc() || /录制已结束|没有录制/.test(errorText(error))) {
+      dropLocConfirm('录制已结束，这一步的定位已留到步骤列表')
+    } else {
+      ElMessage.warning(errorText(error))
+    }
   } finally {
     locDegrading.value = false
   }
@@ -2779,7 +2903,11 @@ async function pickLocConfirm(index) {
     // 页面上把红框挪到选中的那个，「就是它」这件事用眼睛再确认一次。
     await api.highlightRecordingStep(current.no, index, config.framework)
   } catch (error) {
-    ElMessage.warning(errorText(error))
+    if (!canAnswerLoc() || /录制已结束|没有录制/.test(errorText(error))) {
+      dropLocConfirm('录制已结束，这一步的定位已留到步骤列表')
+    } else {
+      ElMessage.warning(errorText(error))
+    }
   } finally {
     locPicking.value = false
   }
@@ -2808,7 +2936,8 @@ async function closeLocConfirm() {
   }
   if (locQueue.value.length) {
     // 上一条的「就这个」可能刚点完，留一拍再切下一条，避免卡片内容闪一下。
-    window.setTimeout(openNextLocConfirm, 220)
+    const auto = locAuto
+    window.setTimeout(() => openNextLocConfirm(auto), 220)
     return
   }
   // 没有排队时把页面上的框清掉；行内准星还开着的话，框归它管。
@@ -2827,7 +2956,11 @@ async function loadCurrent() {
     const { data } = await api.getRecordingCurrent()
     applySession(data)
   } catch (error) {
-    if (error.response && error.response.status === 404) session.value = null
+    if (error.response && error.response.status === 404) {
+      session.value = null
+      // 会话没了，弹窗也就没有回答的对象了；留着就是一块关不掉的遮罩。
+      dropLocConfirm('录制已结束，这一步的定位已留到步骤列表')
+    }
   }
   // 会话状态决定轮询频率：停录后仍要看生成进度（两个窗口共用这份状态），
   // 所以不能像以前那样一停就彻底不轮了，只是把频率降下来。
@@ -2916,6 +3049,24 @@ async function pollRecordingEvents() {
 }
 
 watch(() => session.value?.status, () => syncPolling())
+
+// 抽屉里的「开始录制」：开成功才收抽屉。失败了继续留在配置上，
+// 缺哪项当场看得到，不用再点开一次找错误。
+async function startFromConfig() {
+  await startRecording()
+  if (session.value) configOpen.value = false
+}
+
+// 工具栏那颗「开始」：配置没填全就别先报错，直接把配置送到眼前。
+// 面板模式下配置是内联卡，展开它而不是打开抽屉。
+function onStartClick() {
+  if (!configReady.value) {
+    if (compactMode.value) configExpanded.value = true
+    else configOpen.value = true
+    return
+  }
+  startRecording()
+}
 
 async function startRecording() {
   const url = (config.baseUrl || '').trim()
@@ -3043,6 +3194,12 @@ function onRowClick(step) {
 }
 
 function onSelectKeydown(event) {
+  if (event.key === 'Escape' && configOpen.value) {
+    // 抽屉是最外那层浮层，Esc 先收它；弹窗开着时让弹窗自己处理。
+    if (groupDialog.visible || argsDialog.visible) return
+    configOpen.value = false
+    return
+  }
   if (event.key === 'Escape' && selectMode.value) {
     // 弹窗开着时先让弹窗自己收（它的 Esc 比这里更近），这里只处理列表态。
     if (groupDialog.visible || argsDialog.visible) return
@@ -3603,14 +3760,18 @@ async function closeBrowser() {
   }
   closingBrowser.value = true
   try {
-    await api.closeRecordingBrowser()
+    // 后端在真正关窗口之前就把「关掉之后」的快照回过来了（browser_open=false）。
+    // 直接用它，别再拉一次 /current：那一次会和 _shutdown 赛跑，拿回的还是 true，
+    // 按钮要多停留 1~2 秒，看起来就像「点一次没反应」。
+    const { data } = await api.closeRecordingBrowser()
+    applySession(data)
     ElMessage.success('已关闭浏览器')
   } catch (error) {
     ElMessage.error(errorText(error))
+    // 出错才回头校准一次真实状态。
+    loadCurrent()
   } finally {
     closingBrowser.value = false
-    // 面板窗口本身可能就活在这个浏览器里，请求回来时页面已经没了；能回来的情况刷新一下状态。
-    loadCurrent()
   }
 }
 
@@ -3819,6 +3980,17 @@ function hitsTarget(candidate) {
   return candidate.index == null || candidate.index >= 0
 }
 
+// 「已选定」只对当前框架成立：用户可能在 Playwright 下挑的候选，之后又切到 RF。
+// 那时这条 desc 属于另一套候选池，生成侧不会采用（emit._pick_locator 只认当前框架的 kind），
+// 界面若继续显示它，就变成「弹窗说已选定、脚本写别的」。这里按同一把尺子过滤。
+function chosenOf(target) {
+  const picked = target && target.chosen
+  if (!picked || !picked.desc) return null
+  const order = config.framework === 'robot-selenium' ? RF_ORDER : PW_ORDER
+  const hit = (target.candidates || []).find(c => c.desc === picked.desc)
+  return hit && order.includes(hit.kind) ? picked : null
+}
+
 // 与后端 locators.pick_for 一致：按当前框架挑出第一个唯一、且确实命中目标的候选。
 function pickFor(framework, candidates = []) {
   const order = framework === 'robot-selenium' ? RF_ORDER : PW_ORDER
@@ -3836,18 +4008,16 @@ function effectiveStatus(step) {
   // 但「录制时本来就不唯一 / 没核实 / 已选定」不能被这个标记盖掉，否则会隐藏真正的降级信息。
   if (step.target.page_gone) {
     if (step.target.unverified) return 'unverified'
-    if (step.target.chosen && step.target.chosen.desc) {
-      return step.target.chosen.index_invalid ? 'invalid' : 'chosen'
-    }
+    const gone = chosenOf(step.target)
+    if (gone) return gone.index_invalid ? 'invalid' : 'chosen'
     return pickFor(config.framework, step.target.candidates || []) ? 'page_gone' : 'ambiguous'
   }
   // 录制那一刻页面就被这一步带走了（回车提交、点掉链接）：元素不在新 document 上，
   // 定位是按快照推出来的、没核实过。单独标出来让用户回放确认，而不是伪装成唯一或不唯一。
   if (step.target.unverified) return 'unverified'
   // 用户看过页面上的框、亲手选定的：这就是他确认过的定位，不该再按自动选择标成结构定位。
-  if (step.target.chosen && step.target.chosen.desc) {
-    return step.target.chosen.index_invalid ? 'invalid' : 'chosen'
-  }
+  const picked = chosenOf(step.target)
+  if (picked) return picked.index_invalid ? 'invalid' : 'chosen'
   const chosen = pickFor(config.framework, step.target.candidates || [])
   if (!chosen) {
     // 有唯一候选、但每条都指向了别的元素：后端会退回其中一条并标 suspect。
@@ -3872,8 +4042,9 @@ function withNth(desc, index, count) {
 
 function locatorText(target) {
   // 用户亲手选过的，显示他确认的那条：生成时也优先走它（见 emit._locator_info）。
-  const picked = target.chosen
-  if (picked && picked.desc) return withNth(picked.desc, picked.index, picked.count)
+  // chosenOf 会剔掉「切过框架后属于另一套候选」的旧选择——生成侧同样不认它。
+  const picked = chosenOf(target)
+  if (picked) return withNth(picked.desc, picked.index, picked.count)
   const chosen = pickFor(config.framework, target.candidates || [])
   if (chosen) return withNth(chosen.desc, chosen.index, chosen.count)
   // 没核实过的步骤按快照里语义最强的那条显示，和生成时用的是同一条。
@@ -4075,13 +4246,30 @@ async function detectWorkspace() {
   try {
     const { data } = await api.detectRecordingWorkspace(workspace, (config.python || '').trim())
     detect.value = data
-    if (data.framework) config.framework = data.framework
+    // 检测只是「没选过时的预填」，不是权威：项目里同时有 Playwright 和 Robot 时会话、
+    // 或者用户就是想拿 RF 写一个 Playwright 仓库时，把选择改回检测结果等于替他做决定。
+    // 冲突留给下面那行提示，由用户自己点。自动预填也不改 frameworkSource，下次仍可继续跟检测走。
+    if (data.framework && config.frameworkSource !== 'user') config.framework = data.framework
   } catch (error) {
     detect.value = null
     ElMessage.warning(errorText(error))
   } finally {
     detecting.value = false
   }
+}
+
+/** 用户亲手点了框架：从此检测结果不再覆盖它（标记随配置一起持久化）。 */
+function pickFramework(value) {
+  // 点一下就代表「这次由我决定」：哪怕点的正是当前值，也不再让检测改它。
+  config.framework = value
+  config.frameworkSource = 'user'
+}
+
+/** 检测结果和当前选择不一致时，用户主动采纳检测值。 */
+function adoptDetectedFramework() {
+  if (!detect.value || !detect.value.framework) return
+  config.framework = detect.value.framework
+  config.frameworkSource = 'user'
 }
 
 // ---- 任务书浮层 ----
@@ -4617,7 +4805,10 @@ watch(steps, (list) => {
 /* 整个卡片内容区作为唯一的滚动容器：列表和草稿一起滚，工具栏吸顶。
    之前列表自己滚、草稿另算，窄栏里草稿会被卡片裁掉。 */
 .is-panel .steps-card :deep(.el-card__body) { flex:1; min-height:0; display:flex; flex-direction:column; overflow-y:auto; }
-.is-panel .generate-card { flex:none; }
+.is-panel .side-rail { flex:none; border-radius:10px; }
+.is-panel .rail-head { padding:10px 14px; }
+.is-panel .rail-scroll { padding:12px; }
+.is-panel .rail-foot { padding:10px 12px 12px; }
 .is-panel .timeline { flex:none; overflow:visible; margin-top:12px; padding-right:2px; }
 /* 顶栏已经有状态和步数，卡片头里的重复信息收起来 */
 .is-panel .steps-card .state-pill { display:none; }
@@ -4682,6 +4873,28 @@ h1 { margin:0; color:var(--ink); font-size:22px; font-weight:600; letter-spacing
 .config-card .card-title::before { display:none; }
 .cfg-saved { margin-left:auto; font-size:11.5px; color:var(--cfg-muted); }
 
+/* 面板顶部那句「改动只对本次生效」：两处配置不是同一份，这句话得让人看得见 */
+.cfg-note {
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--cfg-muted);
+  background: var(--bg-sunken);
+  border-left: 2px solid var(--cfg-accent);
+  border-radius: 0 6px 6px 0;
+}
+
+/* 只读标记：不抢眼，但要让人一眼看出这行改不了，而不是点了没反应 */
+.cfg-ro {
+  flex: none;
+  padding: 1px 5px;
+  font-size: 11px;
+  color: var(--cfg-muted);
+  border: 1px solid var(--cfg-line-soft);
+  border-radius: 4px;
+}
+
 .cfg-form { flex:1; display:flex; flex-direction:column; }
 .cfg-field { padding:13px 0 2px; border-bottom:1px solid var(--cfg-line-soft); }
 .cfg-field:last-of-type { border-bottom:0; }
@@ -4735,6 +4948,10 @@ h1 { margin:0; color:var(--ink); font-size:22px; font-weight:600; letter-spacing
 .cfg-chip.is-warn { background:var(--warn-soft); color:var(--warn); }
 .cfg-details { flex-basis:100%; margin-top:4px; font-size:11.5px; color:var(--muted); }
 .cfg-details summary { cursor:pointer; color:var(--muted); }
+/* 检测到的框架和当前选择不一致：一行说明 + 一颗「改为 X」，贴在 chips 下面另起一行。 */
+.cfg-detect-note { flex-basis:100%; display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding-top:2px; font-size:11.5px; line-height:1.6; color:var(--muted); }
+/* 框架是谁定的：自动识别时才说明，手动选过就不必再解释。 */
+.cfg-src { margin-left:6px; color:var(--faint); font-weight:400; }
 
 /* 项目记忆：一行状态 + 展开清单。它是「凭什么这么写」的解释，不是必填项，
    所以文字压到 11.5px、只在展开时才占高度。 */
@@ -4775,24 +4992,80 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .evidence-kind { color:var(--ink-2); font-weight:600; min-width:110px; }
 .evidence-source { color:var(--faint); margin-left:auto; }
 
-/* 主布局 */
+/* 主布局：左边步骤吃满，右边一列专管「准备 → 生成」，配置收进页头抽屉。 */
 .main-layout { display:flex; flex-direction:column; gap:16px; min-width:0; }
-/* 左配置 / 右步骤+生成：一屏看完，生成记录单独成页 */
 /* 普通模式整页锁一屏：标题常驻，左右两列各自内部滚动，步骤再多也不把页面撑长。
    100dvh - 56(顶栏) - 44(上下留白 22×2) = 内容高度 */
 .recording-page:not(.is-panel):not(.is-embed) { height:calc(100dvh - 100px); display:flex; flex-direction:column; }
 /* page-col 是内容的外壳（embed 模式也用它）：普通模式下必须把高度传下去，链条才不断 */
 .recording-page:not(.is-panel):not(.is-embed) .page-col { flex:1; min-height:0; display:flex; flex-direction:column; }
 .recording-page:not(.is-panel):not(.is-embed) .page-col > .page-header { flex:none; }
-.recording-body { display:grid; grid-template-columns:minmax(340px,400px) minmax(0,1fr); grid-template-rows:minmax(0,1fr); gap:16px; align-items:stretch; flex:1; min-height:0; }
-/* 左列配置超高时自己滚 */
-.recording-body .config-card { min-height:0; overflow-y:auto; }
-/* 右列：步骤吃满剩余高度，生成卡贴底 */
+/* 配置已经是固定抽屉，不再占栅格列 —— 主区只有 main-layout 一个孩子。 */
+.recording-body { display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr); gap:16px; align-items:stretch; flex:1; min-height:0; }
+.recording-page:not(.is-panel):not(.is-embed) .main-layout { display:grid; grid-template-columns:minmax(0,1fr) 336px; grid-template-rows:minmax(0,1fr); gap:16px; height:100%; min-height:0; }
 .recording-body .main-layout { height:100%; min-height:0; }
 .recording-body .steps-card { flex:1; min-height:0; display:flex; flex-direction:column; }
 .recording-body .steps-card :deep(.el-card__body) { flex:1; min-height:0; overflow-y:auto; }
-.recording-body .generate-card { flex:none; }
 .recording-body .panel-card { margin-bottom:0; }
+
+/* 右侧收尾栏：检查项与回放自己滚，生成按钮钉在栏底。 */
+.side-rail {
+  display:flex; flex-direction:column; min-width:0; min-height:0;
+  background:var(--bg-card); border:1px solid var(--line-soft); border-radius:14px; overflow:hidden;
+  box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 30px rgba(16,24,40,.05);
+}
+.recording-page:not(.is-panel):not(.is-embed) .side-rail { height:100%; }
+.rail-head { flex:none; display:flex; align-items:center; justify-content:space-between; gap:10px; padding:11px 16px; border-bottom:1px solid var(--line-soft); }
+.rail-steps { font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; }
+/* 配置摘要：左边那栏撤掉之后，这三条是最常回看的上下文，点一下打开抽屉 */
+.rail-brief { position:relative; display:flex; flex-direction:column; gap:6px; width:100%; padding:10px 34px 10px 12px; border:1px solid var(--line-soft); border-radius:10px; background:var(--bg-sunken); text-align:left; cursor:pointer; transition:background .14s ease, border-color .14s ease; }
+.rail-brief:hover { background:var(--bg-hover); border-color:var(--line-ctl); }
+.rail-brief:focus-visible { outline:2px solid var(--focus-ring); outline-offset:1px; }
+.rb-row { display:grid; grid-template-columns:56px minmax(0,1fr); gap:8px; align-items:baseline; }
+.rb-k { font-size:11.5px; color:var(--muted); }
+.rb-v { min-width:0; font-size:11.5px; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rb-v.is-empty { color:var(--muted); }
+.rb-mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; }
+.rb-edit { position:absolute; top:9px; right:11px; font-size:11.5px; color:var(--accent); }
+.rail-brief:hover .rb-edit { text-decoration:underline; }
+.rail-scroll { flex:1; min-height:0; overflow-y:auto; padding:14px 16px; display:flex; flex-direction:column; gap:14px; }
+.rail-scroll .checklist { margin-bottom:0; }
+.rail-foot { flex:none; padding:12px 16px 14px; border-top:1px solid var(--line-soft); background:var(--bg-card); }
+.rail-foot .field-hint { margin-top:8px; }
+/* 回放校验挪到底部操作区：它和「生成任务书」都是收尾动作，放一起，中间不再空一块。
+   分隔线换到下方——上面还有检查项，下面就是主按钮。 */
+.rail-foot .replay-block { margin:0 0 10px; padding:0 0 10px; border-top:0; border-bottom:1px dashed var(--line-soft); }
+.rail-foot .gen-replay-steps { max-height:132px; }
+/* 禁用态别淡成看不见：这里不是「这个功能不可用」，是「还差配置/定位」 */
+.rail-foot :deep(.el-button.generate-btn.is-disabled) { background:var(--bg-sunken); border:1px solid var(--line-soft); color:var(--muted); }
+/* 面板 / 嵌入模式不是一屏三栏：栏退化成步骤下面的一张普通卡，跟以前一样随内容长高。
+   摘要条只在主界面有意义（配置列被撤掉了），面板里自己就能展开配置，别白占高度。 */
+.is-panel .side-rail, .is-embed .side-rail { flex:none; }
+.is-panel .rail-scroll, .is-embed .rail-scroll { flex:none; overflow:visible; }
+.is-panel .rail-brief, .is-embed .rail-brief { display:none; }
+
+/* 配置抽屉：主界面从右侧滑出 480px，不遮挡步骤；面板里退化成内联卡片（display:contents）。 */
+.cfg-shell { position:fixed; inset:0; z-index:1700; pointer-events:none; }
+.cfg-shell.is-inline { position:static; display:contents; }
+.cfg-shell.is-open { pointer-events:auto; }
+.cfg-backdrop { position:absolute; inset:0; background:rgba(16,24,40,.36); opacity:0; transition:opacity .18s ease; }
+.cfg-shell.is-open .cfg-backdrop { opacity:1; pointer-events:auto; }
+.cfg-drawer {
+  position:absolute; top:0; right:0; bottom:0; width:480px; max-width:calc(100vw - 48px);
+  display:flex; flex-direction:column; background:var(--bg-card);
+  border-left:1px solid var(--line-soft); box-shadow:-24px 0 48px -32px rgba(16,24,40,.55);
+  transform:translateX(100%); transition:transform .22s cubic-bezier(.16,1,.3,1);
+}
+.cfg-shell.is-open .cfg-drawer { transform:none; }
+.cfg-shell.is-inline .cfg-drawer { position:static; width:auto; max-width:none; transform:none; background:none; border:0; box-shadow:none; display:contents; }
+.cfg-drawer-head { flex:none; display:flex; align-items:baseline; gap:10px; padding:14px 18px; border-bottom:1px solid var(--line-soft); }
+.cfg-drawer-title { font-size:14px; font-weight:600; color:var(--ink); }
+.cfg-drawer-note { font-size:11.5px; color:var(--muted); }
+.cfg-drawer-close { margin-left:auto; width:24px; height:24px; padding:0; border:0; border-radius:6px; background:none; color:var(--muted); font-size:12px; cursor:pointer; }
+.cfg-drawer-close:hover { background:var(--bg-hover); color:var(--ink); }
+/* 抽屉里标题已经在外层，卡自己的头重复一遍；卡片边框也去掉，铺满抽屉宽度。 */
+.cfg-shell:not(.is-inline) .config-card { flex:1; min-height:0; overflow-y:auto; margin:0; border:0; border-radius:0; box-shadow:none; }
+.cfg-shell:not(.is-inline) .config-card :deep(.el-card__header) { display:none; }
 .gen-result-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px; }
 .gen-result-actions .field-hint { margin-top:0; }
 /* 回放校验：和生成无关，停止录制后就摆在这里，别让它看起来像生成的附属动作。 */
@@ -4895,6 +5168,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .steps-empty.is-roomy .steps-empty-dot { width:9px; height:9px; margin-bottom:6px; background:var(--accent-soft); box-shadow:0 0 0 6px rgba(201,214,234,.22); }
 .steps-empty-title { font-size:13px; color:var(--muted); }
 .steps-empty-sub { font-size:12px; color:var(--muted); line-height:1.75; max-width:330px; }
+.steps-empty-cta { margin-top:6px; }
 
 /* 时间线 */
 .timeline { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:8px; }
@@ -5520,10 +5794,12 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 }
 
 @media (max-width: 1100px) {
-  /* 单列后左右并排的一屏约束就不成立了：解除固定高度，否则第一行（配置卡）
-     会被 minmax(0,1fr) 压成 0 高，直接看不见。 */
+  /* 单列后左右并排的一屏约束就不成立了：解除固定高度，否则步骤卡会被 minmax(0,1fr) 压扁。 */
   .recording-page:not(.is-panel):not(.is-embed) { height:auto; }
   .recording-body { grid-template-columns:1fr; grid-template-rows:auto; }
+  .recording-page:not(.is-panel):not(.is-embed) .main-layout { grid-template-columns:1fr; grid-template-rows:auto; height:auto; }
+  .recording-page:not(.is-panel):not(.is-embed) .side-rail { height:auto; }
+  .rail-scroll { overflow:visible; }
   .recording-body .config-card { overflow:visible; }
   .form-grid { grid-template-columns:1fr; }
 }

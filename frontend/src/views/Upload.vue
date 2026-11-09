@@ -33,25 +33,35 @@
       </div>
     </header>
 
-    <!-- 三个模式是同一层级的切换，用下划线 tab；「Agent 探索」是跳出去，靠在右边分开 -->
+    <!-- 三个模式是同一层级的页内切换，用下划线 tab。自动化那两个入口不塞进 tab：
+         它们是跳到另一个工作台，混进 tab 行会让人以为点完还能切回来。 -->
     <nav class="mode-tabs enter-rule">
       <button type="button" :class="['mode-tab', { 'is-on': uploadMode === 'image' }]" @click="switchMode('image')">原型图</button>
       <button type="button" :class="['mode-tab', { 'is-on': uploadMode === 'doc' }]" @click="switchMode('doc')">文档</button>
       <button type="button" :class="['mode-tab', { 'is-on': uploadMode === 'knowledge' }]" @click="switchMode('knowledge')">知识库</button>
-      <span class="mode-spacer"></span>
-      <button type="button" class="mode-jump" @click="goToAutomation">Agent 探索<span class="jump-arrow">↗</span></button>
     </nav>
 
-    <!-- 自动化工具：从「渐变图标大卡」降成浅底一行。
-         它仍然可点、仍然独占一行，但不再和上传卡片抢第一眼。 -->
-    <button type="button" class="tool-entry enter-item" style="--d: 480ms" @click="$router.push('/recording')">
-      <span class="tool-entry-icon"><el-icon :size="15"><Operation /></el-icon></span>
-      <span class="tool-entry-body">
-        <span class="tool-entry-title">自动化工具</span>
-        <span class="tool-entry-desc">在浏览器里录制操作，插入断言和等待，生成 Playwright 或 Robot Framework 脚本并写入项目</span>
-      </span>
-      <span class="tool-entry-arrow">→</span>
-    </button>
+    <!-- 两个自动化入口并排、权重相同：一个靠录制回放，一个让 AI 自己探索着写。
+         以前 Agent 探索只是 tab 行最右边一行 12.5px 灰字，比下面那条通栏弱一个量级，
+         等于没有入口。 -->
+    <div class="tool-entries enter-item" style="--d: 480ms">
+      <button type="button" class="tool-entry" @click="$router.push('/recording')">
+        <span class="tool-entry-head">
+          <span class="tool-entry-icon"><el-icon :size="15"><VideoCamera /></el-icon></span>
+          <span class="tool-entry-title">自动化工具</span>
+          <span class="tool-entry-arrow">→</span>
+        </span>
+        <span class="tool-entry-desc">在浏览器里录制操作，插入断言和等待，生成 Playwright 或 Robot Framework 脚本</span>
+      </button>
+      <button type="button" class="tool-entry" @click="goToAutomation">
+        <span class="tool-entry-head">
+          <span class="tool-entry-icon"><el-icon :size="15"><Promotion /></el-icon></span>
+          <span class="tool-entry-title">Agent 自动化测试</span>
+          <span class="tool-entry-arrow">→</span>
+        </span>
+        <span class="tool-entry-desc">给一段需求或一条用例，AI 自己探索页面、写脚本并跑通</span>
+      </button>
+    </div>
 
     <el-card v-if="uploadMode !== 'knowledge'" class="upload-card enter-item" style="--d: 560ms">
       <div class="card-body-layout">
@@ -669,7 +679,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { UploadFilled, PictureFilled, Document, Loading, Delete, Close, Operation } from '@element-plus/icons-vue'
+import { UploadFilled, PictureFilled, Document, Loading, Delete, Close, VideoCamera, Promotion } from '@element-plus/icons-vue'
 import ModuleFields from '../components/ModuleFields.vue'
 import { bootDelay, bootPending } from '../composables/useBoot'
 import api from '../api'
@@ -1937,31 +1947,20 @@ async function deleteKnowledgeFile(row) {
   border-radius: 2px 2px 0 0;
   background: var(--accent);
 }
-.mode-spacer { margin-left: auto; }
-.mode-jump {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 9px;
-  padding: 0;
-  border: 0;
-  background: none;
-  font-size: 12.5px;
-  color: var(--muted);
-  cursor: pointer;
-  transition: color .14s ease;
-}
-.mode-jump:hover { color: var(--accent); }
-.jump-arrow { font-size: 11px; transform: translateY(-1px); }
 
-/* ---------- 自动化工具入口：浅底一行 ---------- */
+/* ---------- 两个自动化入口：并排等宽，谁都别比谁弱 ---------- */
+.tool-entries {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 0 0 16px;
+}
+
 .tool-entry {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  margin: 0 0 16px;
-  padding: 11px 14px;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 14px;
   background: var(--bg-sunken);
   border: 1px solid var(--line-soft);
   border-radius: 10px;
@@ -1971,6 +1970,7 @@ async function deleteKnowledgeFile(row) {
 }
 .tool-entry:hover { background: var(--bg-hover); border-color: var(--line-ctl); }
 .tool-entry:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.tool-entry-head { display: flex; align-items: center; gap: 10px; }
 .tool-entry-icon {
   flex: none;
   width: 26px;
@@ -1983,16 +1983,16 @@ async function deleteKnowledgeFile(row) {
   border: 1px solid var(--line-soft);
   color: var(--ink-2);
 }
-.tool-entry-body { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 12px; }
-.tool-entry-title { flex: none; font-size: 13px; font-weight: 600; color: var(--ink); }
+.tool-entry-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
 .tool-entry-desc {
-  flex: 1;
-  min-width: 0;
   font-size: 12px;
+  line-height: 1.55;
   color: var(--muted);
+  /* 两张卡描述长短不一，限两行才不会一边高一边矮 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .tool-entry-arrow {
   flex: none;
@@ -2929,6 +2929,11 @@ async function deleteKnowledgeFile(row) {
 /* 窄屏（1366 的笔记本开两栏、或者窗口拖窄）：配置区与上传区上下堆叠，
    否则左栏被压到 300px 以下，字段名和值会挤在一起 */
 @media (max-width: 1080px) {
+  /* 窄屏下两张入口卡堆叠，否则每张不到 300px，标题和箭头会挤在一起 */
+  .tool-entries {
+    grid-template-columns: 1fr;
+  }
+
   .upload-head {
     flex-direction: column;
     align-items: flex-start;

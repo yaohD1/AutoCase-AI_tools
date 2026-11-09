@@ -362,5 +362,23 @@ class PauseTest(unittest.TestCase):
         self.assertEqual(session._steps, [])
 
 
+class FrameworkTest(unittest.TestCase):
+    """这次录制按哪个框架生成，必须记在会话上。
+
+    以前它只活在前端 state 和面板 URL 里，后端每个接口各自兜底成 playwright-ts：
+    面板丢了参数，定位和生成就静默换了写法，界面上完全看不出来。
+    """
+
+    def test_snapshot_exposes_framework(self):
+        session = RecordingSession('http://example.test/', framework='robot-selenium')
+        self.assertEqual(session.snapshot()['framework'], 'robot-selenium')
+
+    def test_missing_framework_stays_none(self):
+        # 没传就是没传：不给一个假装确定的默认值，兜底由调用方决定。
+        self.assertIsNone(RecordingSession('http://example.test/').snapshot()['framework'])
+        self.assertIsNone(RecordingSession('http://example.test/',
+                                           framework='   ').snapshot()['framework'])
+
+
 if __name__ == '__main__':
     unittest.main()

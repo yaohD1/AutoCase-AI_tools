@@ -349,6 +349,74 @@ class RecordingRoutesTest(unittest.TestCase):
         r = self.client.post('/api/automation/recording/highlight', json={'no': 1})
         self.assertEqual(r.status_code, 404)
 
+    # ---- 框架：这次录制选的那个是兜底，不是 playwright-ts ----
+
+    def test_start_hands_framework_to_session(self):
+        class _FakeSession:
+            def snapshot(self):
+                return {'status': 'recording', 'steps': []}
+
+        with mock.patch.object(RecordingSession, 'start_new', return_value=_FakeSession()) as start:
+            r = self.client.post(START, json={'base_url': _BASE, 'framework': 'robot-selenium'})
+        self.assertEqual(r.status_code, 201, r.get_json())
+        self.assertEqual(start.call_args[1]['framework'], 'robot-selenium')
+
+    def test_start_without_framework_leaves_it_empty(self):
+        class _FakeSession:
+            def snapshot(self):
+                return {'status': 'recording', 'steps': []}
+
+        with mock.patch.object(RecordingSession, 'start_new', return_value=_FakeSession()) as start:
+            self.client.post(START, json={'base_url': _BASE})
+        self.assertIsNone(start.call_args[1]['framework'])
+
+    def test_highlight_falls_back_to_session_framework(self):
+        """面板刷新 / 旧书签没带 framework 时，按这次录制选的来，别静默换成 Playwright。"""
+        session = _FrameworkSession()
+        RecordingSession._current = session
+        r = self.client.post('/api/automation/recording/highlight', json={'no': 1})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(session.seen, 'robot-selenium')
+
+    def test_locate_falls_back_to_session_framework(self):
+        session = _FrameworkSession()
+        RecordingSession._current = session
+        r = self.client.post('/api/automation/recording/steps/1/locate', json={})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(session.seen, 'robot-selenium')
+
+    def test_request_framework_still_wins(self):
+        # 显式传了就以请求为准：用户中途在面板里换了框架，不能拿会话里的旧值盖回去。
+        session = _FrameworkSession()
+        RecordingSession._current = session
+        self.client.post('/api/automation/recording/highlight',
+                         json={'no': 1, 'framework': 'playwright-ts'})
+        self.assertEqual(session.seen, 'playwright-ts')
+
+
+class _FrameworkSession:
+    """只回答「用的是哪个框架」的假会话：框架兜底不需要真的打开浏览器。"""
+
+    def __init__(self, framework='robot-selenium'):
+        self.framework = framework
+        self.status = 'recording'
+        self.seen = None
+
+    def snapshot(self):
+        return {'status': self.status, 'browser_open': True, 'framework': self.framework}
+
+    def highlight(self, no, index=None, framework=None):
+        self.seen = framework
+        return {'ok': True, 'framework': framework}
+
+    def locate(self, no, framework=None):
+        self.seen = framework
+        return {'ok': True, 'framework': framework}
+
+    def dispose(self, timeout=None):
+        # tearDown 会收会话：假会话没有浏览器可关。
+        pass
+
 
 if __name__ == '__main__':
     unittest.main()

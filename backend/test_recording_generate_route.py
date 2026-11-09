@@ -65,6 +65,27 @@ class GenerateRouteTest(unittest.TestCase):
         self._stopped_session()
         self.assertEqual(self._post(model='').status_code, 400)
 
+    def test_generate_falls_back_to_session_framework(self):
+        """请求里没带 framework 时用这次录制选的：否则「录 RF、写 Playwright」没人发现。"""
+        session = self._stopped_session()
+        session.framework = 'robot-selenium'
+        root = Path(tempfile.mkdtemp(prefix='gen-fw-'))
+        (root / 'proj').mkdir()
+        before = self.app.config['AUTOMATION_WORKSPACE_ROOT']
+        self.app.config['AUTOMATION_WORKSPACE_ROOT'] = str(root)
+        self.addCleanup(self.app.config.__setitem__, 'AUTOMATION_WORKSPACE_ROOT', before)
+        result = {'path': 'a.robot', 'changed': ['a.robot'], 'validated': True,
+                  'framework': 'robot-selenium', 'detected': None, 'reply': 'ok'}
+
+        def fake_generate(runner, workspace, *args, **kwargs):
+            (Path(workspace) / 'a.robot').write_text('*** Test Cases ***', encoding='utf-8')
+            return result
+
+        with mock.patch.object(emit, 'generate', side_effect=fake_generate) as gen:
+            r = self._post(framework='')
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(gen.call_args[0][4], 'robot-selenium')
+
     def test_workspace_must_stay_inside_root(self):
         self._stopped_session()
         self.assertEqual(self._post(workspace_path='../escape').status_code, 400)

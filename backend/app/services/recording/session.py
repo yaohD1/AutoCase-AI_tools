@@ -290,9 +290,13 @@ class RecordingSession(object):
 
     def __init__(self, base_url, headless=False, driver=None, panel_url=None,
                  panel_ratio=0.45, hud_panel=False, embed_url=None,
-                 ask_daemon=None, ask_model=None, ask_config=None, workspace=None):
+                 ask_daemon=None, ask_model=None, ask_config=None, workspace=None,
+                 framework=None):
         self.id = uuid.uuid4().hex
         self.base_url = base_url
+        # 这次录制要按哪个框架生成。以前它只活在前端 state 和面板 URL 里，后端每次请求
+        # 都各自兜底成 playwright-ts——面板丢了参数时定位会静默换写法，界面上看不出来。
+        self.framework = (framework or '').strip() or None
         # 工作区在录制开始时可能还没填（用户可以边录边配）。为空时动作库只在内存里，
         # 封装的调用照常工作，只是关掉窗口就没了——界面上会明说。
         self.workspace = str(workspace) if workspace else None
@@ -392,7 +396,8 @@ class RecordingSession(object):
     @classmethod
     def start_new(cls, base_url, headless=False, driver=None, panel_url=None,
                   panel_ratio=0.45, hud_panel=False, embed_url=None,
-                  ask_daemon=None, ask_model=None, ask_config=None, workspace=None):
+                  ask_daemon=None, ask_model=None, ask_config=None, workspace=None,
+                  framework=None):
         with cls._current_lock:
             current = cls._current
             if current is not None and current.status in ('starting', 'recording'):
@@ -403,7 +408,7 @@ class RecordingSession(object):
         session = cls(base_url, headless=headless, driver=driver, panel_url=panel_url,
                       panel_ratio=panel_ratio, hud_panel=hud_panel, embed_url=embed_url,
                       ask_daemon=ask_daemon, ask_model=ask_model, ask_config=ask_config,
-                      workspace=workspace)
+                      workspace=workspace, framework=framework)
         with cls._current_lock:
             cls._current = session
         session._thread.start()
@@ -571,6 +576,8 @@ class RecordingSession(object):
                 'id': self.id,
                 'status': self.status,
                 'base_url': self.base_url,
+                # 这次录制选的框架（不是当前请求带的那个）：前端和生成侧都能据此对齐。
+                'framework': getattr(self, 'framework', None),
                 'pick': self._pick,
                 # 暂停中：浏览器可用但不记录操作。
                 'paused': self._paused,
@@ -2645,8 +2652,14 @@ class RecordingSession(object):
         # 3) 否则才是生成时默认会用的那条。
         chosen = None
         picked = target.get('chosen') or {}
+        # 用户选的是「那次框架」下的候选：切过框架之后它属于另一套池子，生成侧不采用它
+        # （见 emit._pick_locator），这里也不能拿它去框——否则框出来的和写进脚本的不是一条。
+        allowed = {c['kind'] for c in pool_for(framework, candidates)}
+        picked_hit = None
         if picked.get('desc'):
-            chosen = next((c for c in candidates if c['desc'] == picked['desc']), None)
+            picked_hit = next((c for c in candidates
+                               if c['desc'] == picked['desc'] and c['kind'] in allowed), None)
+            chosen = picked_hit
         if chosen is None:
             matches = target.get('matches') or {}
             if matches.get('desc'):
@@ -2666,8 +2679,9 @@ class RecordingSession(object):
             return {'ok': False, 'reason': 'not_found', 'desc': chosen['desc'],
                     'count': 0, 'items': [], 'active': 0}
         active = index if isinstance(index, int) else None
-        if active is None:
-            active = (target.get('chosen') or {}).get('index')
+        # 序号只跟着「真的采用的那条候选」走：旧选择被框架过滤掉时，它的 index 已经无意义。
+        if active is None and picked_hit is not None:
+            active = picked.get('index')
         if active is None:
             active = chosen.get('index')
         if not isinstance(active, int) or not 0 <= active < count:
