@@ -30,7 +30,7 @@ PW_SEMANTIC_KINDS = ('role', 'label', 'placeholder', 'role_bare', 'text', 'testi
 # rf_class_part 排在 rf_row_scoped 之后、rf_css 之前：class 名字是「标记语言里的命名」，
 # 比文本 xpath 弱（文本是用户看到的东西），但比 css 结构路径强得多——它不依赖元素在第几个位置。
 RF_KINDS = ('rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_id_loose',
-            'rf_xpath', 'rf_row_scoped', 'rf_class_part', 'rf_css')
+            'rf_xpath', 'rf_text_leaf', 'rf_row_scoped', 'rf_class_part', 'rf_css')
 RF_SEMANTIC_KINDS = ('rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_id_loose',
                      'rf_xpath', 'rf_class_part')
 # 排序优先级：Playwright 组在前，RF 组在后。rank() 给出的主定位只用于 Playwright 预览。
@@ -41,6 +41,11 @@ RF_PREFERENCE = RF_KINDS
 # （Playwright 的 text 引擎只命中最小元素，两侧计数会对不上）。
 TEXT_TAGS = ('button', 'a', 'label', 'span', 'li', 'td', 'th', 'option', 'p',
              'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'em')
+
+# Playwright 的文本引擎只命中「最小的那个元素」，div 不会像 RF 的 //div[...] 那样把祖先
+# 一起算进来，所以它的白名单就是 TEXT_TAGS 再多一个 div（div 的 RF 文本走 rf_text_leaf）。
+# 以前这里手写的 5 种标签漏了 li/td/p/…：可点的 li（菜单项）文字明明唯一，PW 却只能退 css。
+PW_TEXT_TAGS = TEXT_TAGS + ('div',)
 
 # 这些定位依赖页面结构（位置、顺序），结构一变就可能指向别的元素。
 # 只要唯一就接受（用户确认），但要标黄让用户看见。
@@ -415,7 +420,7 @@ def build_specs(snap):
         specs.append(_pw_spec('placeholder', 'get_by_placeholder', [snap['placeholder']],
                               {'exact': True}))
     text = snap.get('text')
-    if text and len(text) <= 40 and snap.get('tag') in ('button', 'a', 'label', 'span', 'div'):
+    if text and len(text) <= 40 and snap.get('tag') in PW_TEXT_TAGS:
         specs.append(_pw_spec('text', 'get_by_text', [text], {'exact': True}))
     if snap.get('css'):
         specs.append(_pw_spec('css', 'locator', [snap['css']]))
@@ -483,6 +488,15 @@ def build_specs(snap):
         if tag in TEXT_TAGS:
             expr = '//%s[normalize-space(.)=%s]' % (tag, _xpath_literal(text))
             specs.append(_spec('rf_xpath', 'locator', ['xpath=' + expr], 'rf xpath:' + expr))
+        elif tag:
+            # div / section 这类容器：直接写 //div[normalize-space(.)='X'] 会把祖先全算进来
+            # （一行文字的 div 按钮实测命中 4 个：自己 + 三层父容器），所以以前整类跳过，
+            # div 按钮只能掉到 rf_css。这里补一条「不能再有同标签后代文本也等于它」的约束，
+            # 只留最内层那一层：文字唯一时命中 1 个、且就是被点的那个；真有两处相同仍是 2 个，
+            # 不会把重复内容误判成唯一（实测见 test_recording_rf_text_leaf）。
+            leaf = 'normalize-space(.)=%s' % _xpath_literal(text)
+            expr = '//%s[%s][not(descendant::%s[%s])]' % (tag, leaf, tag, leaf)
+            specs.append(_spec('rf_text_leaf', 'locator', ['xpath=' + expr], 'rf text:' + text))
 
     if snap.get('css'):
         specs.append(_spec('rf_css', 'locator', ['css=' + snap['css']], 'rf css:' + snap['css']))

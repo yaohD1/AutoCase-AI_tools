@@ -73,6 +73,29 @@ def _ensure_dpi():
             pass
 
 
+def scale(hwnd=0):
+    """窗口所在显示器的缩放比（1.0 = 96 DPI）。
+
+    为什么需要它：面板要多宽得按「界面上的 CSS 宽」来定——iframe 嵌入模式里面板就是
+    600 CSS 宽，折成物理像素才能让两窗口并排看起来和嵌入模式一样宽。直接拿物理像素
+    当 CSS 用，在 175% 缩放的机器上面板会比嵌入模式窄掉将近一半。
+    """
+    if not _IS_WIN:
+        return 1.0
+    for name, args in (('GetDpiForWindow', (hwnd,)), ('GetDpiForSystem', ())):
+        if name == 'GetDpiForWindow' and not hwnd:
+            continue
+        try:
+            fn = getattr(_user32, name)
+            fn.restype = ctypes.c_uint
+            dpi = int(fn(*args))
+        except Exception:
+            continue
+        if dpi > 0:
+            return dpi / 96.0
+    return 1.0
+
+
 def window_rect(hwnd):
     """整个窗口矩形，含不可见的拉伸边框。给 SetWindowPos 用。"""
     if not _IS_WIN:
@@ -110,6 +133,102 @@ def move_visible(hwnd, left, top, width, height):
         return bool(_user32.SetWindowPos(
             hwnd, 0, int(left) + dx, int(top) + dy,
             int(width) + dw, int(height) + dh, SWP_NOZORDER | SWP_NOACTIVATE))
+    except Exception:
+        return False
+
+
+SW_HIDE = 0
+SW_SHOWNOACTIVATE = 4
+SW_SHOW = 5
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+
+
+def set_topmost(hwnd, on=True):
+    """把窗口钉在最上层。
+
+    悬浮面板必须置顶：浏览器最大化的那一刻会盖住它，用户以为面板没了，
+    实际上是躲到后面去了。关掉时显式取消置顶，别把一个看不见的状态留给下一个窗口。
+    """
+    if not _IS_WIN or not hwnd:
+        return False
+    try:
+        after = wintypes.HWND(HWND_TOPMOST if on else HWND_NOTOPMOST)
+        return bool(_user32.SetWindowPos(
+            hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
+    except Exception:
+        return False
+
+
+def show_window(hwnd, on=True):
+    """显示 / 隐藏窗口。收起面板用它——Chromium 窗口有最小尺寸（实测 240x72 会被
+    撑到 921x211），做不出真正的胶囊，只能把整个窗口收掉，由页面里的浮层接替。"""
+    if not _IS_WIN or not hwnd:
+        return False
+    try:
+        return bool(_user32.ShowWindow(hwnd, SW_SHOW if on else SW_HIDE))
+    except Exception:
+        return False
+
+
+def bring_to_top(hwnd):
+    """只把窗口提到同层最前，不改焦点。
+
+    面板用它：面板该看得见，但焦点要留给被测页面——用户启动录制后马上要在页面上操作。
+    """
+    if not _IS_WIN or not hwnd:
+        return False
+    try:
+        return bool(_user32.BringWindowToTop(hwnd))
+    except Exception:
+        return False
+
+
+def activate(hwnd):
+    """把窗口提到最前并激活。
+
+    `move_visible` 用的是 `SWP_NOZORDER | SWP_NOACTIVATE`——只摆坐标，不动层级。
+    桌面上只要有全屏窗口（编辑器、浏览器），刚启动的录制窗口就整个躺在它下面，
+    用户看不到、以为浏览器没打开（实测 WindowFromPoint 三个点全落回编辑器）。
+
+    只调 `SetWindowPos(HWND_TOP)` 不够：前台窗口随即会把它抢回去，
+    必须 `BringWindowToTop` + `SetForegroundWindow` 一起上（实测这条才生效）。
+
+    后者受 Windows 的「前台锁」限制：调用方不是当前前台进程时可能直接返回 0。
+    退路是临时 `AttachThreadInput` 挂到前台线程的输入队列上再设焦点，用完解掉。
+    """
+    if not _IS_WIN or not hwnd:
+        return False
+    try:
+        if _user32.IsIconic(hwnd):
+            _user32.ShowWindow(hwnd, SW_RESTORE)
+        _user32.BringWindowToTop(hwnd)
+        if _user32.SetForegroundWindow(hwnd):
+            return True
+        fg = _user32.GetForegroundWindow()
+        if not fg or fg == hwnd:
+            return fg == hwnd
+        current = ctypes.windll.kernel32.GetCurrentThreadId()
+        target = _user32.GetWindowThreadProcessId(fg, None)
+        attached = bool(target and target != current
+                        and _user32.AttachThreadInput(current, target, True))
+        try:
+            _user32.BringWindowToTop(hwnd)
+            return bool(_user32.SetForegroundWindow(hwnd))
+        finally:
+            if attached:
+                _user32.AttachThreadInput(current, target, False)
+    except Exception:
+        return False
+
+
+def is_visible(hwnd):
+    if not _IS_WIN or not hwnd:
+        return False
+    try:
+        return bool(_user32.IsWindowVisible(hwnd))
     except Exception:
         return False
 

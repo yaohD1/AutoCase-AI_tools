@@ -133,7 +133,8 @@ class StartRouteFallbackTest(unittest.TestCase):
         response, start = self._start('X-Frame-Options: SAMEORIGIN')
         self.assertEqual(response.status_code, 201)
         data = response.get_json()
-        self.assertIn('独立窗口', data['notice'])
+        self.assertIn('两个并排窗口', data['notice'])
+        self.assertIn('把手', data['notice'])
         self.assertIn('SAMEORIGIN', data['notice'])
         kwargs = start.call_args.kwargs
         self.assertIsNone(kwargs['embed_url'])

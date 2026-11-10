@@ -34,7 +34,8 @@ MAX_MAP_CHARS = 8000
 SKIP_DIRS = frozenset({
     'node_modules', '.git', '.svn', '.hg', '.idea', '.vscode', 'dist', 'build', 'out',
     'coverage', '.next', '.nuxt', 'target', '__pycache__', '.venv', 'venv',
-    'reports', 'test-results', 'playwright-report', 'allure-results', 'allure-report',
+    'reports', 'results', 'screenshots', 'screenshot', 'htmlcov', 'logs',
+    'test-results', 'playwright-report', 'allure-results', 'allure-report',
     'midscene_run', 'midscene_run_cache', '.playwright-mcp', '.cache', 'tmp', 'temp',
 })
 
@@ -46,40 +47,129 @@ NAMED_KEY_FILES = (
 # 这些后缀不算关键文件：产物与样式不该占名额。
 NOISE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp', '.css',
                   '.scss', '.less', '.lock', '.log', '.map', '.woff', '.woff2', '.ttf')
+# 扫描阶段就丢掉的后缀：不只是「不挑成关键文件」，而是连文件计数都不算。
+# 一个 8000 张截图的目录足以吃满 MAX_FILES，把后面的业务目录全挤出去；
+# 额度一旦被噪声占满，地图就只剩噪声。实测：加这份名单前，一个 Robot 项目
+# 只扫到 3 个目录（其中两个是 screenshots / libspecs），四个中文业务目录一个没进。
+SCAN_SKIP_SUFFIXES = frozenset(NOISE_SUFFIXES) | frozenset({
+    '.html', '.htm', '.xml', '.jsonl', '.zip', '.gz', '.7z', '.rar', '.exe', '.dll',
+    '.so', '.dylib', '.pyd', '.pyc', '.pyo', '.class', '.jar', '.whl', '.pdf',
+    '.xls', '.xlsx', '.doc', '.docx', '.ppt', '.pptx', '.mp4', '.mp3', '.avi', '.mov',
+    '.db', '.sqlite', '.sqlite3', '.bin', '.dat', '.pkl', '.npy', '.npz',
+})
+# 单个目录最多收多少条文件路径。不设的话，一个平铺上万文件的目录会一次吃光
+# MAX_FILES，同级的其它目录就永远排不进地图。
+PER_DIR_FILES = 120
+
+
+def _gitignore_rules(root):
+    """把根目录 .gitignore 里能读懂的规则翻成三份集合：目录名、后缀、路径前缀。
+
+    只做「跳过」，不做反向还原（`!important.log` 之类直接忽略）：地图少记一条无关紧要，
+    把作者明确排掉的东西又扫进来才是本末倒置。覆盖 `dir/`、`a/b`、`*.log`、
+    `output/*` 四种常见写法，复杂正则交给静态名单兜底。
+    """
+    dirs, suffixes, prefixes = set(), set(), set()
+    try:
+        text = (Path(root) / '.gitignore').read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return dirs, suffixes, prefixes
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#') or line.startswith('!'):
+            continue
+        line = line.replace(chr(92), '/').strip('/')
+        if not line or line in ('*', '**') or line.startswith('..'):
+            continue
+        if line.startswith('*.'):
+            suffixes.add(line[1:].lower())
+            continue
+        if '*' in line or '?' in line:
+            head = line.split('*')[0].split('?')[0].strip('/')
+            if head and not any(ch in head for ch in '[]'):
+                prefixes.add(head.lower())
+            continue
+        if '/' in line:
+            prefixes.add(line.lower())
+        else:
+            dirs.add(line.lower())
+    return dirs, suffixes, prefixes
+
+
+def _pick_dirs(raw):
+    """从扫到的目录里挑出要写进地图的那批。
+
+    顶层结构永远保留——一级目录就是「这个项目有什么」；更深的只留有代码文件的，
+    空目录对写手没有信息量。超上限时按「文件多的优先」，否则深层业务目录会被
+    字典序靠前的无关目录挤掉：中文目录名恰好排在最后，最容易受害。
+    """
+    top = [item for item in raw if item['depth'] <= 1]
+    deep = [item for item in raw if item['depth'] > 1 and item.get('files')]
+    if len(top) + len(deep) > MAX_DIRS:
+        room = max(0, MAX_DIRS - len(top))
+        deep = sorted(deep, key=lambda d: (-d['files'], d['depth'], d['path']))[:room]
+    keep = top + deep
+    keep.sort(key=lambda d: (d['depth'], d['path']))
+    return keep
 
 
 def scan(root):
-    """扫目录：两层目录 + 每层直接子文件数 + 三层以内的文件路径（用于挑关键文件）。
+    """扫目录：三层目录 + 每层直接子文件数 + 四层以内的文件路径（用于挑关键文件）。
 
-    不读文件内容，所以对任何大小的工作区都是几十毫秒级。
+    不读文件内容，所以对任何大小的工作区都是几十毫秒级。三条保护都为了「别让噪声吃掉额度」：
+    跳过名单合并项目自己的 .gitignore；文件计数只算代码类文件；每个目录最多贡献 PER_DIR_FILES 条。
     """
     root = Path(root)
+    git_dirs, git_suffixes, git_prefixes = _gitignore_rules(root)
+    skip_dirs = SKIP_DIRS | git_dirs
     dirs, files = [], []
     total = 0
+
+    def ignored(rel_path, name):
+        if Path(name).suffix.lower() in git_suffixes:
+            return True
+        lowered = rel_path.lower()
+        return any(lowered == prefix or lowered.startswith(prefix + '/')
+                   for prefix in git_prefixes)
+
     try:
         walker = os.walk(root)
         for current, dirnames, filenames in walker:
             rel = Path(current).relative_to(root)
             parts = () if str(rel) == '.' else rel.parts
             depth = len(parts)
-            # 剪枝：跳过依赖/产物，也别进隐藏目录（.autocase 是我们自己的东西）。
-            dirnames[:] = sorted(d for d in dirnames
-                                 if d not in SKIP_DIRS and not d.startswith('.'))
+            base = '/'.join(parts)
+            # 剪枝：跳过依赖/产物/项目自己声明的忽略项，也别进隐藏目录
+            #（.autocase 是我们自己的东西）。
+            dirnames[:] = sorted(
+                d for d in dirnames
+                if d.lower() not in skip_dirs and not d.startswith('.')
+                and not ignored(('%s/%s' % (base, d)).strip('/'), d)
+            )
             # 隐藏文件一律不进地图，除了 .env.example 这种「只有结构没有凭据」的样例。
-            here = [f for f in filenames if not f.startswith('.') or f in NAMED_KEY_FILES]
+            here = []
+            for name in filenames:
+                if name.startswith('.') and name not in NAMED_KEY_FILES:
+                    continue
+                if Path(name).suffix.lower() in SCAN_SKIP_SUFFIXES:
+                    continue
+                if ignored(('%s/%s' % (base, name)).strip('/'), name):
+                    continue
+                here.append(name)
             total += len(here)
             if depth <= SCAN_DEPTH:
-                dirs.append({'path': '/'.join(parts), 'depth': depth,
+                dirs.append({'path': base, 'depth': depth,
                              'name': parts[-1] if parts else '', 'files': len(here)})
             if depth <= SCAN_DEPTH + 1:
-                files.extend('/'.join(parts + (name,)) for name in here)
+                files.extend('/'.join(parts + (name,)) for name in here[:PER_DIR_FILES])
             if depth >= SCAN_DEPTH + 1:
                 dirnames[:] = []
-            if len(dirs) >= MAX_DIRS or len(files) >= MAX_FILES:
+            # 单目录限额已经挡住「一个目录吃满」，这里只做极端情况的兜底。
+            if len(dirs) >= MAX_DIRS * 4 or len(files) >= MAX_FILES:
                 break
     except OSError as exc:
         logger.info('项目地图扫描中断：%s', exc)
-    return {'dirs': dirs, 'files': files, 'total': total}
+    return {'dirs': _pick_dirs(dirs), 'files': files, 'total': total}
 
 
 def _score(path):
@@ -274,11 +364,12 @@ def structure_signature(root):
         entries = sorted(os.scandir(root), key=lambda e: e.name)
     except OSError:
         return ''
+    skip_dirs = SKIP_DIRS | _gitignore_rules(root)[0]
     for entry in entries:
         if entry.name.startswith('.') and entry.name != '.env.example':
             continue
         if entry.is_dir():
-            if entry.name in SKIP_DIRS:
+            if entry.name.lower() in skip_dirs:
                 continue
             try:
                 count = sum(1 for _ in os.scandir(entry.path))

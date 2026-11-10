@@ -90,8 +90,9 @@ def start_recording():
             base_url, shell_origin=current_app.config.get('RECORDING_PANEL_URL'))
         if blocked:
             layout = 'split'
-            notice = ('被测系统禁止被 iframe 嵌入（%s），已改用独立窗口：'
-                      '被测页面在浏览器主窗口，编排面板在另一个窗口。' % blocked)
+            notice = ('被测系统禁止被 iframe 嵌入（%s），已改用两个并排窗口：'
+                      '被测页面在左、编排面板在右（面板可收起，收起后屏幕右缘留一条把手）。'
+                      % blocked)
     try:
         session = RecordingSession.start_new(
             base_url,
@@ -99,6 +100,10 @@ def start_recording():
             embed_url=_embed_url(body, base_url) if layout == 'embed' else None,
             panel_url=_panel_url(body, base_url) if layout == 'split' else None,
             panel_ratio=current_app.config.get('RECORDING_PANEL_RATIO', 0.45),
+            panel_float=bool(current_app.config.get('RECORDING_PANEL_FLOAT', False)),
+            # 宽度跟着前端走：嵌入模式那块面板当前用多宽（localStorage 记忆值），
+            # 并排的窗口就用多宽，两种布局看到的面板尺寸才一样。
+            panel_width=_panel_width(body) or current_app.config.get('RECORDING_PANEL_WIDTH', 520),
             hud_panel=bool(current_app.config.get('RECORDING_HUD_PANEL', False)),
             # 断言解析器：录制一开始就在后台起并预热，开始录制时选的模型先用来热身。
             ask_model=body.get('model'),
@@ -162,6 +167,51 @@ def _panel_url(body, base_url):
     params = {'panel': '1', 'base_url': base_url}
     params.update(_prefill(body))
     return _frontend_url(params)
+
+
+def _panel_width(body):
+    """前端带上来的面板宽度（CSS 像素）。超出范围就当作没传，用配置兜底。"""
+    try:
+        value = int(body.get('panel_width') or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if 320 <= value <= 900 else None
+
+
+@recording_bp.route('/automation/recording/panel/mode', methods=['POST'])
+def set_panel_mode():
+    """展开 / 收起面板窗口。
+
+    收起是「把整扇窗口挪到屏幕右缘外，只留一条把手」而不是缩小：Chromium 有最小
+    窗口尺寸（实测 514 CSS），缩不出胶囊。把手就是面板自己被裁剩的那一条，点它展开。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        result = session.set_panel_mode(body.get('mode'))
+    except RecordingError as exc:
+        return _error(str(exc), 409)
+    return jsonify(result), 200
+
+
+@recording_bp.route('/automation/recording/panel/width', methods=['POST'])
+def set_panel_width():
+    """改面板宽度（CSS 像素）。
+
+    嵌入模式改宽度是前端自己改 CSS；并排模式那扇窗口在前端够不着的地方，
+    只能回过头来让后端重摆——「收起行 / 展开行」两边都要跟着变，才叫一致。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        result = session.set_panel_width(body.get('width'))
+    except RecordingError as exc:
+        return _error(str(exc), 409)
+    return jsonify(result), 200
 
 
 @recording_bp.route('/automation/recording/panel/sheet', methods=['POST'])

@@ -59,9 +59,17 @@ class Config:
     RECORDING_LAYOUT = (os.environ.get('RECORDING_LAYOUT') or 'embed').strip().lower()
     # 编排面板/外壳页地址（前端录制页）；embed 模式会带上 embed=1&target=...
     RECORDING_PANEL_URL = os.environ.get('RECORDING_PANEL_URL') or 'http://localhost:5173/recording'
-    # 面板占屏幕宽度的比例（仅 split 模式用；单屏 55/45 传 0.45）。
+    # 面板占屏幕宽度的比例（只在悬浮模式摆不动、退回 CDP 兜底分屏时才用）。
     RECORDING_PANEL_RATIO = _ratio_env('RECORDING_PANEL_RATIO', 0.45, 0.25, 0.7)
-    # 被录制页面内的悬浮面板：默认关闭，只保留操作点的即时徽标。
+    # 悬浮面板：页面占满整屏，面板作为置顶窄条浮在右侧。
+    # 默认关：面板压在页面上，页面右侧一截看不见，用起来两边都不舒服；
+    # 并排（页面 63% / 面板 37%）页面完整可见，占比和嵌入模式一致。
+    RECORDING_PANEL_FLOAT = _bool_env('RECORDING_PANEL_FLOAT', False)
+    # 面板宽度，**CSS 像素**（和嵌入模式那块面板同口径，摆窗口时按缩放比折成物理像素）。
+    # 520 在 175% 缩放的屏上折成 954 物理，正好是 Chromium 允许的最窄窗口（实测 514 CSS）。
+    RECORDING_PANEL_WIDTH = _positive_int_env('RECORDING_PANEL_WIDTH', 520, 320)
+    # 被录制页面内的浮层：默认关。面板本身就是常驻的，页面里再浮一张卡片只是把同样的信息说两遍，
+    # 还挡住被测页面右下角。嵌入模式同样不注入（同一个窗口里重复）。
     RECORDING_HUD_PANEL = _bool_env('RECORDING_HUD_PANEL', False)
     
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024

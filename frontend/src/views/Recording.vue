@@ -1,5 +1,14 @@
 <template>
-  <div :class="['recording-page', 'ui-buttons', { 'is-panel': panelMode, 'is-embed': embedMode, 'is-collapsed': panelCollapsed, 'is-lean': stepsCollapsed, 'is-resizing': resizing }]">
+  <div :class="['recording-page', 'ui-buttons', { 'is-panel': panelMode, 'is-embed': embedMode, 'is-collapsed': panelCollapsed, 'is-lean': stepsCollapsed, 'is-resizing': resizing, 'is-handle': panelHandle }]">
+    <!-- 收起态：整扇窗口被挪到屏幕右缘外，只剩最左边 36 CSS 露在屏幕上，就是这块把手。
+         窗口本身缩不到这么窄（Chromium 最小 514 CSS 宽），所以把手是「窗口被裁剩的那条」，
+         宽度必须和屏幕露出的部分对上，否则会露出半截正常界面。 -->
+    <button v-if="panelHandle" type="button" class="panel-handle embed-rail" title="展开编排面板" @click="expandPanel">
+      <span class="rail-caret">‹</span>
+      <span class="rail-count">{{ steps.length }}</span>
+      <span :class="['rail-dot', { live: isRecording }]"></span>
+    </button>
+
     <!-- 嵌入模式：左 iframe 是被测系统（占用剩余全部宽度），右侧是可收起的编排面板 -->
     <iframe v-if="embedMode" class="embed-frame" :src="targetUrl" title="被测系统"></iframe>
 
@@ -166,13 +175,50 @@
       <!-- 面板窗口（录制时自动弹出的右侧编排栏）：紧凑标题条，把空间都留给步骤 -->
       <div v-if="compactMode" class="panel-head">
         <span :class="['panel-dot', session && session.status === 'recording' ? (paused ? 'is-paused' : 'is-live') : '']"></span>
-        <span class="panel-title">{{ panelTitle }}</span>
+        <span class="panel-title" :title="panelTitle">{{ panelState }}</span>
         <span v-if="steps.length" class="panel-count">{{ steps.length }} 步</span>
+        <!-- 待确认数量放标题条：它决定「现在能不能生成」，比步数更该先看到 -->
+        <span v-if="reviewCount" class="panel-pending" :title="`${reviewCount} 步定位还没确认（不唯一或只有结构定位），生成前要逐条定下来`">{{ reviewCount }} 待确认</span>
         <div class="panel-actions">
-          <el-button text size="small" @click="configExpanded = !configExpanded">{{ configExpanded ? '收起配置' : '配置' }}</el-button>
-          <button v-if="embedMode" type="button" class="panel-collapse" title="收起面板，把宽度还给页面" @click="panelCollapsed = true">
-            <span class="collapse-arrow">›</span>
-          </button>
+          <!-- 头部只放「现在对浏览器做什么」，且一律图标 + tooltip。420px 以下文字按钮会被压成竖排
+               （实测 320px 时「录制中」只剩 20px 宽、一个字一行）。拾取 / 配置 / 关浏览器频率低，
+               收进「更多」；「收起面板」在关掉页内浮层后没有恢复入口，所以不再提供。 -->
+          <template v-if="panelFloat">
+            <button v-if="isRecording" type="button" class="panel-icon" :class="{ 'is-on': paused }"
+                    :title="paused ? '继续把操作记录为步骤' : '浏览器照常可用，但操作不再记为步骤'"
+                    @click="togglePause">
+              <el-icon><VideoPlay v-if="paused" /><VideoPause v-else /></el-icon>
+            </button>
+            <button v-if="isRecording" type="button" class="panel-icon is-stop" :disabled="stopping"
+                    title="停止录制，步骤保留；浏览器不会关" @click="stopRecording">
+              <span class="rec-stop" aria-hidden="true"></span>
+            </button>
+            <el-dropdown trigger="click" placement="bottom-end" @command="onPanelMenu">
+              <button type="button" class="panel-icon" title="更多：拾取元素 / 配置 / 关闭浏览器">
+                <span class="panel-more" aria-hidden="true"><i></i><i></i><i></i></span>
+              </button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="pick" :disabled="!canInspect">{{ picking ? '退出拾取' : '拾取元素' }}</el-dropdown-item>
+                  <el-dropdown-item command="config">{{ configExpanded ? '收起配置' : '配置' }}</el-dropdown-item>
+                  <el-dropdown-item v-if="canCloseBrowser" command="close" :disabled="closingBrowser" divided>关闭浏览器</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </template>
+          <template v-else>
+            <el-button text size="small" @click="configExpanded = !configExpanded">{{ configExpanded ? '收起配置' : '配置' }}</el-button>
+            <!-- 两种布局都能收起：嵌入模式收的是自己那一栏（宽度还给 iframe，同窗可见）；
+                 独立面板窗口收的是整扇窗口，只留屏幕右缘一条 36 CSS 的把手，点它再叫回来。
+                 注意这跟步骤区那颗「展开 / 收起」不是一回事——那颗已按用户要求删掉。
+                 -->
+            <button v-if="embedMode" type="button" class="panel-collapse" title="收起面板，把宽度还给页面" @click="panelCollapsed = true">
+              <span class="collapse-arrow">›</span>
+            </button>
+            <button v-else type="button" class="panel-collapse" title="收起面板：整扇窗口挪到屏幕右缘外，只留一条把手" @click="collapsePanel">
+              <span class="collapse-arrow">›</span>
+            </button>
+          </template>
         </div>
       </div>
 
@@ -304,7 +350,7 @@
               </div>
               <div class="cfg-view is-static">
                 <span :class="['cfg-chip', memoryChip.tone]">{{ memoryChip.text }}</span>
-                <span class="cfg-mem-hint">{{ memoryChip.hint }}</span>
+                <span class="cfg-mem-hint" :title="memoryChip.hint">{{ memoryChip.hint }}</span>
               </div>
               <details v-if="memoryMap || memoryFacts.length" class="cfg-details">
                 <summary>{{ memoryMap ? '项目地图' : '已经学到什么' }}</summary>
@@ -448,16 +494,6 @@
             <span class="card-title">录制步骤</span>
             <div class="steps-head-right">
               <span :class="['state-pill', 'state-' + (session ? session.status : 'idle')]">{{ stateLabel }}</span>
-              <el-button
-                v-if="compactMode"
-                text
-                class="steps-collapse-btn"
-                :icon="stepsCollapsed ? Expand : Fold"
-                :title="stepsCollapsed ? '展开：恢复上移 / 下移（删除一直在），面板回到原来的宽度' : '收起：精简步骤行，只留拖拽排序、铅笔编辑与删除'"
-                @click="toggleStepsCollapsed"
-              >
-                {{ stepsCollapsed ? '展开' : '收起' }}
-              </el-button>
             </div>
           </div>
         </template>
@@ -466,19 +502,57 @@
              组本身是一块浅色底，按钮常态无边框，悬停才浮起——少一档样式，视觉就不会碎。 -->
         <!-- 首屏还没有会话时，这一排全是禁用按钮：不显示，注意力留给页头的「配置」。
              面板/嵌入模式靠工具栏开始，所以那里始终保留。 -->
-        <div v-if="compactMode || session || steps.length" :class="['toolbar', { 'is-lean': stepsCollapsed }]">
+        <!-- 工具栏在面板 / 嵌入模式下一律用紧凑形态（is-lean）：三列网格、按钮小一号。
+             以前它跟着「展开 / 收起」走，那颗按钮删掉后工具栏会变回松散的展开形态，
+             同一块面板凭空胖一圈（用户实测「不行」）。现在工具栏和步骤行彻底解耦：
+             工具栏恒紧凑，步骤行恒完整。 -->
+        <div v-if="compactMode || session || steps.length" :class="['toolbar', { 'is-lean': compactMode }]">
+
+          <!-- 面板模式：工具栏只占一行 4 格。六个功能里「等待加载 / 固定等待」合成一个「等待」，
+               封装与动作库收进「更多」——420px 下六个文字按钮排两行会白吃掉步骤区 30px，
+               而它们在录制过程中都不是高频操作。 -->
+          <template v-if="panelFloat">
+            <el-button v-if="!isRecording && !steps.length" class="lean-wide" type="primary"
+                       :icon="VideoCamera" :loading="booting" @click="onStartClick">开始录制</el-button>
+            <div v-else class="panel-tools">
+              <button type="button" class="panel-tool" :disabled="!canEdit" @click="insertReload()"
+                      title="插入一步「刷新页面」，并真的刷新浏览器（在浏览器里按 F5 不会被录制）">刷新</button>
+              <button type="button" class="panel-tool" :disabled="!canEdit" @click="openDraft('assert')"
+                      title="插入一步：判断页面上的某个状态是否成立">断言</button>
+              <el-dropdown trigger="click" placement="bottom-start" :disabled="!canEdit" @command="openDraft">
+                <button type="button" class="panel-tool" :disabled="!canEdit" title="等待加载（推荐）/ 固定等待">等待</button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="ready">等待加载</el-dropdown-item>
+                    <el-dropdown-item command="sleep">固定等待</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              <el-dropdown trigger="click" placement="bottom-end" @command="onPanelTool">
+                <button type="button" class="panel-tool" title="封装 / 动作库 / 关闭浏览器">更多</button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="pack" :disabled="!canEdit || !steps.length">{{ selectMode ? '取消封装' : '封装选中的步骤' }}</el-dropdown-item>
+                    <el-dropdown-item command="library" :disabled="!steps.length">动作库</el-dropdown-item>
+                    <el-dropdown-item v-if="canCloseBrowser" command="close" :disabled="closingBrowser" divided>关闭浏览器</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </template>
+          <template v-else>
           <div class="toolbar-group">
             <!-- 录制 / 拾取 / 关闭浏览器：这一组都不改步骤，改的是浏览器状态 -->
             <!-- 首屏（还没有步骤）把主行动放在配置抽屉末尾，这里就不再重复一个「开始」；
                  面板/嵌入模式没有完整配置卡，仍由工具栏承担。 -->
-            <el-button v-if="!isRecording && (steps.length || compactMode)" class="lean-wide" type="primary" :icon="VideoCamera" :loading="starting" @click="onStartClick">开始</el-button>
+            <el-button v-if="!isRecording && (steps.length || compactMode)" class="lean-wide" type="primary" :icon="VideoCamera" :loading="booting" @click="onStartClick">开始</el-button>
             <!-- 停止用实心红 + 白色方块，这是录制的通用记号；暂停/继续用浅色描边，避免两个重色按钮打架。
                  条件必须写全：上面那个「开始」在首屏是隐藏的，用 v-else 会让「停止」接在隐藏分支上。 -->
-            <el-button v-else-if="isRecording" type="danger" :loading="stopping" title="停止录制，步骤保留；浏览器不会关" @click="stopRecording">
+            <el-button v-else-if="isRecording && !panelFloat" type="danger" :loading="stopping" title="停止录制，步骤保留；浏览器不会关" @click="stopRecording">
               <span class="rec-stop" aria-hidden="true"></span>停止
             </el-button>
             <el-button
-              v-if="isRecording"
+              v-if="isRecording && !panelFloat"
               :type="paused ? 'success' : 'default'"
               :plain="paused"
               :icon="paused ? VideoPlay : VideoPause"
@@ -490,6 +564,7 @@
             </el-button>
             <!-- 停止后浏览器不关，所以拾取与验证仍然可用；关掉窗口才真正结束 -->
             <el-button
+              v-if="!panelFloat"
               :type="picking ? 'warning' : 'default'"
               :plain="picking"
               :icon="Aim"
@@ -572,6 +647,7 @@
               </div>
             </el-popover>
           </div>
+          </template>
         </div>
 
         <!-- 断言解析器：录制一开始就在后台起进程并预热。状态放这一行，
@@ -598,7 +674,14 @@
 
         <div v-if="!steps.length && !draft" :class="['steps-empty', { 'is-roomy': !compactMode }]">
           <span class="steps-empty-dot"></span>
-          <span v-if="compactMode">还没有步骤 · 点「开始」后，在弹出的浏览器里操作</span>
+          <!-- 启动那两三秒：轮询已经能拿到新会话（status=starting），但步骤还没落地。
+               以前这里照旧渲染「还没有步骤 → 配置并开始录制」，看着像没反应、甚至像没配置，
+               用户会再点一次（第二次撞 409）。启动期换成一句明确的话。 -->
+          <span v-if="compactMode">{{ booting ? '正在打开浏览器…' : '还没有步骤 · 点「开始」后，在弹出的浏览器里操作' }}</span>
+          <template v-else-if="booting">
+            <div class="steps-empty-title">正在打开浏览器…</div>
+            <div class="steps-empty-sub">录制窗口正在启动，几秒后就能在页面上操作。如果桌面上没看到它，多半是被别的窗口挡住了 —— 点一下任务栏上的浏览器图标就会到前面来。</div>
+          </template>
           <template v-else>
             <div class="steps-empty-title">还没有步骤</div>
             <div class="steps-empty-sub">先在右上角「配置」里填好起始地址和工作区。点「开始录制」会在独立窗口打开被测页面，你在页面上点过、输入过的内容会一条条出现在这里。</div>
@@ -714,8 +797,11 @@
                     <!-- 带等待的断言和立即断言在列表里必须一眼分得开，加个小钟做标识 -->
                     <el-icon v-if="step.type === 'wait'" class="kind-icon"><Timer /></el-icon>{{ stepKindLabel(step.type) }}
                   </span>
-                  <span class="step-text">{{ stepDescription(step) }}</span>
+                  <span class="step-text">{{ compactMode ? panelStepText(step) : stepDescription(step) }}</span>
                 </div>
+                <!-- 面板窄：goto 的地址单独一行等宽小字。挤在同一行时它会被省略成「打开 https:」，
+                     而地址恰恰是这一步最该看清的东西。 -->
+                <div v-if="compactMode && step.type === 'goto' && step.url" class="step-url" :title="step.url">{{ step.url }}</div>
                 <!-- 调用卡：把这次调用的实参摊开。不同调用点通常只差这一两个值，
                      不显示的话用户得逐个点开才发现「这里传的还是 admin」。 -->
                 <div v-if="step.type === 'call'" class="call-args">
@@ -1724,7 +1810,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Expand, Files, Fold, FolderOpened, Loading, Plus, Refresh, Search, Setting, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Files, FolderOpened, Loading, Plus, Refresh, Search, Setting, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -1783,7 +1869,7 @@ const PW_ORDER = ['testid', 'role', 'row_scoped', 'label', 'placeholder', 'role_
 // name / aria / label，但排在文本 xpath 之前——id 是元素身份，比文本匹配更接近元素本身。
 // rf_class_part 是 class 里剥掉构建哈希的名字（_itemMenu_）：比文本弱，但比 css 结构路径强。
 const RF_ORDER = ['rf_testid', 'rf_id', 'rf_name', 'rf_aria', 'rf_label', 'rf_id_loose',
-  'rf_xpath', 'rf_row_scoped', 'rf_class_part', 'rf_css']
+  'rf_xpath', 'rf_text_leaf', 'rf_row_scoped', 'rf_class_part', 'rf_css']
 const FRAGILE_KINDS = ['css', 'rf_css']
 
 const config = reactive(loadConfig())
@@ -1819,6 +1905,14 @@ const route = useRoute()
 const panelMode = computed(() => route.query.panel === '1')
 const embedMode = computed(() => route.query.embed === '1')
 const compactMode = computed(() => panelMode.value || embedMode.value)
+// 悬浮面板：被测页面占满整屏，本窗口作为置顶窄条浮在右侧。
+// 只有「独立面板窗口 + 后端确认走悬浮」时才成立；嵌入模式仍是同一个窗口里的分栏。
+const panelFloat = computed(() => panelMode.value && !!(session.value && session.value.panel_float))
+// 收起态：后端把整扇面板窗口挪到屏幕右缘外，只剩 36 CSS 露在屏上，那一条就是把手。
+// 以后端为准（snapshot.panel_hidden），本地只做即时反馈——点完不必等下一次轮询才变窄。
+const panelHidden = ref(false)
+const panelHandle = computed(() => panelMode.value && panelHidden.value)
+
 // 并排时两个窗口的标题栏是唯一能分清「哪扇是面板」的地方：被测那扇叫目标站的名字，
 // 长得又都是 Chromium，不区分的话 Alt+Tab 全靠猜。
 watch([panelMode, embedMode], ([panel, embed]) => {
@@ -1827,6 +1921,13 @@ watch([panelMode, embedMode], ([panel, embed]) => {
 }, { immediate: true })
 const targetUrl = computed(() => (typeof route.query.target === 'string' ? route.query.target : ''))
 const configExpanded = ref(false)
+// 标题条只放状态词：窄面板里「录制中 · 192.168.123.135」会被挤成两行，完整标题留给 title。
+const panelState = computed(() => {
+  if (!compactMode.value) return ''
+  if (paused.value && isRecording.value) return '已暂停'
+  return STATE_LABELS[session.value?.status || 'idle'] || '录制'
+})
+
 const panelTitle = computed(() => {
   if (!compactMode.value) return ''
   const base = paused.value && isRecording.value
@@ -1841,38 +1942,25 @@ const detecting = ref(false)
 const showAdvanced = ref(false)
 
 // 面板宽度可拖拽调整；收起后 left iframe 吃掉几乎整个窗口。
-const PANEL_WIDTH_KEY = 'autocase.recording.panelWidth'
+// 键带 v2：v1 里存的是 686（用户按老口径拖出来的），并排后占 47% 太宽；
+// 换键让新默认 520 立刻生效，不用让用户自己去清 localStorage。
+const PANEL_WIDTH_KEY = 'autocase.recording.panelWidth.v2'
+const TALL_PANEL_WIDTH = 520
 const panelCollapsed = ref(false)
 const panelWidth = ref(loadPanelWidth())
 const resizing = ref(false)
 
-// 「收起」：精简步骤行（只留拖拽排序、铅笔编辑与删除）并把面板一键收窄，替代手动拖动分栏。
-// 默认就是收起——实测窄面板 + 精简行最好用；需要上移 / 下移再点「展开」。
-// 独立页面（/recording）没有这个开关，保持展开。
-const LEAN_PANEL_WIDTH = 420
-const stepsCollapsed = ref(compactMode.value)
-let widthBeforeLean = 0
+// 步骤行一律完整显示：拖拽、铅笔、上移、下移、删除全在。
+// 标题右侧那颗「展开 / 收起」按钮已经删掉——它把上移 / 下移藏起来换 30px 高度，
+// 用户反而以为这两个功能被删了（实测反馈原话：「上移下移早都去掉了吗」）。
+// 面板宽度也不再跟着它联动，一律按 panelWidth（默认 520）走。
+// stepsCollapsed 保留成恒 false 的开关位：模板里的 .is-lean / .step-actions-extra.is-off
+// 两道样式不用动，将来要恢复行精简只改这一行。
+const stepsCollapsed = ref(false)
 
+// 面板最宽 900，同时保证被测页面至少还剩 900（页面优先，面板让位）。
 function maxPanelWidth() {
   return Math.max(340, Math.min(900, window.innerWidth - 900))
-}
-
-// 默认收起时面板也按收起的宽度打开：只收行不收宽度，和按钮上说的「面板变窄」不一致。
-if (stepsCollapsed.value && embedMode.value) {
-  widthBeforeLean = panelWidth.value
-  panelWidth.value = Math.min(panelWidth.value, LEAN_PANEL_WIDTH, maxPanelWidth())
-}
-
-function toggleStepsCollapsed() {
-  stepsCollapsed.value = !stepsCollapsed.value
-  if (!embedMode.value) return
-  if (stepsCollapsed.value) {
-    widthBeforeLean = panelWidth.value
-    // 只收不放：本来就比 420 窄的话保持原宽，不能因为「收起」反而变宽。
-    panelWidth.value = Math.min(panelWidth.value, LEAN_PANEL_WIDTH, maxPanelWidth())
-  } else {
-    panelWidth.value = Math.min(widthBeforeLean || 600, maxPanelWidth())
-  }
 }
 
 function loadPanelWidth() {
@@ -1882,11 +1970,11 @@ function loadPanelWidth() {
   } catch {
     // 隐私模式下读不到，用默认值。
   }
-  return 600
+  return TALL_PANEL_WIDTH
 }
 
 function startResize(event) {
-  // 收起时不允许拖拽：宽度由「收起 / 展开」控制，避免拖到一半元素被挤变形。
+  // 行精简态不允许拖拽（现在恒展开，留着防回归）：那种宽度由开关控制，拖到一半元素会被挤变形。
   if (stepsCollapsed.value) return
   event.preventDefault()
   const handle = event.currentTarget
@@ -2088,6 +2176,9 @@ watch(() => config.framework, (next) => {
 
 // ---- 会话状态 ----
 const isRecording = computed(() => session.value?.status === 'recording')
+// 启动中：本地请求还没回来，或者后端会话已经建好但浏览器还在拉起来（轮询拿到的 starting）。
+// 两种都算「正在打开」，界面提示和按钮转圈都认它，否则那几秒看着像什么都没发生。
+const booting = computed(() => starting.value || session.value?.status === 'starting')
 const isStopped = computed(() => ['stopped', 'idle_timeout', 'closed'].includes(session.value?.status))
 const canEdit = computed(() => isRecording.value || isStopped.value)
 // 浏览器只在停止后才关闭（或用户手动关），所以「拾取 / 验证」的可用性跟浏览器走，不跟录制状态走。
@@ -2304,6 +2395,8 @@ function applySession(data) {
   // 新步骤落地的那一轮就检查定位：录得快时，等回到列表再点准星，页面早不是当时的样子了。
   const fresh = freshSteps(data.steps)
   session.value = data
+  // 收起 / 展开是后端摆窗口的结果，别的窗口（页内浮层、另一个标签页）点了也要跟着变。
+  panelHidden.value = !!data.panel_hidden
   // 任务书存在服务端（随 /current 一起回来）：刷新页面、换到另一个窗口都能接着执行，
   // 不用重新规划——重规划意味着模型要重新读一遍项目。本地已有就不覆盖（可能刚改过路径）。
   const savedPlan = data.emit && data.emit.plan
@@ -2535,7 +2628,10 @@ function needsLocConfirm(step) {
   // 已经亲手确认过的步骤不再打扰。
   if (chosenOf(target)) return false
   const status = effectiveStatus(step)
-  if (status !== 'ambiguous' && status !== 'suspect') return false
+  // fragile = 页面上有多个同名元素，当前框架只能退回结构路径（css）才唯一。
+  // 这类步骤生成时靠「层级里的第 N 个」取元素，页面一改版就点错，正是「事后回列表
+  // 再框已经框错了」的主要来源（典型：点删除，这一行连同按钮一起消失），必须当场选。
+  if (status !== 'ambiguous' && status !== 'suspect' && status !== 'fragile') return false
   // 有「按下鼠标那一刻」的截图：页面跑没跑、元素有没有被这一下点击带走，都不影响在图上选。
   if (target.shot) return true
   // 没图就只能靠实时框选，那几种情况框出来是错的（页面已翻走 / 元素已被点走），不弹。
@@ -3093,7 +3189,10 @@ async function startRecording() {
       // target_path 可以留空：停止录制后由任务书按项目约定定位置。
       target_path: config.targetPath.trim(),
       title: config.title.trim(),
-      python: (config.python || '').trim()
+      python: (config.python || '').trim(),
+      // 并排窗口的宽度跟嵌入模式那块面板取同一个值（localStorage 记忆）。
+      // 这里带的是「当前实际宽度」：收起行时就是 420，展开时是记忆值。
+      panel_width: panelWidth.value
     })
     draft.value = null
     applySession(data)
@@ -3775,6 +3874,46 @@ async function closeBrowser() {
   }
 }
 
+// 顶部「更多」：拾取 / 配置 / 关浏览器。都是低频动作，占着标题条只会把状态挤到换行。
+function onPanelMenu(command) {
+  if (command === 'pick') return togglePick(!picking.value)
+  if (command === 'config') {
+    configExpanded.value = !configExpanded.value
+    return
+  }
+  if (command === 'close') return closeBrowser()
+}
+
+// 工具行「更多」：封装 / 动作库 / 关浏览器。动作库复用同一个 popover，不另起一套 UI。
+function onPanelTool(command) {
+  if (command === 'pack') return toggleSelectMode()
+  if (command === 'library') {
+    actionLib.open = true
+    return
+  }
+  if (command === 'close') return closeBrowser()
+}
+
+// 收起 / 展开：后端负责把整扇面板窗口挪出屏幕右缘或摆回并排，前端只跟结果。
+// 收起后屏幕上只剩最右边一条 36 CSS 的把手（见 .panel-handle），点它走 expandPanel。
+async function collapsePanel() {
+  try {
+    const { data } = await api.setRecordingPanelMode('hidden')
+    panelHidden.value = !!(data && data.panel_hidden)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+async function expandPanel() {
+  try {
+    const { data } = await api.setRecordingPanelMode('expanded')
+    panelHidden.value = !!(data && data.panel_hidden)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
 // 行内「+」的四个入口：刷新走独立通道，其余三种打开草稿卡。
 function onInsertCommand(kind, afterNo) {
   if (kind === 'reload') return insertReload(afterNo)
@@ -3944,6 +4083,12 @@ function navPath(url) {
   } catch {
     return url || ''
   }
+}
+
+// 面板窄：goto 的地址放到第二行，标题行不再重复一遍「打开 + 地址」。
+function panelStepText(step) {
+  if (step.type === 'goto' && step.url) return ''
+  return stepDescription(step)
 }
 
 function stepDescription(step) {
@@ -4153,7 +4298,7 @@ const memoryChip = computed(() => {
     return { text: '学习中', tone: '', hint: '正在读项目，通常录完就绪' }
   }
   if (data.status === 'failed') {
-    return { text: '没学成', tone: 'is-warn', hint: (data.error || '').slice(0, 48) || '这次先按老路生成' }
+    return { text: '没学成', tone: 'is-warn', hint: (data.error || '').slice(0, 120) || '这次先按老路生成' }
   }
   const counts = `${summary.areas || 0} 处结构 · ${(summary.helpers || []).length} 个封装`
   return data.stale
@@ -4746,6 +4891,16 @@ watch(steps, (list) => {
 /* 卡片头两侧的轻量按钮（面板模式的「并排 / 配置」） */
 .is-panel .panel-head :deep(.el-button.is-text) { height: 26px; padding: 0 8px; font-size: 12.5px; }
 
+/* ===== 收起态：整扇窗口被挪到屏幕右缘外，只剩最左边那一块 =====
+   窗口缩不到 36px（Chromium 最小 514 CSS 宽），露出的是「窗口被裁剩的左边一条」，
+   这条里只放把手。宽度必须和后端 PANEL_PEEK_CSS（36 CSS）一致，否则会露出半截正常界面。
+   样式直接复用嵌入模式收起后那条窄栏（.embed-rail），两种收起态看起来才是同一个东西。 */
+.recording-page.is-handle { max-width:none; padding:0; background:var(--bg-card); }
+.recording-page.is-handle > *:not(.panel-handle) { display:none !important; }
+.recording-page.is-handle .panel-handle {
+  position:fixed; left:0; top:0; bottom:0; width:36px; height:auto;
+}
+
 /* ===== 嵌入模式：单窗口，左边被测系统、右边可收起的编排面板 ===== */
 .recording-page.is-embed {
   max-width:none; padding:0; height:100vh; display:flex; flex-direction:row;
@@ -4783,14 +4938,41 @@ watch(steps, (list) => {
   max-width:none; height:100vh; padding:10px 12px 12px; display:flex; flex-direction:column; gap:10px;
   box-sizing:border-box;
 }
-.panel-head { flex:none; display:flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid var(--line-soft); border-radius:10px; background:var(--bg-card); box-shadow:0 1px 2px rgba(16,24,40,.05); }
+/* nowrap 是硬约束：头部一旦允许换行，窄面板下「录制中」会被压成 20px 宽、一个字一行。 */
+.panel-head { flex:none; display:flex; align-items:center; gap:7px; padding:6px 9px; border:1px solid var(--line-soft); border-radius:10px; background:var(--bg-card); box-shadow:0 1px 2px rgba(16,24,40,.05); flex-wrap:nowrap; overflow:hidden; }
+/* 头部图标按钮：24px 高，和下面那行工具同高，看起来是一套控件 */
+.panel-icon { width:26px; height:24px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--line-soft); background:var(--bg-card); color:var(--ink-2); border-radius:6px; cursor:pointer; padding:0; }
+.panel-icon:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+.panel-icon.is-on { border-color:var(--warn); color:var(--warn); background:var(--warn-soft); }
+.panel-icon.is-stop { border-color:var(--danger-line, #f3c4c4); }
+.panel-icon.is-stop:hover:not(:disabled) { border-color:var(--danger, #d64545); }
+.panel-icon:disabled { opacity:.45; cursor:default; }
+.panel-icon :deep(.el-icon) { font-size:14px; }
+.panel-more { display:flex; flex-direction:column; gap:2px; align-items:center; }
+.panel-more i { display:block; width:2.5px; height:2.5px; border-radius:50%; background:currentColor; }
+/* 工具行：4 格均分、一行 26px。六个文字按钮排两行会白吃 30px，而等待/封装都不高频。 */
+.panel-tools { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; flex:1 1 100%; min-width:0; }
+.panel-tools :deep(.el-dropdown) { display:block; width:100%; }
+.panel-tool { width:100%; height:26px; padding:0 6px; border:1px solid var(--line-soft); background:var(--bg-card); color:var(--ink-2); border-radius:6px; font-size:12px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.panel-tool:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+.panel-tool:disabled { opacity:.45; cursor:default; }
 .panel-dot { width:8px; height:8px; border-radius:50%; background:var(--bg-active); flex:none; }
 .panel-dot.is-live { background:var(--ok); box-shadow:0 0 0 3px rgba(52,199,89,.18); animation:panel-pulse 1.8s ease-in-out infinite; }
 .panel-dot.is-paused { background:var(--warn); box-shadow:0 0 0 3px rgba(255,159,10,.2); }
 @keyframes panel-pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
-.panel-title { font-size:13px; font-weight:700; color:var(--ink); }
-.panel-count { font-size:11.5px; color:var(--muted); background:var(--bg-sunken); border-radius:999px; padding:1px 8px; }
-.panel-actions { margin-left:auto; display:flex; gap:2px; }
+.panel-title { font-size:13px; font-weight:700; color:var(--ink); flex:none; white-space:nowrap; max-width:112px; overflow:hidden; text-overflow:ellipsis; }
+.panel-count { font-size:11.5px; color:var(--muted); background:var(--bg-sunken); border-radius:999px; padding:1px 8px; flex:none; white-space:nowrap; }
+/* 待确认：比步数更该抢眼——它决定「现在能不能生成」，用警示色而不是灰底 */
+.panel-pending { font-size:11.5px; color:var(--danger, #a32d2d); background:rgba(226,75,74,.1); border:1px solid rgba(226,75,74,.25); border-radius:999px; padding:1px 8px; white-space:nowrap; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+/* 标题条上的快捷操作：只做「现在对浏览器做什么」，低频操作仍在下面那排工具栏 */
+.panel-quick { border:1px solid var(--line-soft); background:var(--bg-card); color:var(--ink); font-size:12px; padding:2px 9px; border-radius:6px; cursor:pointer; line-height:18px; white-space:nowrap; }
+.panel-quick:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+.panel-quick:disabled { opacity:.45; cursor:default; }
+.panel-quick.is-on { border-color:var(--warn); color:var(--warn); background:rgba(255,159,10,.08); }
+.panel-quick.is-stop { border-color:rgba(226,75,74,.45); color:#a32d2d; }
+.panel-quick.is-stop:hover:not(:disabled) { background:rgba(226,75,74,.08); border-color:#e24b4a; color:#a32d2d; }
+.panel-actions { margin-left:auto; display:flex; gap:4px; align-items:center; flex:none; }
+.panel-actions :deep(.el-dropdown) { display:flex; }
 /* 独立面板窗口（被测系统禁止 iframe 时的 split 布局）里，page-col 必须是这一列的
    弹性容器：以前它保持块级、内容高度自适应，下面几层 flex:1 / min-height:0 全都无处可依，
    步骤多起来整列被撑出 100vh，再被 #app.is-panel-mode .el-main 的 overflow:hidden 裁掉
@@ -4837,17 +5019,6 @@ h1 { margin:0; color:var(--ink); font-size:22px; font-weight:600; letter-spacing
 .panel-card :deep(.el-card__body) { padding:14px 16px; }
 .section-header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
 .steps-head-right { display:flex; align-items:center; gap:8px; flex:none; }
-/* 「收起」按钮：24px 高的小文字按钮，和状态标签同一基线 */
-.recording-page :deep(.el-button.steps-collapse-btn.is-text) {
-  height:24px;
-  padding:0 6px;
-  margin-right:-6px;
-  border-radius:6px;
-  color:var(--muted);
-  font-size:12px;
-  font-weight:500;
-}
-.recording-page :deep(.el-button.steps-collapse-btn.is-text:hover) { background:var(--bg-card); color:var(--accent); }
 .card-title { position:relative; padding-left:12px; font-size:15px; font-weight:700; color:var(--ink); }
 .card-title::before { content:''; position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:15px; border-radius:3px; background:linear-gradient(180deg,var(--accent),var(--accent)); }
 .field-hint { color:var(--muted); font-size:12px; line-height:1.5; margin-top:6px; }
@@ -5108,6 +5279,27 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .rec-stop { width:8px; height:8px; border-radius:2px; background:currentColor; flex:none; }
 /* 分组底块本身就是分隔，展开状态不再画竖线 */
 .toolbar-sep { display:none; }
+/* 悬浮面板只有 420px：工具栏按默认尺寸要占三行，把「暂停 / 拾取 / 停止」提走之后
+   再把按钮压小一档，六个低频操作正好两行，省下的高度全给步骤列表。 */
+.is-panel .toolbar { gap:6px; }
+/* 精简模式下每条分组之间有一条通栏细线，每条都要另起一行——六个按钮就被拆成三行。
+   悬浮面板高度紧张，去掉细线后正好 3×2，工具栏固定两行。 */
+.is-panel .toolbar.is-lean .toolbar-sep { display:none; }
+.is-panel .toolbar-group { padding:3px; gap:1px; }
+.is-panel .toolbar-group :deep(.el-button) { height:26px; padding:0 7px; font-size:12px; }
+.is-panel .toolbar-group :deep(.el-button .el-icon) { font-size:14px; }
+/* 步骤行同样压一档：一行 60px 上下，八步能整屏看完，不用滚。 */
+.is-panel .step { padding:8px 10px; }
+.is-panel .step-main { gap:8px; }
+.is-panel .step-text { font-size:13px; }
+/* 面板窄：正文单行省略，悬停才展开。少了这条，flex 会把 .step-text 压到 min-content，
+   一条长 URL 就变成每字一行（实测 320px 面板下的真实表现）。 */
+.is-panel .step-main, .is-embed .step-main { flex-wrap:nowrap; }
+.is-panel .step-text, .is-embed .step-text { flex:1 1 0; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.is-panel .step-url, .is-embed .step-url { margin-top:3px; font-family:var(--mono); font-size:10.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.is-panel .step:hover .step-text, .is-embed .step:hover .step-text { white-space:normal; overflow:visible; }
+.is-panel .step-locator { margin-top:4px; }
+.is-panel .step-note { margin-top:2px; font-size:12px; }
 /* 单行 flex 切成 3 列网格属于重排，没法补间；给按钮一个归位动画，切换时就不会「啪」地跳。
    两个 keyframes 内容一样但名字不同——名字一变动画就会重播，收起和展开都能各放一次。 */
 .toolbar :deep(.el-button) { animation:toolbar-settle .18s ease both; }
@@ -5188,6 +5380,13 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .step-locator { margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .step-alias { color:var(--ink-2); font-size:12.5px; font-weight:600; }
 .locator-code { color:var(--muted); font-size:11.5px; background:var(--bg-card); border:1px solid var(--line-soft); border-radius:6px; padding:2px 6px; word-break:break-all; }
+/* 面板窗口（悬浮窄条）里定位默认收起：一行只留「别名 + 状态」，鼠标移上去再把定位摊开。
+   420px 宽下常显定位会把每一行撑成两三行，一屏只能看四步。 */
+.is-panel .locator-code { display:none; }
+.is-panel .step:hover .locator-code,
+.is-panel .step:focus-within .locator-code {
+  display:block; flex-basis:100%; margin-top:2px; max-height:60px; overflow:auto;
+}
 .step-actions { display:flex; flex-direction:row; align-items:center; gap:2px; flex-shrink:0; }
 /* 定位预览：行内小准星，点一下在浏览器里把匹配元素全框出来并编号 */
 .peek-btn { height:22px; width:22px; padding:0; margin-left:-2px; color:var(--muted); }

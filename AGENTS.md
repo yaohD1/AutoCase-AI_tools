@@ -167,7 +167,15 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
 
 - 入口 `frontend/src/views/Recording.vue`（`/recording`），接口 `backend/app/routes/recording.py`，会话 `backend/app/services/recording/session.py`。
 - 默认 `RECORDING_LAYOUT=embed`：录制浏览器只开**一个窗口**并最大化，主页面是前端外壳页 `?embed=1&target=<被测地址>`，左边 iframe 是被测系统（占满剩余宽度），右边是可收起/可拖拽的编排面板。外壳页是 AutoCase 自己，靠 init script 传入 `__AUTOCASE_SKIP_ORIGIN` 让 recorder 跳过（否则点面板会被录成步骤）。
-- `RECORDING_LAYOUT=split` 是兜底：独立 context 开面板窗口，用 CDP `Browser.setWindowBounds` 与被测页面按 `RECORDING_PANEL_RATIO` 左右并排；面板窗口不注入 recorder、不记为 `new_page`。
+- `RECORDING_LAYOUT=split` 用于目标站禁止 iframe 的场景（`/start` 探测到 `X-Frame-Options` / CSP `frame-ancestors` 时自动切）；独立 `--app` 窗口当面板，不注入 recorder、不记为 `new_page`。
+  - **默认是左右并排，不是悬浮**（`RECORDING_PANEL_FLOAT=0`）：被测窗口在左、面板在右，面板宽度**按 CSS 像素折算成物理像素**（`_panel_physical_width` = `panel_width(CSS) × dpr`），和嵌入模式那块面板同一个口径。宽度不是配置写死的：`/start` 带上前端 `localStorage` 里那块面板的宽度（键 `autocase.recording.panelWidth.v2`，默认 **520 CSS** ≈ 35% 屏宽），两种布局用同一个数字——否则并排一个值、嵌入另一个值，同一块面板在两个布局里胖瘦都不一样。换过键：v1 里存的是 686（占 47%，用户实测「默认状态太宽」），不换键新默认永远被旧记忆盖住。历史上有两条弯路别再走：按屏幕比例 45% 分（页面只剩 55%，响应式后台退化成移动版）、以及悬浮（面板压住页面右缘，那一截其实看不见，2026-11 用户实测「太割裂」）。
+  - **步骤行一律完整，面板宽度固定**：标题右侧那颗「展开 / 收起」文字按钮已经删掉（用户反馈它才是「上移 / 下移是不是被删了」的误会来源——两颗箭头只是被它藏起来了）。`stepsCollapsed` 现在恒 false，`/panel/width` 与前端 `syncPanelWidth()` 都不再被调用，宽度只由 `panelWidth`（localStorage v2，默认 520 CSS）决定。**别再把它接回某个开关**：一颗按钮同时改行密度和面板宽度，用户根本看不出它改了什么。
+  - **面板能多窄：摆位到 420 CSS 没问题**（实测 735 物理，SetWindowPos 能压过 `--window-size` 的启动下限）。之前记的「最小 514 CSS」只对 `--window-size` 启动参数成立，别拿它当摆位下限。代码里仍保留「摆完回读 `visible_rect`，被撑宽就按实际宽度把页面退让出来」的自愈，防止别的系统上真被顶住时两窗重叠。
+  - **两种布局都能「收起」**：头部 `.panel-collapse` 在 `embedMode` 下收的是本页那一栏（宽度还给 iframe），并排模式下走 `collapsePanel()` → `POST /panel/mode {mode:'hidden'}`，把整扇面板窗口滑出屏幕右缘只留一条把手，点把手 `expandPanel()` 摆回来。**别和步骤区那颗「展开 / 收起」搞混**——那颗管行密度，已经删了；这颗管窗口。
+  - **「收起」= 整扇窗口滑出屏幕右缘，只留一条把手**（`PANEL_PEEK_CSS=36` CSS，乘 dpr 折物理）。窗口本身缩不到 36px，唯一做法是把窗口挪到 `ax + aw - peek`，露出的正好是面板自己被裁剩的最左边一条；页面同时让出这条。收起态由前端 `.panel-handle` 渲染——**直接复用 `.embed-rail` 那套样式和 36px 宽度**，两种布局收起后才是同一个东西；宽一点就会露出半截正常界面。还要把整扇窗口**再上移一个标题栏**（`PANEL_CAPTION_CSS=34`）：`--app` 窗口的标题栏是 Chrome 画在客户区里的，Win32 量不出来，不上移的话屏幕右缘那一条顶端会露半个标题栏（图标加半颗按钮），像窗口被裁坏了。点把手 `POST /panel/mode {mode:'expanded'}` 摆回来。收起时**不开粘合**：把手钉在屏幕边上，拖页面窗口不该把它带走。
+  - 悬浮（`RECORDING_PANEL_FLOAT=1`）只在显式开启时生效，且**收起时一律走并排把手**——悬浮那边把窗口藏起来就再也叫不回来了。
+  - **面板窗口要关掉遮挡检测**（`--disable-features=CalculateNativeWinOcclusion`）：整扇窗口在屏幕外时，浏览器会认为它不可见并把渲染降到几乎停止，点把手回来要白等一秒才画出来。
+  - **任务书浮层打开前要先把窗口放出来**（`sheet_windows`）：收起态要先 `show_window` 再 `move_visible`，否则铺了个看不见的窗口。
   - **面板窗口优先走 `--app` 无壳形态**（`_open_panel_app`）：独立浏览器实例 + 独立临时 profile，没有标签栏/地址栏，跟被测窗口贴在一起像 AutoCase 自己的侧栏。起不来（非 Windows、无头、找不到浏览器）才退回「同浏览器再开一个窗口」。
   - 用 **系统 Edge** 而不是 Playwright 自带的 Chromium：后者是 Chrome for Testing，顶部必挂一条「仅适用于自动测试」的提示条，`--test-type` / `--disable-features=ChromeForTesting` 都关不掉（v148 实测），面板只有三四百像素宽，这条横幅能吃掉首屏一整行。Edge 还要加 `--disable-sync --no-service-autorun`（否则拿 Windows 账号弹「同步你的浏览数据」，那是个独立窗口，会盖住被测页面）；`--ignore-certificate-errors` **只在面板 URL 是 https 时加**，http 下加了会被挂一条黄色安全警告条。
   - **`GetWindowRect` 比眼睛看到的大**：Win10 每个窗口左右各约 8px 是不可见的拉伸边框，按矩形贴死视觉上漏 16px，露出来的是桌面壁纸（看着像黑缝，但**不是阴影**）。贴齐必须用 `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` 拿可见边界再反推回窗口矩形。实测可见边界对齐后缝只剩 2px 一条线。
@@ -183,7 +191,14 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
 - 嵌入模式下「被测页面」的判定是 `_is_app_frame`：按 `base_url` 的 origin 过滤，外壳页（AutoCase 前端）会被排除，`target=_blank` 打开的新标签页仍算应用页面。`goto` / `new_page` 步骤都依赖它。
 - 拾取模式（`_apply_pick`）要遍历 `page.frames`——嵌入模式下被测页面在 iframe 里，只对主 frame 执行会失效。
 - 面板宽度由前端拖拽决定（localStorage `autocase.recording.panelWidth`），收起后 iframe 占约 97%。拖拽必须 `setPointerCapture` + 拖动期间禁用 iframe 命中测试，否则 pointermove 会被 iframe 吞掉。
-- 被录制页面内的悬浮面板默认关闭（`RECORDING_HUD_PANEL=0`），只保留操作点即时徽标。HUD 在 closed shadow root 里：open 形态会被 Playwright 的 text 引擎穿透，把面板文字算成同名候选。
+- 被录制页面内的浮层（`RECORDING_HUD_PANEL`）**默认关，嵌入模式同样不注入**（`hud_on = hud_panel and not embed`）：面板本身就是常驻的，页面里再浮一张卡片只是把同样的信息说两遍，还挡住被测页面右下角（用户实测截图里两块状态同时显示）。收起态的恢复入口是**窗口自己露在屏幕右缘的那条把手**，不依赖页面里的浮层，所以「收起面板」可以放心提供。浮层代码保留（`recorder.js` 的 `.ac-pill` / `__pwHudAction('expand-panel')` 与 `panel/mode` 接口），要恢复只需把 `RECORDING_HUD_PANEL` 打开。HUD 在 closed shadow root 里：open 形态会被 Playwright 的 text 引擎穿透，把面板文字算成同名候选。
+- 面板窄，排版有四条硬约束（写在 260~520px 上都不许破）：
+  - **工具栏在面板 / 嵌入模式下一律 `is-lean`**（`{'is-lean': compactMode}`，三列均分 + 小一号按钮）。它以前跟 `stepsCollapsed` 联动，那颗按钮删掉后工具栏会退回松散的展开形态（3+4+2），同一块面板凭空胖一圈（用户实测原话「不行 去掉展开按钮后工具栏用未展开形态」）。**工具栏密度和步骤行密度从此解耦**：工具栏恒紧凑，步骤行恒完整。
+  - **头部一律 `flex-wrap:nowrap`，状态文字不参与压缩**。`.panel-title` / `.panel-count` / `.panel-pending` 全部 `flex:none + white-space:nowrap`。少了这条，flex 会把「录制中」压到 20px 宽、一个字一行（实测 320px 面板的真实截图就是这样）。
+  - **头部只放图标 + 一个收起箭头**：并排模式（`!panelFloat`）头右侧是「配置」文字按钮 + `›` 收起箭头，点了收起整扇窗口；悬浮模式是暂停 / 停止 / 更多三个 26×24 图标，拾取、配置、关闭浏览器进「更多」下拉。再往里加文字按钮，这个宽度下必然被压成竖排。
+  - **工具栏在并排模式下走 `is-lean` 三列网格**（停止 / 暂停 / 拾取元素，刷新页面 / 添加断言 / 等待加载，固定等待 / 封装 / 动作库）；只有悬浮模式才用一行 4 格（刷新 / 断言 / 等待 / 更多，`grid-template-columns:repeat(4,minmax(0,1fr))` + `flex:1 1 100%`）。同理 `is-lean` 的判定是 `stepsCollapsed && !panelFloat`，两套不能混用。
+  - **步骤正文单行省略，悬停展开**：`.is-panel .step-text { flex:1 1 0; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }`，`.step-main` 同时 `flex-wrap:nowrap`。不加这条，`word-break:break-word` 让 min-content 变成一个字符，长 URL 会变成每字一行。`goto` 的地址另外用 `.step-url` 单独一行等宽小字（挤在同一行只会剩「打开 https:」）。定位文本仍默认收起、`:hover` 才展开。
+- **步骤行的上移 / 下移跟着「收起行 / 展开行」走，不是被删了**：`.step-actions-extra` 在 `stepsCollapsed` 时 `max-width:0 + opacity:0`（留给宽度过渡，别改成 `v-if`），展开行才滑出来。嵌入模式和并排模式共用同一个模板，所以两边永远一致——2026-11 用户以为「这两个箭头早去掉了」，其实是他点了展开；确认后决定**保留**，调序以拖拽为主、箭头做精细微调。
 - 目标站若禁止 iframe（`X-Frame-Options` / CSP `frame-ancestors`），可先用 `page.route` 拦 document 响应改 header；仍不行就切 `RECORDING_LAYOUT=split`。
 
 - 暂停录制（`POST /api/automation/recording/pause` `{paused:true|false}`）：浏览器保持可用但不再记步骤，同 Playwright codegen 的 Pause。前端在 `recorder.js` 里用 `state.paused` 直接拦掉 click/input/change（不产生 IPC），Python 侧 `_handle_event` 还有一层兜底（`pick` 例外，拾取照常）；暂停期间不判 idle 超时。状态在 `snapshot().paused`。
@@ -246,6 +261,8 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
   - `POST /api/automation/recording/steps/<no>/locate {framework}` → `{ok, code, kind, mode, count, exists, unique, visible, index, recorded_count, page_url, page_gone, candidates, items}`。顺带在页面上把匹配元素框出来（只给数字不画框，等于没验证），`highlight/clear` 由前端关弹窗时调。
   - **「采用哪条」必须复用 `emit._locator_info` / `_pick_locator`**，不要在 session 里另写一份判断——两份判断迟早会「弹窗说 A、生成写 B」。`_locator_info` 顺带返回 `kind/desc/spec` 就是给这个弹窗用的。
   - 候选清单只列**当前框架**那一组（`pool_for`）：Playwright 与 Robot 各有一套，混在一起列十几条用户对不上号；`adopted` 标出生成用哪条。
+  - **`div` 的文字定位走 `rf_text_leaf`，不要直接把 div 加进 `TEXT_TAGS`**：`//div[normalize-space(.)='X']` 会把祖先全算进来（一行文字的 div 按钮实测命中 4 个），所以 TEXT_TAGS 一直排除 div，div 按钮只剩 `rf_css`（结构定位，改版就点错）。现在的写法多一个「不能再有同标签、同样文本的后代」约束，只留最内层：文字唯一时命中 1 个且就是被点的那个，两处同名时仍是 2 个。动这条之前先跑 `test_recording_rf_text_leaf`。
+  - **Playwright 的文本白名单 = `TEXT_TAGS + ('div',)`（`PW_TEXT_TAGS`）**：PW 的文本引擎只命中「最小的那个元素」，div 可以放心用；RF 对 div 会命中祖先，只能走 `rf_text_leaf`。两边白名单必须对齐，否则同一个可点的 li/td 会出现「Robot 按文字、Playwright 按结构」——用户看到的就是「明明文字不同，系统却认不出」。以前手写的 5 种标签漏了 li/td/p/h1~h6/strong，菜单项（`<li class="el-menu-item">`）正好中招。改白名单时先跑 `test_recording_pw_text_tags`。
   - 结论只有三档：`count==1` 绿「存在 · 唯一」、`count>1` 黄「匹配到 N 个，取第 K 个」、`count==0` 红「找不到」。失败要分 `no_target / no_frame / no_candidate / frame_lost / overlay_failed` 说清原因，别让用户以为是定位坏了。
   - 口径是**此刻**：页面可能已经走到后面几步，弹窗里必须写明页面 URL + 校验时间；`page_gone` 的步骤再补一句「只代表当前页面」。
   - 弹窗宽度写成 `min(520px, calc(100vw - 24px))`（el-dialog 的 `width` 属性）：面板窗口本来就是 400~800，写死 520 在窄面板里会横向溢出。`class` 上的 `max-width` **不生效**——Element 的 `.el-dialog` 根节点拿不到 scoped 的 `data-v-*`。
@@ -269,6 +286,7 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
   - 用 `locator.click()` 写测试时截图会丢：它把 down/up 挤在一起，`precount` 那条 binding 还没到 Python 页面就被 click 带走了。测试里要 `mouse.down()` → 停 100ms → `mouse.up()`（见 `test_recording_shot._click_like_a_human`）。真人点击天然有这段间隔。
   - 生成前还剩 `blockers` 时不再弹确认框放行，而是直接把这几步排队弹出来，选完才能写（`executePlan` 里 `startLocReview()` + return）。
   - **弹窗的生命周期 = 录制的生命周期**：只在 `status === 'recording'` 且浏览器还开着时自动弹；`applySession()` 里一旦发现录制停了、浏览器关了、会话 404 或线程已结束，立刻 `dropLocConfirm()`（只清本地状态，不调后端——这时后端已经只会回 409「录制已结束」）。没有这条，弹窗会变成一块没有关闭按钮的遮罩，把整页锁死，用户只能刷新。
+  - **弹窗覆盖三类状态**：`ambiguous`（真·不唯一）、`suspect`（看着唯一、其实指向别的元素）、`fragile`（页面上有多个同名，只有退回 css 结构路径才唯一）。第三类最容易漏：点「删除」这类元素会连同所在行一起消失，录制时只能落到结构定位，事后回列表再框必然框错，所以必须当场选。`row_scoped`（按行锚定）仍然算 `unique`、不弹——它能按业务字段唯一锁定，弹了等于列表每行都吵一次。
   - **自动弹的和手动「逐条看」打开的要分开**（`locAuto`）：前者一停录就收；后者是用户自己要看的，只要浏览器还活着就留着，否则 `applySession()` 每 2 秒轮询会把它刚打开就关掉。
   - 两个动作（选候选 / 允许降级）的 `catch` 里要认 `录制已结束 | 没有录制`：命中就收起弹窗并给一条 info，而不是原地 toast——弹窗还在，用户就没法继续操作。
 - 生成入口只有一个任务、两个窗口：主界面 `/recording` 和录制面板 `/recording?panel=1` 都能点「生成并写入工作区」，状态放服务端（`services/recording/progress.py`，随 `snapshot()` 的 `emit` 字段返回），任一处点击后另一处最迟 2 秒变成同一份进度并禁用按钮；后到的请求被 `PROGRESS.start()` 拦成 409（不是错误，前端按提示跟着进度走）。
@@ -295,6 +313,7 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
   - **写轮仍然发全量 payload**：规划轮用的是 `_plan_step`（故意不含 locator），也没有 `keywords` / `samples` / 用户确认后的 plan。会话只负责省掉「重新读项目」，事实仍由 payload 保证；即使 opencode 触发了上下文压缩也不丢。
   - **生命周期**：`/plan` 建，`/generate` 的 `finally` 关；文件冲突 409 **不关**（用户点覆盖还要接着写）；新录制开始 `close_all()`；1h 空闲 / 4h 上限 / 8 轮上限兜底。
   - **建会话和发消息的 model 形状不同**：`POST /session` 要 `{id, providerID}`，`prompt_async` 要 `{providerID, modelID}`。传错直接 400 `{"_tag":"BadRequest"}`，实测踩过一次。
+  - **模型名要先校验再派发**（`OpenCodeRunner._resolve_model`）：OpenCode 对不存在的 provider / model 既不报错也不排队——`prompt_async` 照样 204，会话却永远不进 busy，只能等满 60 秒再抛「OpenCode 派发后 60 秒内没有开始处理」。库里真实的失败记录就是 provider 首字母写成 `4Rount-hyper`（配置里是 `4rount-hyper`）：写对 1.5 秒开始，写错 60 秒不动，会话里连一条 assistant 消息都不留，事后完全查不出原因。现在派发前先查 `models_config.flat_models()`：只是大小写不一致就按配置里的写法纠正并打一条 warning，真不存在就直接抛错并给出最接近的三个名字。读不到模型列表时跳过校验，不因为读不到配置挡住生成。agent 名写错的表现一模一样（也是 204 + 永不 busy），但 agent 名是代码里写死的，不在这里校验。
   - **任务书存服务端**（`progress.remember_plan()` → `/recording/current` 的 `emit.plan`）：刷新页面能恢复，不用重规划——重规划意味着模型重新读一遍项目。
   - **取消**：`POST /automation/recording/emit/cancel` → `REGISTRY.cancel()` 先 abort 再收进程树。路由在 `EmitError` 分支里先看 `progress.cancelled()`，把「用户取消」和「生成失败」分成两种说法。
 
@@ -308,6 +327,9 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
 - **项目记忆 = 项目地图**（`services/recording/projectmap.py` + `services/recording/memory.py` + 表 `project_memories`，agent `recording-profiler`）：录制一开始后台读一遍项目，产出一份 markdown「项目地图」（整个仓库的目录职责 + 用例写法 + 现成封装），之后每次规划和写入直接注入，不再现场读项目。
   - **不记「坑」**：`pitfalls` 字段已删除（schema / 提示词 / 地图 / 卡片都不再有）。让模型自己判断「哪里容易写错」，产出的常是项目里并不存在的绕行做法，写手会当成项目惯例照抄，反而把代码带偏。要描述项目**是什么**，不是「可能会踩什么」。
   - **结构先由脚本扫，再让模型标**：`projectmap.scan()` 走三层目录（跳过 node_modules / 构建与测试产物 / 隐藏目录），拿到目录树、每个目录的直接子文件数和值得打开的文件清单，作为客观事实塞进提示词；模型只在树上写 `areas`（path/kind/role/use），不再自己 ls/glob。不先扫的话模型会漏目录、会按通用习惯编。
+  - **扫描的抗噪声三件套**（`projectmap.scan()`）：① 跳过名单合并项目自己的根 `.gitignore`（只做跳过，不实现 `!` 还原）；② 文件计数只算代码类文件，`SCAN_SKIP_SUFFIXES` 把截图 / 报告 / 二进制 / `report.html` / `output.xml` 全部排除，连数都不数；③ 每个目录最多贡献 `PER_DIR_FILES=120` 条路径。三条缺一不可——实测一个 Robot 项目 `screenshots/` 下有 8036 张截图（3.2G），旧实现只扫到 3 个目录（根、`libspecs`、`screenshots`），四个中文业务目录一个都没进地图，画像的 `layout` / `naming` / `helpers` 全是 null、`areas` 把截图目录当成项目结构。修完是 60 个目录 / 498 个文件，同一个模型产出 8 个真实关键字、10 条断言、完整 snippet，`confidence` 从 low 到 medium。
+  - **中文目录名排在字典序最后**：`os.walk` 先走 ASCII 目录，任何「扫到上限就 break」的写法都会先牺牲中文目录。所以 `_pick_dirs()` 超 `MAX_DIRS` 时按「文件多的优先」挑深层目录，而不是按名字截断；深层的空目录直接丢掉（对写手没有信息量），一级目录永远保留。
+  - **画像提示词必须框架中立**：不写死 `package.json` / `playwright.config.*` / `test.describe` / `@playwright/test`，改成「先判断框架，再从 README、运行脚本、配置文件里读到实际跑法」。Robot 项目（`.robot` / `.resource` / `Suite Setup` / `Variables`）和 Playwright 项目共用同一份提示词；某一侧不存在的概念（例如 Robot 没有 fixture）明确要求写进 `case_shape`、`fixtures` 留空，而不是硬套。
   - 地图落两处：`<workspace>/.autocase/project-map.md`（给人看、能 diff；`guard.FRAMEWORK_ARTIFACT_PREFIXES` 已排除 `.autocase/`，不算 agent 改文件）和 `project_memories.map_md`（卡片显示，换机器也在）。写文件失败只记日志，不影响学习。
   - `render()` 会**丢掉不在扫描结果里的 areas 路径**：模型偶尔自己拼一个看起来合理的路径，编出来的路径比没有更糟。超 `MAX_MAP_CHARS=8000` 截断。
   - 记录口径：`workspace`（绝对路径，unique）是唯一 key；同一目录就是同一套写法。`fingerprint` = **git HEAD + 关键文件大小 + 用例数量/最新 mtime + 一级目录结构签名**，故意不用 mtime 判内容——切分支会把 mtime 全刷新，白白重学。

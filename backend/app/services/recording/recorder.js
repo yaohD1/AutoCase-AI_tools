@@ -448,6 +448,8 @@
     });
     empty.hidden = (hudState.steps || []).length > 0;
     list.hidden = (hudState.steps || []).length === 0;
+    // 面板窗口收起来时，浮层必须退成胶囊：否则页面上会同时没有面板、还挂着一张卡片。
+    if (hudState.panel_hidden && !hudCollapsed) setCollapsed(true);
   };
 
   const setCollapsed = (on) => {
@@ -525,7 +527,15 @@
         count: pick('.ac-count'), state: pick('.ac-state'), dot: pick('.ac-dot'), undo: pick('.ac-undo')
       };
       pick('.ac-fold').addEventListener('click', () => setCollapsed(true));
-      hudNodes.pill.addEventListener('click', () => setCollapsed(false));
+      // 面板窗口收起来时，这颗胶囊就是重新打开它的唯一入口（独立窗口做不出 200x38，
+      // Chromium 会把窗口撑到最小尺寸，所以收起只能靠页内浮层）。
+      hudNodes.pill.addEventListener('click', () => {
+        if (hudState.panel_hidden) {
+          try { window.__pwHudAction('expand-panel'); } catch (e) { /* binding not ready */ }
+          return;
+        }
+        setCollapsed(false);
+      });
       hudNodes.undo.addEventListener('click', () => {
         try { window.__pwHudAction('undo'); } catch (e) { /* binding not ready */ }
       });

@@ -228,6 +228,14 @@ batchDeleteTestcases(ids) {
   closeRecordingBrowser() {
     return api.post('/automation/recording/close')
   },
+  // 展开 / 收起面板窗口：收起后屏幕右缘留一条把手，点它再展开
+  setRecordingPanelMode(mode) {
+    return api.post('/automation/recording/panel/mode', { mode })
+  },
+  // 改面板宽度（CSS 像素）：并排模式下窗口宽度前端改不了，得让后端重摆
+  setRecordingPanelWidth(width) {
+    return api.post('/automation/recording/panel/width', { width })
+  },
   // 插入前验证：只看当前页面这一刻的状态，不回放
   verifyRecordingIntent(intent) {
     return api.post('/automation/recording/verify', { intent }, { timeout: 30000 })

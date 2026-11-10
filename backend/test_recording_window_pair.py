@@ -7,6 +7,7 @@
   3. 面板宽度兜底，屏幕再窄也别把面板压成一条；
   4. 无头环境 / 没有面板窗口时一律不动手，别在测试机上弹出真窗口。
 """
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -14,13 +15,17 @@ from app.services.recording.session import RecordingSession
 from app.services.recording.winwindows import plan_follow
 
 
-def make_session(panel_hwnd=111, main_hwnd=222, ratio=0.45, headless=False):
+def make_session(panel_hwnd=111, main_hwnd=222, ratio=0.45, headless=False,
+                 width=520, hidden=False):
     session = RecordingSession.__new__(RecordingSession)
+    session._context = object()
     session._embed = False
     session._headless = headless
     session._panel_hwnd = panel_hwnd
     session._main_hwnd = main_hwnd
     session._panel_ratio = ratio
+    session._panel_width = width
+    session._panel_hidden = hidden
     session._glue = None
     return session
 
@@ -41,7 +46,33 @@ class LayoutNativeTest(unittest.TestCase):
 
         ww.move_visible.side_effect = _move
         ww.visible_rect.side_effect = lambda hwnd: placed.get(hwnd)
+        ww.scale.return_value = 1.0
         return patch('app.services.recording.session.winwindows', ww), ww
+
+    def test_raises_both_windows_after_placing(self):
+        """摆完必须把窗口提到最前。
+
+        `move_visible` 用的是 SWP_NOZORDER | SWP_NOACTIVATE——只改坐标不动层级，
+        桌面上只要有全屏窗口，刚启动的录制窗口就整块躺在它下面（用户实测「点开始
+        后浏览器不打开」就是这么来的）。焦点给被测页面，面板只提层级。
+        """
+        ctx, ww = self._patch()
+        with ctx:
+            session = make_session()
+            self.assertTrue(session._layout_native())
+        ww.activate.assert_called_once_with(222)
+        ww.bring_to_top.assert_called_once_with(111)
+        names = [c[0] for c in ww.method_calls]
+        self.assertLess(names.index('activate'), names.index('bring_to_top'))
+
+    def test_focus_returns_to_page_after_panel_loads(self):
+        """面板窗口加载完会抢焦点，隔一拍得把焦点还给被测页面。"""
+        ctx, ww = self._patch()
+        with ctx:
+            session = make_session()
+            session._raise_after_panel(delay=0.01)
+            time.sleep(0.15)
+        ww.activate.assert_called_with(222)
 
     def test_splits_work_area_with_no_gap(self):
         ctx, ww = self._patch()
@@ -49,9 +80,9 @@ class LayoutNativeTest(unittest.TestCase):
             session = make_session()
             self.assertTrue(session._layout_native())
         calls = ww.move_visible.call_args_list
-        # 1920 * 0.45 = 864 给面板，剩下 1056 给被测页面；两个 x 首尾相接
-        self.assertEqual(calls[0].args, (222, 0, 0, 1056, 1040))
-        self.assertEqual(calls[1].args, (111, 1056, 0, 864, 1040))
+        # 面板按 520 CSS（dpr=1）折成 520 物理，剩下 1400 给被测页面；两个 x 首尾相接
+        self.assertEqual(calls[0].args, (222, 0, 0, 1400, 1040))
+        self.assertEqual(calls[1].args, (111, 1400, 0, 520, 1040))
 
     def test_uses_work_area_not_full_screen(self):
         """副屏、任务栏：起点不一定是 0，高度也不能用整块屏幕。"""
@@ -61,7 +92,7 @@ class LayoutNativeTest(unittest.TestCase):
             session._layout_native()
         calls = ww.move_visible.call_args_list
         self.assertEqual(calls[0].args[:3], (222, 1920, 0))
-        self.assertEqual(calls[1].args[1], 1920 + 880)  # 1600 - 720
+        self.assertEqual(calls[1].args[1], 1920 + 1080)  # 1600 - 520
 
     def test_panel_keeps_a_floor_on_narrow_screens(self):
         ctx, ww = self._patch(work=(0, 0, 800, 600))
@@ -114,6 +145,132 @@ class LayoutNativeTest(unittest.TestCase):
         self.assertIn((222,), states)   # 被测页面
 
 
+class PanelWidthByCssTest(unittest.TestCase):
+    """面板宽度按 CSS 折成物理像素，和嵌入模式那块面板同一口径。
+
+    嵌入模式里面板就是 420~600 CSS 宽；并排时如果直接拿物理像素当 CSS 用，
+    在 175% 缩放的机器上面板会窄掉将近一半，两边看着完全不是一回事。
+    """
+
+    def _patch(self, work=(0, 0, 2560, 1370), dpr=1.75):
+        ww = MagicMock()
+        ww.available.return_value = True
+        ww.work_area.return_value = work
+        ww.is_usable.return_value = True
+        ww.prepare.return_value = True
+        ww.move_visible.return_value = True
+        ww.visible_rect.return_value = None
+        ww.scale.return_value = dpr
+        return patch('app.services.recording.session.winwindows', ww), ww
+
+    def test_css_width_is_scaled_to_physical_pixels(self):
+        ctx, ww = self._patch()
+        with ctx:
+            session = make_session(width=520)
+            session._layout_native()
+        panel = ww.move_visible.call_args_list[1].args
+        self.assertEqual(panel[3], 910)          # 520 CSS × 1.75
+        self.assertEqual(panel[1], 2560 - 910)   # 贴着页面右边界
+
+    def test_page_keeps_a_minimum_css_width(self):
+        """屏窄到放不下两栏就压面板：页面至少留 520 CSS，否则被测系统直接变移动版。"""
+        ctx, ww = self._patch(work=(0, 0, 1400, 900), dpr=1.75)
+        with ctx:
+            session = make_session(width=520)
+            session._layout_native()
+        page, panel = ww.move_visible.call_args_list[:2]
+        self.assertGreaterEqual(page.args[3], int(520 * 1.75))
+        self.assertEqual(page.args[3] + panel.args[3], 1400)
+
+    def test_glue_replaces_the_old_pair(self):
+        """重新摆位要先把旧钩子拆掉，否则两套钩子互相打架。"""
+        ctx, ww = self._patch()
+        ww.Glue.return_value.start.return_value = True
+        with ctx:
+            session = make_session()
+            session._layout_native()
+            session._layout_native()
+        self.assertEqual(ww.Glue.call_count, 2)
+
+    def test_width_change_relayouts_the_pair(self):
+        """「收起行 / 展开行」改宽度走的就是这条路：重摆后两窗仍然首尾相接。
+
+        嵌入模式那边改宽度就是改 CSS，一瞬间的事；并排这边是一扇真窗口，
+        只能重摆一次——两边行为要一样，用户才不会觉得切了布局就换了套东西。
+        """
+        ctx, ww = self._patch()
+        with ctx:
+            session = make_session(width=600)
+            with patch.object(session, '_push_hud'):
+                session._set_panel_width_now(420)
+        page, panel = ww.move_visible.call_args_list[-2:]
+        self.assertEqual(page.args[3] + panel.args[3], 2560)
+        self.assertEqual(panel.args[1], page.args[3])
+        self.assertEqual(panel.args[3], int(round(420 * 1.75)))
+
+
+class PanelHandleTest(unittest.TestCase):
+    """收起 = 整扇窗口滑到屏幕右缘外，只留一条把手。
+
+    Chromium 有最小窗口宽（实测 514 CSS），窗口本身缩不到 44px，所以只能「挪出去」。
+    页面要把这条让出来，否则把手会压在页面最右边那 44px 上，点什么都点不着。
+    """
+
+    def _patch(self, work=(0, 0, 2560, 1370)):
+        ww = MagicMock()
+        ww.available.return_value = True
+        ww.work_area.return_value = work
+        ww.is_usable.return_value = True
+        ww.prepare.return_value = True
+        ww.move_visible.return_value = True
+        ww.visible_rect.return_value = None
+        ww.scale.return_value = 1.0
+        return patch('app.services.recording.session.winwindows', ww), ww
+
+    def test_collapsed_panel_leaves_a_peek_on_the_right_edge(self):
+        ctx, ww = self._patch()
+        with ctx:
+            session = make_session(hidden=True)
+            self.assertTrue(session._layout_native())
+        page, panel = ww.move_visible.call_args_list[:2]
+        self.assertEqual(page.args, (222, 0, 0, 2560 - 36, 1370))
+        self.assertEqual(panel.args[1], 2560 - 36)   # 窗口左边界就是把手
+        self.assertEqual(panel.args[0], 111)
+        # 整扇窗口再上移一个标题栏：不然那一条顶端会露半个标题栏
+        self.assertEqual(panel.args[2], -34)
+        self.assertEqual(panel.args[4], 1370 + 34)
+
+    def test_collapsed_does_not_glue(self):
+        """收起后把手钉在屏幕边上，拖页面窗口不该把它带走。"""
+        ctx, ww = self._patch()
+        ww.Glue.return_value.start.return_value = True
+        with ctx:
+            session = make_session(hidden=True)
+            session._layout_native()
+        ww.Glue.assert_not_called()
+
+    def test_expanding_restores_the_pair(self):
+        ctx, ww = self._patch()
+        with ctx:
+            session = make_session(hidden=True)
+            session._layout_native()
+            session._panel_hidden = False
+            ww.move_visible.reset_mock()
+            session._layout_native()
+        page, panel = ww.move_visible.call_args_list[:2]
+        self.assertEqual(panel.args[1], page.args[3])   # 首尾重新贴住
+        self.assertEqual(page.args[3] + panel.args[3], 2560)
+
+    def test_peek_never_eats_the_whole_screen(self):
+        """极窄屏（工作区 400）也得给页面留位置，把手按屏幕宽度的 5% 收。"""
+        ctx, ww = self._patch(work=(0, 0, 400, 600))
+        with ctx:
+            session = make_session(hidden=True)
+            session._layout_native()
+        page = ww.move_visible.call_args_list[0].args
+        self.assertGreaterEqual(page[3], 400 - 24)
+
+
 class RelayoutFallbackTest(unittest.TestCase):
     """原生路径失败时的兜底。
 
@@ -128,6 +285,7 @@ class RelayoutFallbackTest(unittest.TestCase):
         ww.move_visible.return_value = moved
         ww.is_usable.return_value = True
         ww.prepare.return_value = True
+        ww.scale.return_value = 1.0
         return patch('app.services.recording.session.winwindows', ww), ww
 
     def test_shell_less_panel_never_reports_false_success(self):

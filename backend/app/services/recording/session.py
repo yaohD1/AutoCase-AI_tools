@@ -7,6 +7,7 @@ Playwright 同步 API 必须在同一个线程里使用，所以每个会话占�
 """
 import atexit
 import json
+import logging
 import os
 import queue
 import shutil
@@ -18,6 +19,8 @@ import uuid
 from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
+
+logger = logging.getLogger(__name__)
 
 from app.services.recording import intent as intent_mod
 from app.services.recording import actions as actions_mod
@@ -203,6 +206,21 @@ PICK_OFF_TAGS = ('select', 'label')
 NON_TEXT_INPUT_TYPES = ('button', 'submit', 'reset', 'checkbox', 'radio')
 # 被录制页面里的浮层：只显示最近几步，避免面板过高挡住应用。
 HUD_RECENT_STEPS = 3
+# 悬浮面板与屏幕边缘的留白：贴死看着像被切掉了，留 12px 才像「浮在上面」。
+PANEL_FLOAT_GAP = 12
+# 收起后留在屏幕右缘的把手宽度（CSS 像素）。必须和嵌入模式收起后那条窄栏同宽（36 CSS），
+# 否则两种收起态的宽度差出三分之一，看着像两套东西。
+# 面板窗口本身收不到这么窄——Chromium 有最小窗口宽（实测请求 400 CSS 宽被系统撑到 514），
+# 只能整扇移出屏幕，露一条边当把手。
+PANEL_PEEK_CSS = 36
+# 收起时额外上移多少（CSS 像素）：把 --app 窗口自带的标题栏整条推到屏幕上边外，
+# 否则屏幕右缘那一条的顶端会露半个标题栏（图标加半颗按钮）。
+PANEL_CAPTION_CSS = 34
+# 面板窗口的宽度下限（CSS 宽）：再窄配置卡里的字段就挤成竖排了。
+# 420 就是嵌入模式面板「收起行」时的宽度，两边对齐。
+PANEL_MIN_CSS = 420
+# 并排时页面至少要留这么多 CSS 宽，否则被测系统会退化成移动版布局。
+PAGE_MIN_CSS = 520
 # 浏览器自己知道这次导航的起因（刷新 / 前进后退 / 普通跳转），读它比拿「URL 变没变」猜准。
 # 同时带回 timeOrigin：它是当前 document 的身份。SPA 在启动时会做 same-document 导航
 # （pushState / hash 变化），Playwright 对每一次都会再发一个 framenavigated，但
@@ -291,7 +309,7 @@ class RecordingSession(object):
     def __init__(self, base_url, headless=False, driver=None, panel_url=None,
                  panel_ratio=0.45, hud_panel=False, embed_url=None,
                  ask_daemon=None, ask_model=None, ask_config=None, workspace=None,
-                 framework=None):
+                 framework=None, panel_float=False, panel_width=520):
         self.id = uuid.uuid4().hex
         self.base_url = base_url
         # 这次录制要按哪个框架生成。以前它只活在前端 state 和面板 URL 里，后端每次请求
@@ -320,6 +338,14 @@ class RecordingSession(object):
         # 并排模式：额外开一个窗口加载前端录制页，与被测页面左右摆开。
         self._panel_url = panel_url
         self._panel_ratio = panel_ratio if 0.2 <= panel_ratio <= 0.8 else 0.45
+        # 悬浮模式：被测页面独占整屏，面板作为置顶窄条浮在右侧。
+        # 默认关闭：面板压在页面上，页面右侧那一截其实看不见，操作时两边都不舒服；
+        # 并排（下面 _layout_native）页面完整可见，占比又和嵌入模式一致。
+        self._panel_float = bool(panel_float)
+        # 面板宽按 **CSS 像素** 存，和嵌入模式里那块面板同口径（那里也是 420/600 CSS）。
+        # 摆窗口时再乘显示器缩放比折成物理像素，两种模式看起来才一样宽。
+        self._panel_width = int(panel_width) if isinstance(panel_width, int) else 520
+        self._panel_hidden = False
         self._panel_context = None
         self._panel_page = None
         # 面板的「无壳窗口」形态（Windows + 有头）：独立 Chromium 实例跑 --app，
@@ -397,7 +423,7 @@ class RecordingSession(object):
     def start_new(cls, base_url, headless=False, driver=None, panel_url=None,
                   panel_ratio=0.45, hud_panel=False, embed_url=None,
                   ask_daemon=None, ask_model=None, ask_config=None, workspace=None,
-                  framework=None):
+                  framework=None, panel_float=False, panel_width=520):
         with cls._current_lock:
             current = cls._current
             if current is not None and current.status in ('starting', 'recording'):
@@ -408,7 +434,8 @@ class RecordingSession(object):
         session = cls(base_url, headless=headless, driver=driver, panel_url=panel_url,
                       panel_ratio=panel_ratio, hud_panel=hud_panel, embed_url=embed_url,
                       ask_daemon=ask_daemon, ask_model=ask_model, ask_config=ask_config,
-                      workspace=workspace, framework=framework)
+                      workspace=workspace, framework=framework,
+                      panel_float=panel_float, panel_width=panel_width)
         with cls._current_lock:
             cls._current = session
         session._thread.start()
@@ -596,6 +623,10 @@ class RecordingSession(object):
                 # 面板窗口是否开着，前端据此显示「重新并排」按钮。
                 # 面板可能是同浏览器的第二个窗口，也可能是 --app 起的独立无壳窗口
                 'panel': self._panel_page is not None or bool(getattr(self, '_panel_hwnd', 0)),
+                # 面板是悬浮窄条还是左右分屏：前端据此决定标题条上放哪些快捷操作。
+                'panel_float': bool(getattr(self, '_panel_float', False)),
+                # 面板被收起（窗口已隐藏）：页内胶囊据此把自己显示出来并接管「展开」。
+                'panel_hidden': bool(getattr(self, '_panel_hidden', False)),
                 # 浏览器的生命周期比录制长：停止后仍开着，前端据此决定能否继续拾取 / 验证。
                 'browser_open': self._browser_open(),
                 # 有没有抓到登录态：生成本身不依赖它，但「跑一遍」依赖。
@@ -1153,8 +1184,11 @@ class RecordingSession(object):
                 # playwright.config 决定（那边需要 ignoreHTTPSErrors: true）。
                 self._context = self._browser.new_context(no_viewport=True, ignore_https_errors=True)
                 # 悬浮面板开关要在 recorder.js 之前写进页面。
+                # 嵌入模式强制关闭：面板本来就在同一个窗口的右边，再浮一层只会盖住被测页面。
+                # 独立面板窗口则默认开——面板收起后，页内那颗胶囊是重新打开它的唯一入口。
+                hud_on = bool(self._hud_panel) and not self._embed
                 self._context.add_init_script(
-                    script='window.__AUTOCASE_HUD_PANEL = %s;' % ('true' if self._hud_panel else 'false')
+                    script='window.__AUTOCASE_HUD_PANEL = %s;' % ('true' if hud_on else 'false')
                 )
                 # 嵌入模式下外壳页（AutoCase 自己）不参与录制，按 origin 告诉注入脚本跳过它。
                 if self._embed:
@@ -1184,6 +1218,10 @@ class RecordingSession(object):
                             '或者该站点禁止被 iframe 嵌入（X-Frame-Options / frame-ancestors）。'
                             % self.base_url)
                 self._open_panel()
+                # 面板窗口的页面比窗口本身晚一两百毫秒加载完，Chromium 在那一刻会把自己的
+                # 窗口提到前台，把刚设给被测页面的焦点抢走（实测启动后 fg 一直是面板）。
+                # 等它安静下来再补一次激活，用户落地就能在页面上操作。
+                self._raise_after_panel()
                 self.status = 'recording'
                 self._start_ask_pool()
                 if self._driver is not None:
@@ -1293,6 +1331,10 @@ class RecordingSession(object):
                     result = {'paused': self._paused}
                 elif name == 'relayout':
                     result = {'laid_out': self.layout_windows()}
+                elif name == 'panel_mode':
+                    result = self._set_panel_mode_now(bool(kwargs.get('mode')))
+                elif name == 'panel_width':
+                    result = self._set_panel_width_now(int(kwargs['width']))
                 elif name == 'focus_sheet':
                     result = {'focused': self.sheet_windows(bool(kwargs.get('on', True)))}
                 elif name == 'goto_doc':
@@ -1466,7 +1508,10 @@ class RecordingSession(object):
                  # Edge 会拿 Windows 登录的账号弹「同步你的浏览数据」，那是个独立窗口，
                  # 出现在被测页面上面挡一半屏。关掉同步和后台服务自动启动就没这回事了。
                  '--disable-sync', '--no-service-autorun',
-                 '--window-size=460,900']
+                 # 收起后整扇窗口在屏幕右缘外：浏览器会认为它被遮挡/不可见，把渲染
+                 # 降到几乎停止，点把手回来时要白等一秒。关掉遮挡检测，出屏也照常渲染。
+                 '--disable-features=CalculateNativeWinOcclusion',
+                 '--window-size=%d,900' % self._panel_css_width()]
                 # 只有 AutoCase 自己跑在 https 上（自签名证书）才需要放行；平时是
                 # http://localhost，加了这个参数反而会被挂一条黄色安全警告条。
                 + (['--ignore-certificate-errors'] if self._panel_url.startswith('https') else []),
@@ -1546,10 +1591,21 @@ class RecordingSession(object):
                 pass
 
     def layout_windows(self):
-        """把被测页面与面板窗口左右并排；用户挪过窗口后可再次调用。"""
+        """摆好被测窗口与面板窗口。
+
+        默认并排：两个窗口紧贴成一对，宽度按嵌入模式的 CSS 比例折算（见
+        `_panel_physical_width`），页面完整可见、不被面板压住。
+
+        悬浮（`RECORDING_PANEL_FLOAT`）只在显式开启时走；收起时一律走并排的
+        把手逻辑——悬浮那边没有恢复入口。
+        """
         if self._context is None or self._embed:
             # 嵌入模式只有一个窗口，不需要并排。
             return False
+        if getattr(self, '_panel_float', False) and not getattr(self, '_panel_hidden', False):
+            if self._layout_float():
+                return True
+            logger.warning('悬浮面板摆位失败，退回左右并排')
         if self._layout_native():
             return True
         if self._panel_page is None:
@@ -1603,10 +1659,129 @@ class RecordingSession(object):
         self._main_hwnd = wins[0] if wins else 0
         return self._main_hwnd
 
+    def _layout_float(self):
+        """页面占满整屏，面板作为置顶窄条浮在右侧。
+
+        只在 `RECORDING_PANEL_FLOAT=1` 时走（默认关）。默认并排 `_layout_native`
+        已经按嵌入模式的比例分好了，页面完整可见；悬浮看起来像在页面上贴了张卡片，
+        页面右缘那一截还被盖住，两边都不舒服。留着它是因为某些超宽屏上有人更喜欢
+        页面一点不让——但收起走并排的把手，不在这里隐藏窗口。
+        """
+        if not winwindows.available() or self._embed or self._headless:
+            return False
+        panel = getattr(self, '_panel_hwnd', 0)
+        if not panel or not winwindows.prepare(panel):
+            return False
+        main = self._main_window_hwnd()
+        if not main or not winwindows.prepare(main):
+            return False
+        area = winwindows.work_area(main) or winwindows.work_area(panel)
+        if not area:
+            return False
+        ax, ay, aw, ah = area
+        # 悬浮时不能粘合：拖页面窗口会把面板一起拖走，而悬浮面板的位置是固定的。
+        self._stop_glue()
+        if getattr(self, '_panel_hidden', False):
+            # 收起交给并排那条路：悬浮模式没有把手，隐藏掉就再也叫不回来了。
+            return False
+        if not self._place_float_panel(ax, ay, aw, ah):
+            return False
+        winwindows.move_visible(main, ax, ay, aw, ah)
+        self._raise_pair(main)
+        return True
+
+    def _place_float_panel(self, ax, ay, aw, ah):
+        """把面板摆到工作区右侧，上下留 12px 呼吸。
+
+        宽度按配置的 CSS 宽折成物理像素：配置是 520 CSS，175% 缩放的屏上是 910 物理。
+        屏幕很窄（<1260）时退成三分之一屏，至少保证面板能用。
+        """
+        gap = PANEL_FLOAT_GAP
+        if aw >= 1260:
+            dpr = winwindows.scale(self._panel_hwnd) or 1.0
+            want = int(round(self._panel_css_width() * dpr))
+            width = max(360, min(want, aw - 900))
+        else:
+            width = max(320, aw // 3)
+        height = max(420, ah - gap * 2)
+        left = ax + aw - width - gap
+        top = ay + gap
+        if not winwindows.show_window(self._panel_hwnd, True):
+            return False
+        if not winwindows.move_visible(self._panel_hwnd, left, top, width, height):
+            return False
+        # 浏览器最大化会盖住面板：不置顶的话用户会以为面板被关了。
+        winwindows.set_topmost(self._panel_hwnd, True)
+        return True
+
+    def set_panel_mode(self, mode):
+        """展开 / 收起面板。
+
+        收起只能**隐藏整个窗口**：Chromium 有最小窗口尺寸（实测请求 240x72 被撑到
+        921x211），做不出 200x38 的胶囊。胶囊由页面内的 HUD 承担，它点击后回来调这里。
+        """
+        mode = (mode or '').strip().lower()
+        if mode not in ('expanded', 'hidden'):
+            raise RecordingError('不支持的面板状态：%s' % mode)
+        self._panel_hidden = mode == 'hidden'
+        return self._call('panel_mode', mode=self._panel_hidden)
+
+    def _set_panel_mode_now(self, hidden):
+        self._panel_hidden = bool(hidden)
+        laid_out = self.layout_windows()
+        self._push_hud()
+        return {'laid_out': laid_out, 'panel_hidden': self._panel_hidden}
+
+    def set_panel_width(self, width):
+        """改面板宽度（CSS 像素），把两个窗口重新摆一次。
+
+        并排模式下「收起行 / 展开行」要跟着改窗口宽度——嵌入模式那边改的是 CSS 宽度，
+        这边改的是另一扇窗口，前端动不了，只能回过头来调这里，两边行为才对得上。
+        """
+        try:
+            css = int(width)
+        except (TypeError, ValueError):
+            raise RecordingError('面板宽度必须是数字：%s' % width)
+        if not 320 <= css <= 900:
+            raise RecordingError('面板宽度超出范围：%s' % css)
+        return self._call('panel_width', width=css)
+
+    def _set_panel_width_now(self, css):
+        self._panel_width = int(css)
+        laid_out = self.layout_windows()
+        self._push_hud()
+        return {'laid_out': laid_out, 'panel_width': self._panel_css_width()}
+
+    def _panel_css_width(self):
+        """面板按界面尺寸要多宽（CSS 像素）。和嵌入模式那块面板同一个口径。"""
+        css = int(getattr(self, '_panel_width', PANEL_MIN_CSS) or PANEL_MIN_CSS)
+        return max(PANEL_MIN_CSS, min(css, 900))
+
+    def _panel_physical_width(self, hwnd, aw):
+        """面板窗口该多宽（物理像素）。
+
+        按 CSS 宽折：嵌入模式里面板就是 600 CSS 宽，并排时只有折成物理像素才和它看起来
+        一样宽（这台机器 175% 缩放，600 CSS 就是 1050 物理，差出将近一倍）。同时留出
+        页面最低的 CSS 宽，别把被测系统压成移动版。
+
+        真正的下限由系统定：Chromium 有最小窗口宽（实测请求 400 CSS 宽被撑到 514），
+        摆窄了会被强行撑开，所以调用方摆完还得回读一次实际宽度再让位。
+        """
+        dpr = winwindows.scale(hwnd) or 1.0
+        want = int(round(self._panel_css_width() * dpr))
+        room = aw - int(round(PAGE_MIN_CSS * dpr))
+        return max(360, min(want, max(360, room)))
+
     def _layout_native(self):
         """按显示器工作区把两个窗口摆成紧贴的一对，然后开粘合。
 
-        比的是**可见边界**而不是窗口矩形：Win10 每个窗口左右各有约 8px 不可见的
+        宽度按 CSS 像素折算（见 `_panel_physical_width`），和嵌入模式同一套比例，
+        所以「两窗口并排」和「iframe 嵌入」看到的面板一样宽。
+
+        收起时面板整扇滑出屏幕右缘，只留 PANEL_PEEK_CSS 宽的一条把手——Chromium 有最小
+        窗口宽，缩不出真正的胶囊，把窗口推出屏幕是唯一留得住入口又不遮挡页面的做法。
+
+        贴的是**可见边界**而不是窗口矩形：Win10 每个窗口左右各有约 8px 不可见的
         拉伸边框，按矩形贴死视觉上会漏 16px 的桌面，看着像一条黑缝。
         """
         if not winwindows.available() or self._embed or self._headless:
@@ -1625,8 +1800,27 @@ class RecordingSession(object):
         if not area:
             return False
         ax, ay, aw, ah = area
-        panel_w = max(360, int(aw * self._panel_ratio))
-        page_w = max(480, aw - panel_w)
+
+        if getattr(self, '_panel_hidden', False):
+            # 收起：面板整体挪到屏幕右缘外，只露一条把手；页面把这条让出来。
+            # 往上多挪一个标题栏的高度，让标题栏整条落到屏幕上边外——不然那一条的
+            # 顶端会露半个标题栏（图标加半颗按钮），看着像窗口被裁坏了。
+            # 不粘合——拖页面窗口时把手该钉在屏幕边上，不该跟着跑。
+            self._stop_glue()
+            peek = int(round(PANEL_PEEK_CSS * (winwindows.scale(self._panel_hwnd) or 1.0)))
+            peek = max(24, min(peek, max(24, aw // 20)))
+            panel_w = self._panel_physical_width(self._panel_hwnd, aw)
+            # Chrome 的 --app 窗口把标题栏画在客户区里面，Win32 的「客户区顶」就等于
+            # 窗口顶，量不出它的高度，只能按经验值估（100% 缩放下约 33 CSS）。宁可多挪
+            # 几个像素把标题栏整条推到屏幕上边外，也别留半截在那儿。
+            caption = int(round(PANEL_CAPTION_CSS * (winwindows.scale(self._panel_hwnd) or 1.0)))
+            winwindows.move_visible(main, ax, ay, aw - peek, ah)
+            winwindows.move_visible(self._panel_hwnd, ax + aw - peek, ay - caption,
+                                    panel_w, ah + caption)
+            return True
+
+        panel_w = self._panel_physical_width(self._panel_hwnd, aw)
+        page_w = max(360, aw - panel_w)
         panel_w = aw - page_w
         # 摆完回头看一眼：刚从最大化还原的窗口，边框尺寸在还原那一刻才变，
         # 第一遍 move_visible 用的还是最大化时的旧边框，能差出几十像素
@@ -1641,8 +1835,51 @@ class RecordingSession(object):
             time.sleep(0.05)
             if self._pair_is_flush(main, ax, page_w, panel_w):
                 break
+            # 系统把面板撑宽了（Chromium 的最小窗口宽）：按实际宽度把页面让出来，
+            # 否则两扇窗口会叠在一起，页面右边被吃掉一截，看着像卡住了。
+            pv = winwindows.visible_rect(self._panel_hwnd)
+            if pv and panel_w + 2 < pv[2] < aw - 360:
+                panel_w = pv[2]
+                page_w = max(360, aw - panel_w)
+                panel_w = aw - page_w
         self._start_glue(main)
+        self._raise_pair(main)
         return True
+
+    def _raise_after_panel(self, delay=1.2):
+        """面板窗口加载完成后补一次激活，把焦点还给被测页面。
+
+        不用 sleep：`/start` 不该为了焦点问题多等一秒。Timer 跑在独立线程，
+        只是几个 Win32 调用，不碰 Playwright 对象；会话已经关掉时句柄失效，
+        `activate` 内部自己吞掉异常。
+        """
+        if not getattr(self, '_panel_hwnd', 0):
+            return None
+        main = self._main_window_hwnd()
+        if not main:
+            return None
+        timer = threading.Timer(delay, lambda: self._raise_pair(main))
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    def _raise_pair(self, main):
+        """摆完把两扇窗口提到最前。
+
+        `move_visible` 用的是 `SWP_NOZORDER | SWP_NOACTIVATE`——只改坐标，不动层级。
+        桌面上只要有全屏窗口，刚启动的录制窗口就整个躺在它下面，用户看不到、以为浏览器
+        没打开（实测 WindowFromPoint 三个点全落回编辑器窗口）。只调 SetWindowPos(HWND_TOP)
+        也不行，前台窗口会把它抢回去，得 BringWindowToTop + SetForegroundWindow。
+
+        面板只提层级、不抢焦点：焦点留给被测页面，用户启动后马上要在那上面操作。
+        """
+        panel = getattr(self, '_panel_hwnd', 0)
+        shown = winwindows.activate(main)
+        # 顺序不能反：先把焦点设给被测页面，再把面板提到它上面（BringWindowToTop 不动
+        # 焦点）。反过来面板会被 SetForegroundWindow 连带压到后面，明明摆了却不显示。
+        if panel and not getattr(self, '_panel_hidden', False):
+            winwindows.bring_to_top(panel)
+        return shown
 
     def _pair_is_flush(self, main, ax, page_w, panel_w, tol=4):
         """两个窗口是不是真的按预期贴住了。
@@ -1706,6 +1943,9 @@ class RecordingSession(object):
             ax, ay, aw, ah = area
             width = max(720, min(aw - 60, 1280))
             height = max(480, ah - 60)
+            # 面板可能因为「收起」被藏起来了：读任务书得先把它放出来，否则铺了也看不见。
+            winwindows.show_window(self._panel_hwnd, True)
+            winwindows.set_topmost(self._panel_hwnd, True)
             return winwindows.move_visible(
                 self._panel_hwnd, ax + (aw - width) // 2, ay + (ah - height) // 2, width, height)
         if self._panel_page is None:
@@ -1772,7 +2012,8 @@ class RecordingSession(object):
 
     def _push_hud(self):
         """只在录制线程里执行：把最近几步与整体状态刷到被录制页面。"""
-        if self._context is None or not self._hud_panel:
+        if self._context is None or not self._hud_panel or self._embed:
+            # 嵌入模式没有独立面板可收起，浮层只会盖住被测页面。
             return
         payload = json.dumps(self._hud_payload(), ensure_ascii=False)
         for page in list(self._context.pages):
@@ -1791,6 +2032,7 @@ class RecordingSession(object):
                 'status': self.status,
                 'pick': self._pick,
                 'total': len(steps),
+                'panel_hidden': bool(getattr(self, '_panel_hidden', False)),
                 'ambiguous': ambiguous,
                 'steps': recent,
             }
@@ -1864,6 +2106,10 @@ class RecordingSession(object):
             # 页面里按 Esc 退出拾取。拾取开关存在 Python 这边（工具栏、轮询都读它），
             # 页内 JS 自己关掉的话，面板会一直显示「退出拾取」，点了才同步。
             self._set_pick(False)
+            return
+        if action == 'expand-panel':
+            # 面板收起来之后，页面里那颗胶囊是唯一还能点到的入口。
+            self._set_panel_mode_now(False)
             return
         if action != 'undo':
             return
@@ -2805,6 +3051,11 @@ class RecordingSession(object):
     def _handle_event(self, source, raw):
         data = json.loads(raw)
         kind = data['type']
+        # 页面里那颗「录制中 · N 步」胶囊：面板窗口收起后，它是唯一还能点到的入口。
+        # 它不改步骤，所以不受「暂停 / 已停止」的限制。
+        if kind == 'panel_expand':
+            self._set_panel_mode_now(False)
+            return
         # 停止后浏览器还开着：拾取仍要做（断言要用），但不能再记操作步骤。
         # 暂停期间同理，拾取是显式动作，仍然允许。
         if kind != 'pick' and (self._paused or self.status != 'recording'):

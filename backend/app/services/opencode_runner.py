@@ -1,6 +1,7 @@
 import difflib
 import json
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -17,6 +18,8 @@ from queue import Empty, Full, Queue
 
 import requests
 
+
+logger = logging.getLogger(__name__)
 
 
 class WorkspaceBusyError(ValueError):
@@ -583,6 +586,53 @@ class OpenCodeRunner:
         if not provider_id or not model_id:
             return None
         return {'id': model_id, 'providerID': provider_id}
+
+    def _resolve_model(self, model):
+        """解析模型，并在派发前确认它真的存在——否则只会白等 60 秒。
+
+        OpenCode 对「不存在的 provider / model」既不报错也不排队：`prompt_async`
+        照样返回 204，会话却永远不进 busy，连一条 assistant 消息都不留。我们原先
+        只能等到 busy 超时，再甩一句「派发后 60 秒内没有开始处理」——既没说缺什么，
+        也没给下一步。实测同一份项目、同一个模型：写对 1.5 秒开始，把 provider 首字母
+        从 `4rount-hyper` 写成 `4Rount-hyper` 就永远不开始（库里真实的失败记录就是后者）。
+
+        所以这里先查一遍模型列表：只是大小写不一致就按配置里的写法纠正并继续；
+        真不存在就直接抛错，把「缺哪个、最接近的是哪个」说清楚，省掉那 60 秒。
+        读不到模型配置时不做校验——不能因为读不到列表就挡住正常生成。
+        """
+        ref = self._split_model(model)
+        if ref is None:
+            return None
+        try:
+            from app.services import models_config
+            entries = models_config.flat_models(include_hidden=True)
+        except Exception:  # noqa: BLE001 - 读不到配置就跳过校验，保持原行为
+            logger.debug('模型校验跳过：读不到模型列表', exc_info=True)
+            return ref
+        if not entries:
+            return ref
+        wanted = '%s/%s' % (ref['providerID'], ref['id'])
+        known = {}
+        for entry in entries:
+            name = str(entry.get('id') or '')
+            if not name:
+                continue
+            if name == wanted:
+                return ref
+            known.setdefault(name.lower(), entry)
+
+        hit = known.get(wanted.lower())
+        if hit is not None:
+            fixed = '%s/%s' % (hit.get('provider'), hit.get('model'))
+            logger.warning('模型名 %s 与配置不一致（大小写），已按 %s 派发', wanted, fixed)
+            return {'id': hit['model'], 'providerID': hit['provider']}
+
+        close = difflib.get_close_matches(wanted.lower(), list(known), n=3, cutoff=0.5)
+        hint = '、'.join(known[name]['id'] for name in close)
+        raise ValueError(
+            '模型 %s 不在当前配置里%s。请到设置页重新选一次模型。'
+            % (wanted, ('，最接近的是 ' + hint) if hint else '')
+        )
 
     def _auto_reply_permission(self, base_url, event_type, properties):
         # Replaces `run --auto`: any permission the agent config marks as `ask`
@@ -1283,7 +1333,7 @@ class OpenCodeRunner:
         用于意图解析这类不需要读写文件的短任务。工作目录是临时目录，不加载项目 agent，
         但沿用项目的 OpenCode 配置，模型与 provider 的解析方式和正式运行一致。
         """
-        model_ref = self._split_model(model)
+        model_ref = self._resolve_model(model)
         if model_ref is None:
             raise ValueError('模型格式应为 providerID/modelID')
         config_path = self._config_path()
@@ -1441,7 +1491,7 @@ class OpenCodeRunner:
         agent 默认是写脚本的 recording-emitter；规划阶段传 recording-planner，
         那个 agent 自己的 permission 就是全 deny，所以 writable 传 None 也不会放权。
         """
-        model_ref = self._split_model(model)
+        model_ref = self._resolve_model(model)
         if model_ref is None:
             raise ValueError('模型格式应为 providerID/modelID')
         config_path, drop_config = self._emit_config(writable, workspace)
@@ -1660,7 +1710,7 @@ class OpenCodeRunner:
             sse_thread = threading.Thread(target=self._consume_sse, args=(base_url, sse_stop, on_bus_event), daemon=True)
             sse_thread.start()
 
-            model_ref = self._split_model(model)
+            model_ref = self._resolve_model(model)
             return_code = 0
             try:
                 # 总超时在三个阶段之间共享；每个阶段内部的启动/停滞判定各自独立计时。
