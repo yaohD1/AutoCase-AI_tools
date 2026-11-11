@@ -5,6 +5,7 @@
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
@@ -14,7 +15,7 @@ from app.services.automation_generator import AutomationScriptGenerator
 from app.services.opencode_runner import OpenCodeRunner
 from app.models import db
 from app.models.recording_generation import RecordingGeneration
-from app.services.recording import detect, embedding, emit, guard, records, replay
+from app.services.recording import debug, detect, embedding, emit, guard, records, replay
 from app.services.recording import emit_session, intent, memory, progress, verify
 from app.services.recording.ask_pool import AskUnavailable
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
@@ -947,6 +948,104 @@ def replay_recording():
     except Exception as exc:  # 浏览器起不来、页面打不开等环境问题
         return _error('回放无法执行：%s' % exc, 500)
     return jsonify(result), 200
+
+
+@recording_bp.route('/automation/recording/debug/start', methods=['POST'])
+def start_debug_replay():
+    """开一次调试回放：逐步执行录制 IR，能暂停、单步，全程出画面。
+
+    和 `/replay` 的区别要说清楚：那个跑完只给一份报告，这个是把过程摊开给人看。
+    两者执行的是同一份 IR、同一套定位选择逻辑，所以结论不会互相打架。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    if session.status not in ('stopped', 'idle_timeout', 'closed') and not session.paused:
+        return _error('先停止或暂停录制再回放', 409)
+    steps = session.ir()
+    if not steps:
+        return _error('还没有录制任何步骤', 400)
+    body = request.get_json(silent=True) or {}
+    framework = (body.get('framework') or '').strip() or session.framework or replay.PW_FRAMEWORK
+    if framework not in (replay.PW_FRAMEWORK, replay.RF_FRAMEWORK):
+        return _error('不支持的框架：%s' % framework, 400)
+    try:
+        runner = debug.start(
+            replay._expand(steps, session.action_definitions()),
+            framework=framework,
+            delay=body.get('delay'),
+            headless=bool(body.get('headless', True)),
+        )
+    except debug.DebugBusy as exc:
+        return _error(str(exc), 409)
+    return jsonify(runner.snapshot()), 201
+
+
+@recording_bp.route('/automation/recording/debug/state', methods=['GET'])
+def debug_replay_state():
+    runner = debug.current()
+    if runner is None:
+        return jsonify({'status': 'idle'}), 200
+    return jsonify(runner.snapshot()), 200
+
+
+@recording_bp.route('/automation/recording/debug/control', methods=['POST'])
+def debug_replay_control():
+    runner = debug.current()
+    if runner is None:
+        return _error('没有正在进行的调试回放', 404)
+    body = request.get_json(silent=True) or {}
+    action = (body.get('action') or '').strip()
+    if action == 'speed':
+        runner.set_speed(body.get('delay', debug.DEFAULT_DELAY))
+        return jsonify(runner.snapshot()), 200
+    try:
+        runner.control(action)
+    except debug.DebugError as exc:
+        return _error(str(exc), 400)
+    return jsonify(runner.snapshot()), 200
+
+
+@recording_bp.route('/automation/recording/debug/stream', methods=['GET'])
+def debug_replay_stream():
+    """MJPEG 推流：`<img src>` 直接吃，前端零 JS。
+
+    比 SSE 少一层 base64（省 33% 带宽），比自己写 canvas 少一堆重连逻辑。
+    代价是占一个 Flask 线程——dev server 默认 threaded，够用；单开一帧不动超过
+    5 秒就主动断开，让浏览器重连拿最后一帧，避免中间层把长连接掐死后永久黑屏。
+    """
+    runner = debug.current()
+    if runner is None:
+        return _error('没有正在进行的调试回放', 404)
+
+    def gen():
+        # 画面静止时也要定时重发同一帧。Chrome 解析 multipart 是「看到下一个 boundary
+        # 才认上一帧结束」——只发一帧然后干等，浏览器会一直不显示，直到连接关闭
+        # （实测正好卡在旧版的 5 秒超时上，看起来像「打开很慢」）。
+        # 重发的是同一份 JPEG，浏览器只是重绘，不会闪。
+        last_seq = -1
+        last_sent = 0.0
+        started = time.monotonic()
+        try:
+            while True:
+                frame, seq = runner.latest_frame()
+                now = time.monotonic()
+                if frame and (seq != last_seq or now - last_sent > 0.3):
+                    last_seq = seq
+                    last_sent = now
+                    yield (b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '
+                           + str(len(frame)).encode() + b'\r\n\r\n' + frame + b'\r\n')
+                elif frame is None and now - started > 10:
+                    # 一直没有画面（会话没起来或早已结束），收摊让浏览器重连一次
+                    return
+                time.sleep(0.05)
+        except GeneratorExit:
+            return
+
+    resp = Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Accel-Buffering'] = 'no'
+    return resp
 
 
 @recording_bp.route('/automation/recording/generations', methods=['GET'])

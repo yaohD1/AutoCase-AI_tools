@@ -1326,7 +1326,8 @@
              不需要先经过「生成」。按钮放在这里，不要再塞回生成结果卡片里。 -->
         <div v-if="canReplay && steps.length" class="replay-block">
           <div class="replay-row">
-            <el-button size="small" :loading="replaying" @click="runReplay">回放校验</el-button>
+            <el-button size="small" type="primary" @click="openDebugReplay">调试回放</el-button>
+            <el-button size="small" :loading="replaying" @click="runReplay">快速校验</el-button>
             <span class="field-hint">
               {{ paused
                 ? '暂停中也能跑：另开一个无头浏览器从第 1 步重演，不动你当前这个窗口'
@@ -1808,7 +1809,7 @@
 
 <script setup>
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Files, FolderOpened, Loading, Plus, Refresh, Search, Setting, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
@@ -1902,6 +1903,7 @@ function endEdit() {
 // - panel=1：split 模式下的独立面板窗口，后端用 CDP 和被测页面左右并排；
 // - embed=1：嵌入模式，本页就是唯一窗口，左边 iframe 加载 target，右边是编排面板。
 const route = useRoute()
+const router = useRouter()
 const panelMode = computed(() => route.query.panel === '1')
 const embedMode = computed(() => route.query.embed === '1')
 const compactMode = computed(() => panelMode.value || embedMode.value)
@@ -2068,6 +2070,12 @@ const planBody = ref(null)
 const noteDialog = reactive({ visible: false, quote: '', comment: '' })
 const selTip = reactive({ visible: false, x: 0, y: 0, text: '' })
 let noteSeq = 0
+// 调试回放：另开一页，左画面右步骤，能暂停单步。跑的是同一份 IR、同一套定位，
+// 所以它和下面这个「快速校验」不会给出互相打架的结论——一个看过程，一个看结果。
+function openDebugReplay() {
+  router.push({ path: '/recording/replay', query: { framework: config.framework } })
+}
+
 // 回放校验：跑的是内存里的录制 IR，和有没有生成产物无关。
 // 停止后随时可跑；暂停时步骤集也不会再变，一样可以跑。
 const replaying = ref(false)

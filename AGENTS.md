@@ -346,6 +346,21 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
   - 删画像走 `DELETE /api/automation/recording/memory`。**这条通道必须留着**：模型学歪了没有擦除手段，用户就只能关掉整个功能。
 
 
+### 调试回放（`/recording/replay`）
+
+- **和「快速校验」是两条路，别合并**。`POST /replay` 一口气跑完只给一份「第几步失效」的报告（`replay.py`）；调试回放要让人看着它跑，所以自己解释执行 IR（`debug.py`），多了步间节奏、控制闸门、画面帧三样东西。两者共用同一份 IR、同一套 `_locator` / `_run_step`，结论不会互相打架。
+- **为什么不用 `playwright test` / `robot` 子进程跑生成好的脚本**：那两个一启动就由不得我们，题目要的「暂停在某一步」在子进程里做不到（只能 kill）。要停就必须自己一步一步调 Playwright。「跑真实脚本」是另一件事，另开一条沙箱链路，不要试图塞进这里。
+- **暂停的物理边界**：Playwright 的一次 `click()` / `expect()` 不能从外部打断，按暂停会在**当前这一步执行完之后**停在下一步前。这不是 bug，UI 上也别承诺「立刻停」。闸门在每步之前（`_gate`），暂停期间自己抓帧，画面才不会冻在上一帧。
+- **单步不走步间停留**（`_dwell` 看到 `_stepped` 直接返回）：用户点「单步」的意思是「走一步然后停」，再停 0.55 秒只会让他以为按钮没生效。同理，`_dwell` 里要检查 `_paused` / `_stopped` 提前退出。
+- **当前步指向「即将执行的那一步」**：`index` 在进闸门之前就前移。反过来的话暂停时高亮的是刚做完的那步，看着像卡在上一行不动。
+- **元素高亮改元素自己的 `outline`，不插 DOM 节点**（`_HL_ON`）：插一个 div 当覆盖层会被自己的定位器数进去，回放时「命中 1 个」突然变「命中 2 个」，排查半天才发现是自己画的框。备份值存在元素的 JS 属性 `__acOutline` 上，不进 DOM 属性。
+- **画面走 MJPEG**（`/debug/stream`，`<img src>` 直接吃）：比 SSE 少一层 base64（省 33%），比自己写 canvas 少一堆重连逻辑。抓帧是执行线程里 `page.screenshot(type=jpeg, quality=55)`，0.09 秒最小间隔（≈11fps）；暂停和步间停留期间持续抓，执行中每步前后各抓一张。**同一画面重复压进来只是浪费带宽**，长度没变就当没变（误判的代价只是少发一帧）。
+- **外部浏览器的 screencast 拿不到帧**：`connect_over_cdp` 连上去之后 `Page.startScreencast` 一帧都不出（实测），只能 `Page.captureScreenshot` 轮询（实测 25.6 fps，够用）。自己 `launch` 的浏览器 screencast 正常（13 fps），但 RF/Selenium 沙箱那条链路必须是外部连，所以统一按截图轮询设计。
+- **失败自动暂停**：`status=failed` 且 `_paused=True`，画面停在出事那一刻。前端靠 `state.error` + 失败步骤的 `error` 两处显示——列表里只有一行红字，底部错误条放完整原因（定位原文、实际值、调用日志）。
+- **断言/等待步骤必须有中文 label**（`INTENT_LABELS`）：这类步骤没有 `alias`，不补的话右侧列表和底部详情只剩一个「assert」，用户不知道它在等什么。
+- 前端轮询 `/debug/state`（260ms），收到 `done/failed/stopped` 就停；`<img>` 断流后重连一次拿最后一帧（后端在 5 秒无新帧时主动断开，避免中间层掐死后永久黑屏）。
+- 单例：同时只允许一场调试回放（`DebugBusy`）。页面 `onBeforeUnmount` 会 `stop`，刷新页面则先 `refresh` 接上已有会话，不要重开一个把人家顶掉。
+
 ## 自动化脚本约定
 
 - 当前只支持 Playwright + TypeScript；自动化入口直接调用 OpenCode，不依赖 AutoCase 已生成用例。

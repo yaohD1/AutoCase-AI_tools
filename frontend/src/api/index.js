@@ -236,6 +236,16 @@ batchDeleteTestcases(ids) {
   setRecordingPanelWidth(width) {
     return api.post('/automation/recording/panel/width', { width })
   },
+  // 调试回放：逐步执行录制 IR，能暂停 / 单步 / 看画面
+  startDebugReplay(payload) {
+    return api.post('/automation/recording/debug/start', payload || {})
+  },
+  getDebugReplayState() {
+    return api.get('/automation/recording/debug/state')
+  },
+  controlDebugReplay(action, extra) {
+    return api.post('/automation/recording/debug/control', { action, ...(extra || {}) })
+  },
   // 插入前验证：只看当前页面这一刻的状态，不回放
   verifyRecordingIntent(intent) {
     return api.post('/automation/recording/verify', { intent }, { timeout: 30000 })
