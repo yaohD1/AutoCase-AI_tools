@@ -6,6 +6,7 @@ Playwright 同步 API 必须在同一个线程里使用，所以每个会话占�
 - 循环里调用 wait_for_timeout 让事件得以分发（同步 API 只在调用期间分发事件）。
 """
 import atexit
+import copy
 import json
 import logging
 import os
@@ -237,7 +238,8 @@ NAV_INFO_JS = (
 NAV_FROM_CLICK_SECONDS = 1.5
 STEP_TITLES = {'goto': '打开', 'reload': '刷新', 'click': '点击', 'fill': '输入', 'select': '选择',
                'press': '按键', 'dialog': '弹窗',
-               'new_page': '标签页', 'assert': '断言', 'wait': '等待', 'sleep': '等待'}
+               'new_page': '标签页', 'assert': '断言', 'wait': '等待', 'sleep': '等待',
+               'slider': '滑块验证'}
 STATUS_LABELS = {'unique': '唯一定位', 'fragile': '结构定位', 'ambiguous': '定位不唯一', 'stale': '定位已变化'}
 STATUS_TONES = {'unique': 'ok', 'fragile': 'warn', 'ambiguous': 'bad'}
 # 就地编辑允许改的字段：只改「值」，不动定位（换元素走拾取）。
@@ -378,6 +380,9 @@ class RecordingSession(object):
             self._actions = {}
         self._actions_error = None
         self._picks = []
+        # 回放里 healer 修过的定位。每条都能撤销：改定位是「事后推测」，
+        # 推错的代价是脚本静默点错，必须留一条退路。
+        self._heal_history = []
         # 元素身份 → 别名。同一个元素复用同一个别名，不同元素撞名时加后缀（见 _alias_for）。
         self._alias_keys = {}
         self._wired = set()
@@ -1060,6 +1065,72 @@ class RecordingSession(object):
         self._schedule_hud()
         return self.snapshot()
 
+    def patch_target(self, no, patch):
+        """把回放里验证过的定位写回这一步。只换定位，不碰业务字段。
+
+        写回的是「当前页面上重新数出来的一份候选 + 新的主定位」，不是随手改一个
+        字符串：回放（PW 读 primary / RF 读 candidates）和生成端用的是同一套挑选
+        函数，两边会同时改口，不会出现「回放过了、生成的还是旧定位」。
+
+        patch 里允许的键：primary / candidates / clear_frame。别的键一律拒绝——
+        这个入口只该被 healer 用，别让它长成第二个「随便改步骤」的后门。
+        """
+        unexpected = sorted(set(patch or {}) - {'primary', 'candidates', 'clear_frame', 'retry_only'})
+        if unexpected:
+            raise RecordingError('修复补丁里有不支持的字段：%s' % '、'.join(unexpected))
+        with self._lock:
+            idx = self._index_of(no)
+            step = self._steps[idx]
+            target = step.get('target')
+            if not target:
+                raise RecordingError('这一步没有目标元素，无法修复定位')
+            before = copy.deepcopy(target)
+            if patch.get('primary'):
+                target['primary'] = copy.deepcopy(patch['primary'])
+            if patch.get('candidates'):
+                target['candidates'] = copy.deepcopy(patch['candidates'])
+            if patch.get('clear_frame'):
+                snap = dict(target.get('snap') or {})
+                snap['frame_url'] = None
+                snap['frame_name'] = None
+                target['snap'] = snap
+            # 用户亲手挑过的那条可能已经被换掉了，留着会让生成端去调一个不存在的候选。
+            chosen = target.get('chosen')
+            if chosen:
+                descs = {c.get('desc') for c in target.get('candidates') or []}
+                if chosen.get('desc') not in descs:
+                    target.pop('chosen', None)
+            self._heal_history.append({'no': no, 'before': before,
+                                       'after': copy.deepcopy(target),
+                                       'at': time.time()})
+        self._schedule_hud()
+        return self.snapshot()
+
+    def undo_heal(self, no=None):
+        """撤销最近一次（或某一编号的）定位修复。"""
+        with self._lock:
+            if not self._heal_history:
+                raise RecordingError('没有可撤销的修复')
+            idx = len(self._heal_history) - 1
+            if no is not None:
+                found = next((i for i in range(len(self._heal_history) - 1, -1, -1)
+                              if self._heal_history[i]['no'] == no), None)
+                if found is None:
+                    raise RecordingError('第 %s 步没有可撤销的修复' % no)
+                idx = found
+            record = self._heal_history.pop(idx)
+            step = self._steps[self._index_of(record['no'])]
+            step['target'] = record['before']
+        self._schedule_hud()
+        return self.snapshot()
+
+    def heal_history(self):
+        with self._lock:
+            return [{'no': r['no'], 'at': r['at'],
+                     'before': (r['before'].get('primary') or {}).get('desc'),
+                     'after': (r['after'].get('primary') or {}).get('desc')}
+                    for r in self._heal_history]
+
     def add_intent_step(self, intent, text=None, after_no=None):
         """插入断言 / 等待 / 睡眠。intent 必须已由 intent.validate 校验过。
 
@@ -1102,6 +1173,34 @@ class RecordingSession(object):
         行内「+」可以让它落在任意一步之后。
         """
         return self._call('reload', after_no=after_no)
+
+    def add_slider_step(self, config=None, after_no=None):
+        """插入一步「滑块验证」。
+
+        不做拖动识别：滑块拖动在 DOM 里只是一串 pointermove，和「按住拖一下滚动条」
+        长得一模一样，自动识别必然误判。让用户在工具栏显式加一步，语义最清楚。
+        这一步没有目标元素，只有三个参数：容器选择器（可空 = 自动识别）、
+        重试次数、单次超时。
+        """
+        return self._call('slider', config=config or {}, after_no=after_no)
+
+    def _add_slider(self, config=None, after_no=None, **_):
+        config = config or {}
+        with self._lock:
+            page = self._current_page()
+            step = ir.make_step(
+                'slider', no=0, source='manual',
+                page_index=self._page_index(page) if page is not None else 0,
+                slider={
+                    'selector': str(config.get('selector') or '').strip()[:200],
+                    'attempts': max(0, min(int(config.get('attempts') or 2), 5)),
+                    'timeout': max(5, min(int(config.get('timeout') or 20), 90)),
+                },
+            )
+            self._insert_step(step, after_no)
+            self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
 
     def _add_reload(self, after_no=None):
         page = self._current_page()
@@ -1345,6 +1444,8 @@ class RecordingSession(object):
                     result = self._verify_now(kwargs['intent'])
                 elif name == 'reload':
                     result = self._add_reload(kwargs.get('after_no'))
+                elif name == 'slider':
+                    result = self._add_slider(kwargs.get('config'), kwargs.get('after_no'))
                 elif name == 'highlight':
                     result = self._highlight_now(kwargs['no'], kwargs.get('index'),
                                                  kwargs.get('framework') or 'playwright-ts')

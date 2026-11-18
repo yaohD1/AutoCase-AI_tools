@@ -10,6 +10,7 @@ import time
 
 from playwright.sync_api import expect, sync_playwright
 
+from app.services.recording import slider
 from app.services.recording.ir import PAGE_READY
 from app.services.recording.locators import best_effort, build_locator, pick_for
 
@@ -240,6 +241,16 @@ def _run_step(step, page, framework=PW_FRAMEWORK):
     if kind == 'sleep':
         page.wait_for_timeout(float(step['intent']['seconds']) * 1000)
         return None, None
+    if kind == 'slider':
+        # 这一条不是「点一个元素」，而是一段固定流程（找容器 → 问视觉模型 → 拖动）。
+        # 失败要抛出去：滑块没过就继续往下走，后面的断言会在错误页面上跑，失败信息更远。
+        try:
+            outcome = slider.solve(page, step.get('slider') or {})
+        except slider.SliderError as exc:
+            raise ReplayError(str(exc)) from exc
+        if not outcome.get('ok'):
+            raise ReplayError(outcome.get('error') or '滑块验证没有通过')
+        return None, {'slider': outcome}
     if kind in ('assert', 'wait'):
         return _assert(step['intent'], step.get('target'), page, framework)
     raise ReplayError('回放不支持的步骤：%s' % kind)
@@ -257,12 +268,17 @@ def _step_label(step):
         action = '确定' if (info.get('action') or step.get('value')) == 'accept' else '取消'
         message = (info.get('message') or '').strip()
         return '弹窗（%s）：%s' % (action, message[:40] or info.get('kind') or '未捕获')
+    if kind == 'slider':
+        selector = ((step.get('slider') or {}).get('selector') or '').strip()
+        return '滑块验证（%s）' % (selector or '自动识别容器')
     return None
 
 
 def _entry(step, chosen, ok, error=None, poll=None):
     """回放报告里的一行：这一步行不行、用哪条定位、命中几个、取第几个。"""
     target = step.get('target') or {}
+    # 滑块把结果放在 poll 里带出来，这里拆出去（见下面的字段说明）。
+    slider_detail = poll.get('slider') if isinstance(poll, dict) else None
     used = None
     if chosen:
         matches = chosen.get('count')
@@ -291,7 +307,10 @@ def _entry(step, chosen, ok, error=None, poll=None):
         'error': error,
         'used': used,
         # 轮询等待才有的明细：等了几秒、刷新了几轮。失败时靠它区分「设备没起来」和「定位写错了」。
-        'poll': poll,
+        # 滑块的结果不能塞进 poll：前端把 poll 当「等了多久 / 刷新几次」渲染，
+        # 塞进去就会显示成「轮询 undefineds」。单独一个字段。
+        'poll': None if slider_detail else poll,
+        'slider': slider_detail,
     }
 
 

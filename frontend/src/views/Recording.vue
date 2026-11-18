@@ -594,6 +594,9 @@
             <el-button :icon="CircleCheck" :disabled="!canEdit" title="插入一步：判断页面上的某个状态是否成立（需要等它慢慢成立时，在表单里展开「等到成立」）" @click="openDraft('assert')">添加断言</el-button>
             <el-button :icon="Loading" :disabled="!canEdit" title="插入一步：等页面加载到指定状态。点击后页面跳转、站点又慢的时候用它，比固定等待可靠" @click="openDraft('ready')">等待加载</el-button>
             <el-button :icon="Clock" :disabled="!canEdit" title="插入一步：不管条件，先干等指定秒数。等页面加载请用左边的「等待加载」——固定等待既慢又不可靠" @click="openDraft('sleep')">固定等待</el-button>
+            <!-- 滑块不做自动识别：拖动在 DOM 里只是一串 pointermove，和拖滚动条长得一样，
+                 自动认出必然误判。让用户显式加一步，语义最清楚。 -->
+            <el-button :icon="Pointer" :disabled="!canEdit" title="插入一步「滑块验证」：回放到这里时用视觉模型找缺口并拖动。只对拼图缺口型有效" @click="openDraft('slider')">滑块验证</el-button>
           </div>
 
           <span class="toolbar-sep"></span>
@@ -1033,6 +1036,47 @@
               <span class="parsed-label">解析为</span>
               <span class="parsed-text">{{ intentDescription(draft.parsed) }}</span>
               <span :class="['parsed-tag', { dirty: formDirty }]">{{ formDirty ? '表单已修改，以表单为准' : '已填入表单' }}</span>
+            </div>
+          </div>
+
+          <!-- 滑块验证：没有目标元素，只有三个参数。
+               容器留空就按 canvas 尺寸自动识别，换站点也能用。 -->
+          <div v-if="draft.kind === 'slider'" class="slider-body">
+            <div class="slider-field">
+              <span class="poll-label">容器选择器</span>
+              <el-input
+                v-model="draft.sliderSelector"
+                placeholder="留空自动识别（按 canvas 尺寸找）"
+                maxlength="200"
+                clearable
+              />
+            </div>
+            <div class="field-hint">
+              页面上只有一个验证码时留空即可；同时出现多个时填容器的 CSS 选择器，例如 .vue-puzzle-vcode
+            </div>
+            <div class="poll-row">
+              <span class="poll-label">失败重试</span>
+              <el-input-number
+                v-model="draft.sliderAttempts"
+                :min="0"
+                :max="5"
+                controls-position="right"
+                size="small"
+              />
+              <span class="poll-unit">次</span>
+              <span class="poll-label" style="margin-left: 14px">单次超时</span>
+              <el-input-number
+                v-model="draft.sliderTimeout"
+                :min="5"
+                :max="90"
+                :step="5"
+                controls-position="right"
+                size="small"
+              />
+              <span class="poll-unit">秒</span>
+            </div>
+            <div class="field-hint">
+              一次识别约 20–40 秒（要调视觉模型）。重试 2 次即最多拖 3 次，最坏约 2 分钟。
             </div>
           </div>
 
@@ -1811,7 +1855,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Files, FolderOpened, Loading, Plus, Refresh, Search, Setting, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Files, FolderOpened, Loading, Plus, Pointer, Refresh, Search, Setting, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -1851,11 +1895,11 @@ const READY_TIMEOUT_DEFAULT = 15
 const STEP_LABELS = {
   goto: '打开页面', reload: '刷新', click: '点击', fill: '输入', select: '选择', press: '按键',
   dialog: '弹窗', new_page: '新标签页', call: '动作',
-  assert: '断言', wait: '等待', sleep: '固定等待'
+  assert: '断言', wait: '等待', sleep: '固定等待', slider: '滑块验证'
 }
 // 动作调用用紫色系（kind-action 在样式里单独定义）：它不是一种操作，
 // 而是「一串操作的入口」，跟任何一种原子步骤共色都会让人误读。
-const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger', call: 'action' }
+const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger', call: 'action', slider: 'warning' }
 const STATE_LABELS = {
   idle: '未开始', starting: '启动中', recording: '录制中', stopping: '停止中', stopped: '已停止',
   cancelled: '已取消', failed: '失败', idle_timeout: '超时已停止', closed: '浏览器已关闭'
@@ -3558,6 +3602,12 @@ function editableFields(step) {
 }
 
 function startEdit(step) {
+  // 滑块的三个参数（选择器 / 重试 / 超时）不在就地编辑的支持范围内：
+  // 点进去只会得到一个空表单和一次必然失败的保存。要改就删掉重插。
+  if (step.type === 'slider') {
+    ElMessage.info('滑块参数在插入时设定，需要修改请删除这一步后重新插入')
+    return
+  }
   const intent = step.intent || {}
   editing.value = {
     no: step.no,
@@ -3662,12 +3712,16 @@ function initSortable() {
 function draftKindTypes(kind) {
   if (kind === 'sleep') return SLEEP_TYPES
   if (kind === 'ready') return ['page_ready']
+  // 滑块没有「意图类型」可选：它就是一段固定流程，只有三个参数。
+  if (kind === 'slider') return ['slider']
   return ASSERT_TYPES
 }
 
 const draftTypes = computed(() => draft.value ? draftKindTypes(draft.value.kind) : [])
-const draftTitle = computed(() => ({ assert: '添加断言', sleep: '固定等待', ready: '等待加载' })[draft.value?.kind] || '添加断言')
-const insertLabel = computed(() => ({ sleep: '插入固定等待', ready: '插入等待' })[draft.value?.kind] || '插入断言')
+const draftTitle = computed(() => ({ assert: '添加断言', sleep: '固定等待', ready: '等待加载',
+  slider: '添加滑块验证' })[draft.value?.kind] || '添加断言')
+const insertLabel = computed(() => ({ sleep: '插入固定等待', ready: '插入等待',
+  slider: '插入滑块步骤' })[draft.value?.kind] || '插入断言')
 
 // 三档的差别只在一句话里，选哪档要能立刻看懂在等什么。
 const readyNote = computed(() => {
@@ -3728,6 +3782,11 @@ function openDraft(kind, afterNo = null) {
     // 「等待加载」：默认就是用户嘴里说的「页面加载完」（load），超时 15 秒。
     state: 'load',
     readyTimeout: READY_TIMEOUT_DEFAULT,
+    // 滑块验证：容器留空 = 运行时按 canvas 尺寸自动识别。
+    // 重试 2 次、单次 20 秒是实测够用的组合（一次约 30 秒）。
+    sliderSelector: '',
+    sliderAttempts: 2,
+    sliderTimeout: 20,
     // 高级默认收起，不勾就是立即断言。默认 30 秒比框架默认的 5 秒实用；
     // 刷新默认不勾——刷新会重置表单和登录态，只会让条件更难成立。
     allowWait: false,
@@ -4025,6 +4084,11 @@ function buildFormIntent(current) {
 }
 
 function insertFromForm() {
+  // 滑块不是 intent：它没有目标元素，也不是断言，走自己的接口。
+  if (draft.value?.kind === 'slider') {
+    insertSliderStep()
+    return
+  }
   let intent
   try {
     intent = buildFormIntent(draft.value)
@@ -4033,6 +4097,26 @@ function insertFromForm() {
     return
   }
   insertIntent(intent, draft.value.text)
+}
+
+async function insertSliderStep() {
+  const current = draft.value
+  current.inserting = true
+  try {
+    const { data } = await api.addRecordingSlider({
+      after_no: current.afterNo,
+      selector: (current.sliderSelector || '').trim(),
+      attempts: current.sliderAttempts,
+      timeout: current.sliderTimeout,
+    })
+    applySession(data)
+    closeDraft()
+    ElMessage.success('已插入滑块验证步骤')
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    current.inserting = false
+  }
 }
 
 async function pickForDraft() {
@@ -4118,6 +4202,14 @@ function stepDescription(step) {
     // 名字后面跟「调用」，一眼能和普通步骤区分：这一步本身什么都不做。
     case 'call': return `调用动作「${step.label || '未命名'}」`
     case 'sleep': return `固定等待 ${step.intent ? step.intent.seconds : ''} 秒`
+    // 滑块：把「怎么找容器」和「失败重试几次」写成一句，这两项是回放时最可能出问题的。
+    case 'slider': {
+      const cfg = step.slider || {}
+      const selector = String(cfg.selector || '').trim()
+      const attempts = cfg.attempts == null ? 2 : cfg.attempts
+      const retry = attempts > 0 ? ` · 失败重试 ${attempts} 次` : ' · 不重试'
+      return `过滑块验证（${selector || '自动识别容器'}${retry}）`
+    }
     case 'assert':
     case 'wait': return intentDescription(step.intent, step.target)
     default: return step.type
@@ -5678,6 +5770,11 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .draft-nl .el-textarea { flex:1; }
 /* 固定等待没有可解析的内容：一行秒数，不占地方也不用解释 */
 .sleep-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+/* 滑块验证：一行选择器 + 一行参数，和固定等待的排版保持一致 */
+.slider-body { display:flex; flex-direction:column; gap:8px; }
+.slider-field { display:flex; align-items:center; gap:8px; }
+.slider-field .poll-label { flex:none; }
+.slider-body .poll-row { margin-top:2px; }
 .sleep-label { font-size:13px; color:var(--ink-2); }
 .sleep-unit { font-size:13px; color:var(--muted); }
 .sleep-hint { margin-left:4px; font-size:12px; color:var(--muted); }

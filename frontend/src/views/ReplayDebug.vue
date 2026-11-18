@@ -9,7 +9,15 @@
       <span :class="['dbg-badge', state.status]">
         {{ statusText }}<template v-if="state.elapsed"> · {{ state.elapsed }}s</template>
       </span>
+      <span v-if="suspectCount" class="dbg-badge warn"
+            title="这些步骤执行成功了，但实际操作的元素和录制时不是同一个">
+        ⚠ {{ suspectCount }} 步疑似点错
+      </span>
       <div class="dbg-head-actions">
+        <button type="button" class="dbg-icon" title="AI 自愈模型" @click="openModels">⚙</button>
+        <button type="button" :class="['dbg-icon', { on: immersive }]"
+                :title="immersive ? '退出放大（Esc）' : '放大预览（把右侧栏收成浮层）'"
+                @click="toggleImmersive">⤢</button>
         <el-button size="small" :loading="restarting" @click="restart">重新开始</el-button>
         <el-button size="small" text @click="leave">退出</el-button>
       </div>
@@ -21,7 +29,7 @@
       <el-button size="small" type="primary" @click="restart">重试</el-button>
     </div>
 
-    <div v-else class="dbg-body">
+    <div v-else :class="['dbg-body', { immersive }]">
       <section class="dbg-stage">
         <div class="dbg-viewport">
           <div class="dbg-chrome">
@@ -57,7 +65,7 @@
         </div>
       </section>
 
-      <aside class="dbg-side">
+      <aside :class="['dbg-side', { 'has-heal': !!heal }]">
         <div class="dbg-ctrl">
           <button type="button" class="dbg-btn" :disabled="!canPlay" :title="playing ? '暂停' : '继续'"
                   @click="togglePlay">
@@ -84,10 +92,18 @@
             <span class="dbg-step-dot">
               <template v-if="item.status === 'ok'">✓</template>
               <template v-else-if="item.status === 'failed'">!</template>
+              <template v-else-if="item.status === 'skipped'">–</template>
               <template v-else-if="isCurrent(i)">▶</template>
             </span>
             <span class="dbg-step-kind">{{ item.type }}</span>
             <span class="dbg-step-name" :title="stepTitle(item)">{{ stepTitle(item) }}</span>
+            <span v-if="item.healed" class="dbg-step-heal" :title="item.heal_note || '这一步应用了修复'">
+              已修
+            </span>
+            <span v-if="item.suspect" class="dbg-step-warn"
+                  :title="item.suspect_reason || '实际操作的元素的身份与录制时不同'">
+              疑似点错
+            </span>
             <span v-if="item.ms != null" class="dbg-step-ms">{{ item.ms }}ms</span>
           </li>
           <li v-if="!state.steps.length" class="dbg-step is-empty">还没有步骤</li>
@@ -113,11 +129,157 @@
               <span v-else-if="currentStep.status === 'pending'" class="dbg-faint">等待执行</span>
             </div>
             <div v-if="currentStep.error" class="dbg-detail-err">{{ currentStep.error }}</div>
+            <div v-if="currentStep.suspect" class="dbg-detail-warn">
+              疑似点错：{{ currentStep.suspect_reason }}
+            </div>
           </template>
           <div v-else class="dbg-faint">回放还没开始</div>
         </div>
+
+        <!-- 失败后的修复卡片。故意盖在右侧栏底部而不是弹一个遮罩：
+             左边要一直看得到出事的页面，否则「为什么失败」就得靠脑补。 -->
+        <div v-if="heal" :class="['dbg-heal', heal.status, heal.risk]">
+          <div class="dbg-heal-head">
+            <span class="dbg-heal-no">第 {{ heal.no }} 步</span>
+            <span class="dbg-heal-kind">{{ heal.type }}</span>
+            <span class="dbg-heal-name" :title="heal.alias || ''">{{ heal.alias || '' }}</span>
+            <span :class="['dbg-heal-pill', heal.status]">{{ healPill }}</span>
+          </div>
+
+          <div v-if="heal.status === 'investigating' || heal.status === 'queued'" class="dbg-heal-busy">
+            <span class="dbg-spinner"></span>
+            <span>AI 正在沙箱里把这段步骤跑一遍、定位、改、再跑一遍，通常 1–3 分钟…</span>
+          </div>
+          <div v-else-if="heal.status === 'idle'" class="dbg-heal-hint">
+            这一步执行失败。可以让 AI 自愈去查（它会真的跑测试、改定位、再验证），
+            也可以直接跳过。
+          </div>
+
+          <template v-else>
+            <div class="dbg-heal-title-row">
+              <span :class="['dbg-heal-cat', heal.category]">{{ heal.title }}</span>
+              <span v-if="heal.verdict" :class="['dbg-heal-verdict', heal.verdict]">
+                {{ verdictText }}
+              </span>
+              <span v-if="heal.confidence" class="dbg-heal-conf">置信度 {{ heal.confidence }}</span>
+              <span v-if="heal.risk === 'medium' || heal.risk === 'high'" class="dbg-heal-risk">
+                {{ heal.risk === 'high' ? '风险高' : '需留意' }}
+              </span>
+            </div>
+
+            <p class="dbg-heal-reason">{{ heal.reason }}</p>
+
+            <div v-if="heal.changes && heal.changes.length" class="dbg-heal-diff">
+              <div v-for="(c, i) in heal.changes" :key="i" class="dbg-heal-change">
+                <span class="dbg-heal-change-label">{{ c.label }}</span>
+                <div class="dbg-heal-before">− {{ c.before || '（未设置）' }}</div>
+                <div class="dbg-heal-after">+ {{ c.after || '（未设置）' }}</div>
+              </div>
+            </div>
+
+            <div v-if="heal.evidence && heal.evidence.length" class="dbg-heal-evidence">
+              <div class="dbg-heal-ev-head">身份核对（录制时 → 当前页面）</div>
+              <div v-for="(e, i) in heal.evidence" :key="i"
+                   :class="['dbg-heal-ev-row', e.level || (e.ok ? 'match' : 'info')]">
+                <span class="dbg-heal-ev-ico">{{ e.level === 'conflict' ? '✗' : (e.ok ? '✓' : '·') }}</span>
+                <span class="dbg-heal-ev-label">{{ e.label }}</span>
+                <span class="dbg-heal-ev-val">
+                  {{ e.recorded || '—' }}<template v-if="!e.ok"> → {{ e.actual || '（空）' }}</template>
+                </span>
+              </div>
+            </div>
+
+            <div v-if="heal.verify" :class="['dbg-heal-verify', { ok: heal.verify.ok }]">
+              <span class="dbg-heal-verify-ico">{{ heal.verify.ok ? '✓' : '!' }}</span>
+              <span>预检：{{ heal.verify.text }}</span>
+            </div>
+            <div v-if="heal.unsupported && heal.unsupported.length" class="dbg-heal-note">
+              现场投影不完整：{{ heal.unsupported.join('；') }}
+            </div>
+            <div v-if="heal.blocked_reason" class="dbg-heal-blocked">{{ heal.blocked_reason }}</div>
+
+            <details v-if="heal.spec_diff" class="dbg-heal-code">
+              <summary>AI 在沙箱里改了什么（spec diff）</summary>
+              <pre class="dbg-heal-pre"><span v-for="(l, i) in diffLines" :key="i"
+                :class="['dl', l.kind]">{{ l.text }}</span></pre>
+            </details>
+
+            <details v-if="heal.probes && heal.probes.length" class="dbg-heal-probes">
+              <summary>调查记录 {{ heal.probes.length }} 条</summary>
+              <div v-for="(p, i) in heal.probes" :key="i">· {{ p }}</div>
+            </details>
+
+            <div v-if="heal.attempt > 1" class="dbg-heal-attempt">
+              第 {{ heal.attempt }} 次尝试（最多 {{ heal.max_attempt }} 次）
+            </div>
+
+            <label v-if="heal.can_apply && heal.writeback_ok" class="dbg-heal-wb">
+              <input v-model="writeback" type="checkbox">
+              <span>写回第 {{ heal.no }} 步（后续生成的代码使用新定位）</span>
+            </label>
+            <div v-else-if="heal.writeback_note" class="dbg-heal-note">{{ heal.writeback_note }}</div>
+
+            <div class="dbg-heal-actions">
+              <button v-if="canAiHeal" type="button"
+                      :class="['dbg-heal-btn', { primary: !heal.can_apply }]"
+                      :disabled="healBusy" @click="aiHeal">
+                {{ heal.status === 'idle' ? '让 AI 自愈' : '重新让 AI 调查' }}
+              </button>
+              <button v-if="heal.can_apply" type="button" class="dbg-heal-btn primary"
+                      :disabled="healBusy" @click="applyHeal">
+                {{ heal.status === 'applying' ? '正在重试…' : '应用并重试' }}
+              </button>
+              <button type="button" class="dbg-heal-btn" :disabled="healBusy" @click="skipHeal">
+                跳过这一步
+              </button>
+              <button type="button" class="dbg-heal-btn ghost" :disabled="healBusy" @click="stopHeal">
+                停止回放
+              </button>
+            </div>
+          </template>
+        </div>
       </aside>
     </div>
+
+    <!-- 两个模型分开配：
+         healer 是长链路（跑测试、改文件、重跑），能跑单轮的模型未必扛得住多轮工具调用；
+         滑块要读图，纯文本模型接了也白接。都不该牵连生成链路的默认模型，
+         所以放在回放页，而不是设置页。 -->
+    <el-dialog v-model="modelDlg" title="模型设置" width="540px" append-to-body>
+      <div class="dbg-model-sec">
+        <div class="dbg-model-title">AI 自愈</div>
+        <p class="dbg-model-hint">
+          点「让 AI 自愈」时用这个模型跑官方 healer：会真的执行测试、改定位、再重跑一遍。
+        </p>
+        <el-select v-model="modelValue" filterable clearable placeholder="跟随全局默认"
+                   class="dbg-model-select">
+          <el-option label="跟随全局默认" value="" />
+          <el-option v-for="ref in modelRefs" :key="ref" :label="ref" :value="ref" />
+        </el-select>
+        <p class="dbg-model-default">当前全局默认：{{ modelDefault || '未设置' }}</p>
+      </div>
+
+      <div class="dbg-model-sec">
+        <div class="dbg-model-title">滑块验证</div>
+        <p class="dbg-model-hint">
+          回放到「滑块验证」步骤时用这个模型看缺口。必须能读图，所以不跟随全局默认。
+        </p>
+        <el-select v-model="sliderValue" filterable clearable placeholder="使用内置默认"
+                   class="dbg-model-select">
+          <el-option :label="`内置默认（${sliderBuiltin || '豆包视觉'}）`" value="" />
+          <el-option v-for="ref in sliderRefs" :key="ref" :label="ref" :value="ref" />
+        </el-select>
+        <p class="dbg-model-default">
+          当前生效：{{ sliderModel || '未配置（回放到滑块会直接报错）' }}
+          <span v-if="!sliderExplicit"> · 内置默认</span>
+        </p>
+      </div>
+
+      <template #footer>
+        <el-button @click="modelDlg = false">取消</el-button>
+        <el-button type="primary" :loading="modelSaving" @click="saveModel">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -146,6 +308,9 @@ const restarting = ref(false)
 const hasFrame = ref(false)
 const streamSrc = ref('')
 const stepList = ref(null)
+const writeback = ref(true)
+const healBusy = ref(false)
+let lastHealNo = null
 let pollTimer = null
 let imgRetry = 0
 
@@ -176,11 +341,51 @@ const STATUS_TEXT = {
   starting: '启动中',
   running: '运行中',
   paused: '已暂停',
+  healing: '调查中',
+  needs_heal: '等待确认',
   done: '已完成',
   failed: '失败',
   stopped: '已停止',
 }
 const statusText = computed(() => STATUS_TEXT[status.value] || status.value)
+
+const heal = computed(() => state.value.heal || null)
+const healPill = computed(() => {
+  const value = heal.value && heal.value.status
+  return { idle: '待处理', queued: '排队中', investigating: '调查中',
+           applying: '正在重试', ready: '待确认', blocked: '未通过' }[value] || ''
+})
+// 失败后不再自动诊断，只给一个入口。AI 调查过程中（investigating/queued）不给点，
+// 否则用户连点会让后端拒绝并弹一个「已经在调查了」的红条。
+const canAiHeal = computed(() => {
+  const card = heal.value
+  if (!card || card.ai_ready === false) return false
+  return !['queued', 'investigating', 'applying'].includes(card.status)
+})
+const immersive = ref(false)
+const diffLines = computed(() => {
+  const text = (heal.value && heal.value.spec_diff) || ''
+  if (!text) return []
+  const rows = text.split('\n')
+  if (rows.length && rows[rows.length - 1] === '') rows.pop()
+  return rows.map((line) => ({
+    text: line || ' ',
+    kind: line.startsWith('+++') || line.startsWith('---') ? 'meta'
+      : line.startsWith('@@') ? 'hunk'
+        : line.startsWith('+') ? 'add'
+          : line.startsWith('-') ? 'del' : '',
+  }))
+})
+
+const VERDICT_TEXT = {
+  verified: '身份已验证',
+  probable: '仅弱特征吻合',
+  conflict: '身份冲突',
+  unknown: '身份存疑',
+  state: '状态待恢复',
+}
+const verdictText = computed(() => VERDICT_TEXT[heal.value && heal.value.verdict] || '')
+const suspectCount = computed(() => state.value.steps.filter(item => item.suspect).length)
 
 function stepTitle(item) {
   if (!item) return ''
@@ -209,7 +414,119 @@ function apply(data) {
   if (!Array.isArray(merged.steps)) merged.steps = []
   state.value = merged
   if (merged.steps.some(s => s.status !== 'pending')) hasFrame.value = true
+  syncHeal(merged.heal)
   followCurrent()
+}
+
+function syncHeal(card) {
+  if (!card) {
+    lastHealNo = null
+    healBusy.value = false
+    return
+  }
+  // AI 调查期间卡片会换成 investigating：这时候不能把 busy 放掉，
+  // 否则「让 AI 自愈」会被判成可点，用户连点两下就收到一个后端拒绝。
+  if (['queued', 'investigating', 'applying'].includes(card.status)) {
+    healBusy.value = true
+    return
+  }
+  // 同一步可能失败两次（修完还是不通），用「步号 + 第几次」当身份，
+  // 只靠步号的话第二次进来勾选状态不会重置。
+  const key = `${card.no}:${card.attempt || 1}`
+  if (key !== lastHealNo) {
+    lastHealNo = key
+    // 默认勾选「写回」只给后端算过的安全情形：写回本身没错，错补丁写回去
+    // 会永久把录制改成别的元素。后端没给 writeback_default 时退回旧行为。
+    writeback.value = card.writeback_default != null
+      ? !!card.writeback_default
+      : !!card.writeback_ok
+    healBusy.value = false
+  }
+}
+
+async function decideHeal(decision) {
+  healBusy.value = true
+  try {
+    const { data } = await api.decideDebugHeal(decision, writeback.value)
+    apply(data)
+    if (decision !== 'stop') startPoll()
+  } catch (error) {
+    ElMessage.error(errorText(error))
+    healBusy.value = false
+    refresh()
+  }
+}
+
+function applyHeal() { return decideHeal('apply') }
+function skipHeal() { return decideHeal('skip') }
+function stopHeal() { return decideHeal('stop') }
+function aiHeal() { return decideHeal('ai') }
+
+// ---------- 预览放大 ----------
+
+function toggleImmersive() {
+  immersive.value = !immersive.value
+}
+
+function onKeydown(event) {
+  if (event.key === 'Escape' && immersive.value) {
+    immersive.value = false
+  }
+}
+
+// ---------- 模型设置（AI 自愈 + 滑块验证）----------
+
+const modelDlg = ref(false)
+const modelValue = ref('')
+const modelRefs = ref([])
+const modelDefault = ref('')
+const modelSaving = ref(false)
+// 滑块模型：和 healer 完全独立。空 = 用后端内置的豆包视觉模型。
+const sliderValue = ref('')
+const sliderRefs = ref([])
+const sliderBuiltin = ref('')
+const sliderModel = ref('')
+const sliderExplicit = ref(false)
+
+async function openModels() {
+  modelDlg.value = true
+  try {
+    const [healer, slider] = await Promise.all([
+      api.getHealerModel(),
+      api.getSliderModel(),
+    ])
+    modelValue.value = healer.data.model || ''
+    modelRefs.value = healer.data.refs || []
+    modelDefault.value = healer.data.default || ''
+
+    sliderValue.value = slider.data.explicit || ''
+    sliderRefs.value = slider.data.refs || []
+    sliderBuiltin.value = slider.data.builtin || ''
+    sliderModel.value = slider.data.model || ''
+    sliderExplicit.value = !!slider.data.explicit
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+async function saveModel() {
+  modelSaving.value = true
+  try {
+    const [healer, slider] = await Promise.all([
+      api.setHealerModel(modelValue.value),
+      api.setSliderModel(sliderValue.value),
+    ])
+    modelValue.value = healer.data.model || ''
+    modelDefault.value = healer.data.default || ''
+    sliderModel.value = slider.data.model || ''
+    sliderExplicit.value = !!slider.data.explicit
+    modelDlg.value = false
+    ElMessage.success('已保存，下次回放生效')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    modelSaving.value = false
+  }
 }
 
 function followCurrent() {
@@ -343,8 +660,12 @@ function leave() {
   router.push('/recording')
 }
 
-onMounted(boot)
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  boot()
+})
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
   stopPoll()
   api.controlDebugReplay('stop').catch(() => {})
 })
@@ -371,7 +692,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 12px;
   flex: none;
-  height: 54px;
+  height: 48px;
   padding: 0 18px;
   background: var(--bg-card);
   border-bottom: 1px solid var(--line-soft);
@@ -408,14 +729,41 @@ onBeforeUnmount(() => {
 .dbg-badge.done { background: #eaf5ee; color: var(--ok); }
 .dbg-badge.failed { background: var(--danger-soft); color: var(--danger); }
 .dbg-badge.stopped { background: var(--bg-sunken); color: var(--muted); }
+.dbg-badge.healing { background: var(--accent-soft); color: var(--accent-ink); }
+.dbg-badge.needs_heal { background: #fdf3e3; color: #8a5a12; }
+/* 疑似点错：步骤是绿的，但点到的东西和录制时不是同一个。用琥珀色而不是红色，
+   因为它不是失败，是需要人确认的「绿得可疑」。 */
+.dbg-badge.warn { background: #fdf3e3; color: #8a5a12; border: 1px solid #e8cfa6; }
 
 .dbg-meter-hint { font-size: 11.5px; color: var(--faint); flex: none; }
 .dbg-head-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+
+/* 页头的小方按钮：齿轮（模型）和放大。和「重新开始」不是一个量级的操作，
+   不做成 el-button，否则右侧会排出一排同等权重的按钮，主次就没了。 */
+.dbg-icon {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-ctl);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dbg-icon:hover { border-color: var(--line-ctl-hover); color: var(--accent); }
+.dbg-icon.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 .dbg-body {
   flex: 1;
   min-height: 0;
   display: flex;
+  /* 沉浸模式下右侧栏是绝对定位的浮层，父级必须有定位上下文 */
+  position: relative;
 }
 
 .dbg-stage {
@@ -493,7 +841,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 10px;
+  padding: 6px;
   background: var(--bg-stage);
 }
 
@@ -624,6 +972,9 @@ onBeforeUnmount(() => {
 .dbg-step.current { background: var(--accent-soft); border-left-color: var(--accent); color: var(--accent-ink); }
 .dbg-step.ok { color: var(--ink-2); }
 .dbg-step.failed { background: var(--danger-soft); border-left-color: var(--danger); color: var(--danger); }
+/* 跳过不是成功：颜色要偏灰，否则整轮跑完看着像全绿。 */
+.dbg-step.skipped { background: var(--bg-sunken); color: var(--faint); border-left-color: var(--line-ctl); }
+.dbg-step.skipped .dbg-step-dot { border-style: dashed; color: var(--faint); }
 
 .dbg-step-dot {
   width: 15px;
@@ -656,6 +1007,27 @@ onBeforeUnmount(() => {
 .dbg-step.current .dbg-step-kind { background: var(--accent-soft-hover); color: var(--accent-ink); }
 .dbg-step-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .dbg-step-ms { flex: none; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+.dbg-step-heal {
+  flex: none;
+  font-size: 10px;
+  line-height: 1.5;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #eaf5ee;
+  color: #1c5f38;
+}
+.dbg-step-warn {
+  flex: none;
+  font-size: 10px;
+  line-height: 1.5;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #fdf3e3;
+  color: #8a5a12;
+  border: 1px solid #e8cfa6;
+  white-space: nowrap;
+}
 .dbg-step.is-empty { color: var(--faint); }
 
 .dbg-detail {
@@ -696,6 +1068,336 @@ onBeforeUnmount(() => {
 .dbg-sep { color: var(--faint); }
 .dbg-faint { font-size: 11.5px; color: var(--faint); }
 .dbg-detail-err { margin-top: 7px; font-size: 11.5px; color: var(--danger); line-height: 1.5; }
+.dbg-detail-warn { margin-top: 7px; font-size: 11.5px; color: #8a5a12; line-height: 1.5; }
+
+/* ---- 失败修复卡片 ----
+   盖在右侧栏底部而不是居中遮罩：左边那半屏是出事现场，判断「要不要改」
+   全靠对照它，遮住就等于让人盲选。 */
+.dbg-side { position: relative; }
+
+.dbg-side.has-heal { width: clamp(370px, 31%, 520px); }
+
+/* 沉浸模式：右侧栏变成浮在画面上的抽屉，预览吃满整宽。
+   1440×900 的截图在这个宽度下缩放比从 ~0.67 提到 0.95 以上；
+   不把步骤列表藏起来——收起来就得来回切，比看小一点更费劲。 */
+.dbg-body.immersive .dbg-side {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: 340px;
+  max-width: 42vw;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, .26);
+  overflow: hidden;
+  z-index: 5;
+  background: var(--bg-card);
+}
+
+.dbg-body.immersive .dbg-side.has-heal { width: 380px; }
+
+.dbg-heal {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  max-height: calc(100% - 48px);
+  overflow-y: auto;
+  padding: 12px 13px 13px;
+  background: var(--bg-card);
+  border-top: 1px solid var(--line-soft);
+  box-shadow: 0 -10px 26px rgba(20, 24, 32, .10);
+}
+
+.dbg-heal.blocked { border-top-color: var(--danger-line); }
+.dbg-heal.applying { opacity: .82; }
+
+.dbg-heal-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 9px;
+}
+
+.dbg-heal-no { font-size: 12px; font-weight: 600; color: var(--ink); }
+.dbg-heal-kind {
+  font-size: 10px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--muted);
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.dbg-heal-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dbg-heal-pill {
+  flex: none;
+  font-size: 10.5px;
+  border-radius: 5px;
+  padding: 1px 7px;
+  background: var(--bg-sunken);
+  color: var(--muted);
+}
+.dbg-heal-pill.investigating { background: var(--accent-soft); color: var(--accent-ink); }
+.dbg-heal-pill.ready { background: #fdf3e3; color: #8a5a12; }
+.dbg-heal-pill.applying { background: var(--accent-soft); color: var(--accent-ink); }
+.dbg-heal-pill.blocked { background: var(--danger-soft); color: var(--danger); }
+
+.dbg-heal-busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 0 2px;
+}
+
+.dbg-heal-title-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.dbg-heal-cat {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--bg-sunken);
+  color: var(--ink-2);
+}
+.dbg-heal-cat.locator_changed { background: #fdf3e3; color: #8a5a12; }
+.dbg-heal-cat.frame_changed { background: var(--accent-soft); color: var(--accent-ink); }
+.dbg-heal-cat.transient { background: #eaf5ee; color: var(--ok); }
+.dbg-heal-cat.assertion,
+.dbg-heal-cat.ambiguous { background: var(--danger-soft); color: var(--danger); }
+.dbg-heal-cat.element_replaced,
+.dbg-heal-cat.row_gone,
+.dbg-heal-cat.element_hidden { background: var(--danger-soft); color: var(--danger); }
+.dbg-heal-cat.env { background: var(--bg-sunken); color: var(--muted); }
+
+.dbg-heal-verdict {
+  font-size: 10.5px;
+  line-height: 1.6;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line-ctl);
+  color: var(--muted);
+}
+.dbg-heal-verdict.verified { background: #eaf5ee; color: #1c5f38; border-color: #cfe6da; }
+.dbg-heal-verdict.probable,
+.dbg-heal-verdict.state { background: #fdf3e3; color: #8a5a12; border-color: #e8cfa6; }
+.dbg-heal-verdict.conflict,
+.dbg-heal-verdict.unknown { background: var(--danger-soft); color: var(--danger); border-color: var(--danger-line); }
+
+.dbg-heal-conf { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.dbg-heal-risk {
+  font-size: 10.5px;
+  color: #8a5a12;
+  border: 1px solid #e8cfa6;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.dbg-heal-reason {
+  margin: 7px 0 9px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  word-break: break-word;
+}
+
+.dbg-heal-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 9px;
+}
+
+.dbg-heal-change-label {
+  display: block;
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-bottom: 3px;
+}
+
+.dbg-heal-before,
+.dbg-heal-after {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  padding: 3px 7px;
+  border-radius: 5px;
+  /* 定位串里全是括号和引号，break-all 会把 getByRole 拆成两截，反而更难对读。
+     anywhere 只在放不下时才断，优先在空格和标点处换行。 */
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+/* 不用删除线：整串定位被划掉之后基本认不出改的是哪一截，红底 +「−」已经够区分了。 */
+.dbg-heal-before { background: var(--danger-soft); color: #8d2f28; opacity: .85; }
+.dbg-heal-after { background: #eaf5ee; color: #1c5f38; margin-top: 2px; }
+
+/* ---- 身份核对 ----
+   一行一个信号：对得上给绿勾，明确冲突给红叉，录制时有、现在没有的给灰点
+   （信息项，不算错）。有这一块，用户不用读定位串也能判断「是不是同一个元素」。 */
+.dbg-heal-evidence {
+  margin-bottom: 9px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background: var(--bg-sunken);
+}
+
+.dbg-heal-ev-head {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-bottom: 5px;
+}
+
+.dbg-heal-ev-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.dbg-heal-ev-ico { flex: none; width: 10px; text-align: center; }
+.dbg-heal-ev-row.match .dbg-heal-ev-ico { color: var(--ok); }
+.dbg-heal-ev-row.conflict .dbg-heal-ev-ico { color: var(--danger); }
+.dbg-heal-ev-label { flex: none; min-width: 46px; color: var(--faint); }
+.dbg-heal-ev-val {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.dbg-heal-ev-row.conflict .dbg-heal-ev-val { color: #8d2f28; }
+
+.dbg-heal-verify {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--muted);
+}
+.dbg-heal-verify.ok { background: #eaf5ee; color: #1c5f38; }
+.dbg-heal-verify-ico { flex: none; font-weight: 600; }
+
+.dbg-heal-blocked {
+  margin-top: 7px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.dbg-heal-probes {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.dbg-heal-probes summary { cursor: pointer; color: var(--faint); }
+.dbg-heal-probes div { margin-top: 3px; line-height: 1.5; }
+
+/* 失败后的第一张卡片只有事实，没有建议——这段是给它补一句「接下来能做什么」。 */
+.dbg-heal-hint {
+  margin: 9px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+/* AI 在沙箱里改的 spec。深色面板，和日志、终端同一套：
+   两套主题下都保持深色，浅色下才不会和卡片糊在一起。 */
+.dbg-heal-code { margin-top: 9px; font-size: 11.5px; }
+.dbg-heal-code summary { cursor: pointer; color: var(--ink-2); padding: 3px 0; }
+.dbg-heal-code summary:hover { color: var(--accent); }
+.dbg-heal-pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--bg-code);
+  color: #c9d4e3;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre;
+}
+.dbg-heal-pre .dl { display: block; }
+.dbg-heal-pre .dl.add { color: #6fd39a; }
+.dbg-heal-pre .dl.del { color: #e8898a; }
+.dbg-heal-pre .dl.hunk { color: #7fa7d9; }
+.dbg-heal-pre .dl.meta { color: #8290a3; }
+
+.dbg-model-hint { margin: 0 0 10px; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+/* 两组配置用一条细线分开：healer 和滑块各管各的，改错一处不该影响另一处 */
+.dbg-model-sec + .dbg-model-sec {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+.dbg-model-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.dbg-model-select { width: 100%; }
+.dbg-model-default { margin: 8px 0 0; font-size: 11.5px; color: var(--faint); }
+
+.dbg-heal-attempt { margin-top: 7px; font-size: 11px; color: #8a5a12; }
+.dbg-heal-note { margin-top: 8px; font-size: 11px; color: var(--faint); }
+
+.dbg-heal-wb {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.dbg-heal-wb input { margin-top: 2px; flex: none; }
+
+.dbg-heal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 11px;
+}
+
+.dbg-heal-btn {
+  font-size: 12px;
+  line-height: 1;
+  padding: 7px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--line-ctl);
+  background: var(--bg-card);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.dbg-heal-btn:hover:not(:disabled) { border-color: var(--line-ctl-hover); }
+.dbg-heal-btn:disabled { opacity: .45; cursor: default; }
+.dbg-heal-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--ink-inverse);
+  font-weight: 500;
+}
+.dbg-heal-btn.ghost { color: var(--muted); border-color: transparent; }
+.dbg-heal-btn.ghost:hover:not(:disabled) { color: var(--danger); }
 
 .dbg-boot-error {
   margin: 60px auto;

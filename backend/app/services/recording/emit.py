@@ -16,6 +16,7 @@ from pathlib import Path
 from app.services.recording import detect, guard, toolchain
 from app.services.recording.locators import (best_effort, false_positive, inline_nth,
                                             pick_for, pool_for)
+from app.services.recording.slider_ts import SLIDER_TS
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +282,10 @@ def _steps_for_prompt(steps, framework, actions=None):
                                      '不要重放前面的点击 / 输入')
         if step.get('dialog'):
             item['dialog'] = step['dialog']
+        if step.get('slider') is not None:
+            # 滑块不是「点一个元素」，写手拿到 locator 也没用。把三个参数原样给它，
+            # 规则里会说明必须调 solveSlider，不要自己拼拖动代码。
+            item['slider'] = step['slider']
         if step.get('seconds') is not None:
             item['seconds'] = step['seconds']
         target = step.get('target')
@@ -958,6 +963,53 @@ def plan(runner, workspace, model, steps, framework, target_path, title, python=
     }
 
 
+def _ensure_slider_utils(root, target_path, steps, framework):
+    """把滑块工具写进 target_path 同级的 utils/，返回相对路径；不需要就返回 None。
+
+    必须在 guard.snapshot 之前落盘：写完才算「项目原有文件」，既不进 diff，
+    也不会被越界检查当成 agent 乱写。写手被要求 import 它，文件不存在时它会自己造一个，
+    而 write_scope=exact 会直接把那次写入拒掉。
+    """
+    if framework != PW_FRAMEWORK:
+        return None
+    if not any((step.get('type') == 'slider') for step in (steps or [])):
+        return None
+    target = Path(target_path)
+    utils_dir = Path(root) / target.parent / 'utils'
+    utils_dir.mkdir(parents=True, exist_ok=True)
+    (utils_dir / 'slider.ts').write_text(SLIDER_TS, encoding='utf-8')
+    return (target.parent / 'utils' / 'slider.ts').as_posix()
+
+
+def _write_slider_env(root):
+    """把滑块模型的三个环境变量补进项目根的 .env。已存在的键一个都不覆盖。
+
+    用户明确要求「直接写到 env，如果之前已经加过就不写了」：生成出来的代码要能
+    开箱即跑，但同一个项目反复生成不能把 .env 越堆越乱，所以按 key 去重。
+    写的是当前配置里的值，换模型后重新生成不会改已有行——那属于用户自己的环境。
+    """
+    from app.services import models_config
+    ref = models_config.slider_model()
+    resolved = models_config.resolve(ref) if ref else None
+    if not resolved or not resolved.api_base:
+        return None
+    path = Path(root) / '.env'
+    existing = path.read_text(encoding='utf-8') if path.exists() else ''
+    pairs = (
+        ('SLIDER_MODEL_BASE_URL', resolved.api_base),
+        ('SLIDER_MODEL_NAME', resolved.model),
+        ('SLIDER_MODEL_API_KEY', resolved.api_key or ''),
+    )
+    added = ['%s=%s' % (key, value) for key, value in pairs
+             if not re.search(r'^\s*%s\s*=' % re.escape(key), existing, re.M)]
+    if not added:
+        return None
+    block = ('\n' if existing and not existing.endswith('\n') else '') + '\n'.join(added) + '\n'
+    with open(path, 'a', encoding='utf-8') as fh:
+        fh.write(block)
+    return path
+
+
 def _prompt(payload, resumed=False):
     head = ''
     if resumed:
@@ -1043,6 +1095,16 @@ def _prompt(payload, resumed=False):
         head += (
             '用户对任务书提了修改意见（plan_feedback：quote 是原文，comment 是他的要求）。\n'
             '这些意见优先于任务书本身：两者冲突时按用户意见写。\n'
+        )
+    if any(step.get('type') == 'slider' for step in payload.get('steps') or []):
+        head += (
+            '本次步骤里有**滑块验证**（steps 里 type 为 slider 的项）。\n'
+            '- 不要自己写截图、找缺口、算坐标、拼拖动轨迹的代码，也不要去找页面上的 canvas。\n'
+            '- 直接调用平台注入的 `solveSlider(page, config)`，config 用该项的 slider 字段原值。\n'
+            '- 从平台生成的 `utils/slider` 导入：`import { solveSlider } from \'./utils/slider\';`'
+            '（工具文件由平台写在 target_path 同级的 utils/ 里，不要覆盖它）。\n'
+            '- 这个调用是异步的，必须 await；它内部最多重试 3 次，失败会抛错，不要再包一层重试。\n'
+            '- 不要给这一步写断言：滑块通过后页面自己会跳转，后续步骤的断言已经覆盖了结果。\n'
         )
     return (
         head
@@ -1183,6 +1245,11 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
 
     before = None
     resumed = session is not None
+    # 有滑块步骤时先把工具文件落到项目里（在快照之前，见函数注释）。
+    slider_utils = _ensure_slider_utils(root, target_path, steps, framework)
+    if slider_utils:
+        logger.info('录制生成：已注入滑块工具 %s', slider_utils)
+        _write_slider_env(root)
     try:
         # 快照本身也可能失败（git 异常、目录不可读），必须放在 try 里，否则会变成没有原因的 500。
         mark('snapshot')

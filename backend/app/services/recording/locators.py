@@ -398,6 +398,25 @@ def _pw_spec(kind, method, args, kwargs=None):
     return _spec(kind, method, args, render_pw(method, args, kwargs), kwargs)
 
 
+def text_variants(snap):
+    """快照里同一个元素的两种文字口径：innerText 与 textContent，按优先级去重。
+
+    Playwright 的 text 引擎和 XPath 的 normalize-space() 读的都是 textContent——
+    块级子元素之间**没有任何分隔符**；而 recorder 采的 `text` 来自 innerText，块之间
+    有换行。于是「两行字分在两个 div 里」的卡片按钮（登录身份选择、菜单卡片、带头像的
+    列表项）拿 innerText 去查恒定 0 命中，RF 只能掉到 css 结构路径，PW 则少一条备选。
+
+    两份都生成、谁命中用谁：count 会替我们淘汰不命中的那条，命中的那条自动补位。
+    `text_flat` 是后加的字段，旧录像里没有——.get() 拿到 None，行为与之前完全一致。
+    """
+    out = []
+    for value in (snap.get('text'), snap.get('text_flat')):
+        value = (value or '').strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
 def build_specs(snap):
     """根据录制快照生成候选描述。每项包含调用 Playwright 所需的方法和参数。"""
     specs = []
@@ -422,6 +441,14 @@ def build_specs(snap):
     text = snap.get('text')
     if text and len(text) <= 40 and snap.get('tag') in PW_TEXT_TAGS:
         specs.append(_pw_spec('text', 'get_by_text', [text], {'exact': True}))
+        # textContent 口径的补充候选：两行卡片按钮只有这一条命得中（见 text_variants）。
+        # 只补在「元素本身有渲染文本」的情况下——innerText 为空而 textContent 有字的，
+        # 基本是 <svg><title>、display:none 的提示语这类不可见内容；getByText 会命中那个
+        # 不可见节点（实测命中的是 <title> 本身，点它等于点一个没有布局框的元素），
+        # 比退回结构定位更糟。kind 仍是 text，排在同组末尾，顶不掉上面那条。
+        for value in text_variants(snap)[1:]:
+            if len(value) <= 40:
+                specs.append(_pw_spec('text', 'get_by_text', [value], {'exact': True}))
     if snap.get('css'):
         specs.append(_pw_spec('css', 'locator', [snap['css']]))
 
@@ -477,16 +504,19 @@ def build_specs(snap):
         specs.append(_spec('rf_xpath', 'locator', ['xpath=' + expr], 'rf xpath:' + expr))
 
     tag = snap.get('tag')
-    text = snap.get('text')
-    if text and len(text) <= 40:
+    role_attr = snap.get('role_attr')
+    # 两种文字口径各投一遍：innerText 版在最前（更接近用户所见），textContent 版跟在后面。
+    # 两行字的卡片按钮只有后面那条命得中——XPath 的 normalize-space() 看的是 textContent。
+    for value in text_variants(snap):
+        if len(value) > 40:
+            continue
         # 显式 role 用 //*[@role=...]，能覆盖 div/span 这类组件库按钮；
         # 隐式 role 不能这么写（真实 <button> 上没有 role 属性），所以标签名单独出一条。
-        role_attr = snap.get('role_attr')
         if role_attr:
-            expr = '//*[@role=%s][normalize-space(.)=%s]' % (_xpath_literal(role_attr), _xpath_literal(text))
+            expr = '//*[@role=%s][normalize-space(.)=%s]' % (_xpath_literal(role_attr), _xpath_literal(value))
             specs.append(_spec('rf_xpath', 'locator', ['xpath=' + expr], 'rf xpath:' + expr))
         if tag in TEXT_TAGS:
-            expr = '//%s[normalize-space(.)=%s]' % (tag, _xpath_literal(text))
+            expr = '//%s[normalize-space(.)=%s]' % (tag, _xpath_literal(value))
             specs.append(_spec('rf_xpath', 'locator', ['xpath=' + expr], 'rf xpath:' + expr))
         elif tag:
             # div / section 这类容器：直接写 //div[normalize-space(.)='X'] 会把祖先全算进来
@@ -494,13 +524,26 @@ def build_specs(snap):
             # div 按钮只能掉到 rf_css。这里补一条「不能再有同标签后代文本也等于它」的约束，
             # 只留最内层那一层：文字唯一时命中 1 个、且就是被点的那个；真有两处相同仍是 2 个，
             # 不会把重复内容误判成唯一（实测见 test_recording_rf_text_leaf）。
-            leaf = 'normalize-space(.)=%s' % _xpath_literal(text)
+            leaf = 'normalize-space(.)=%s' % _xpath_literal(value)
             expr = '//%s[%s][not(descendant::%s[%s])]' % (tag, leaf, tag, leaf)
-            specs.append(_spec('rf_text_leaf', 'locator', ['xpath=' + expr], 'rf text:' + text))
+            specs.append(_spec('rf_text_leaf', 'locator', ['xpath=' + expr], 'rf text:' + value))
 
     if snap.get('css'):
         specs.append(_spec('rf_css', 'locator', ['css=' + snap['css']], 'rf css:' + snap['css']))
     return specs
+
+
+def id_spec(snap):
+    """快照里的稳定 id → `locator('#id')`。
+
+    只给 healer 补丁用，不参与录制时的候选生成：候选表一改，主定位和生成脚本都会
+    跟着变（那是另一件事）。这里只解决「元素改了名，class 候选比 id 弱」的问题——
+    `[class~="primary-action"]` 只说明「页面上有个主按钮」，`#login` 才说明「是它」。
+    """
+    element_id = (snap or {}).get('id')
+    if not element_id or _DYNAMIC_ID.search(element_id):
+        return None
+    return _pw_spec('css', 'locator', ['#' + element_id])
 
 
 def row_scoped_spec(row_role, row_key, inner):

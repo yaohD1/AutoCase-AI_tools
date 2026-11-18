@@ -164,6 +164,20 @@ batchDeleteTestcases(ids) {
   setDefaultModel(model) {
     return api.put('/models/default', { model })
   },
+  // 录制回放「AI 自愈」单独用的模型，和生成链路的默认模型分开存。
+  getHealerModel() {
+    return api.get('/models/healer')
+  },
+  setHealerModel(model) {
+    return api.put('/models/healer', { model })
+  },
+  // 滑块验证专用模型：必须能读图，所以不跟随全局默认。
+  getSliderModel() {
+    return api.get('/models/slider')
+  },
+  setSliderModel(model) {
+    return api.put('/models/slider', { model })
+  },
   testModel(data) {
     return api.post('/models/test', data)
   },
@@ -246,6 +260,13 @@ batchDeleteTestcases(ids) {
   controlDebugReplay(action, extra) {
     return api.post('/automation/recording/debug/control', { action, ...(extra || {}) })
   },
+  // 回放失败后的修复决定：apply（应用并重试）/ skip / stop
+  decideDebugHeal(decision, writeback) {
+    return api.post('/automation/recording/debug/heal', { decision, writeback: !!writeback })
+  },
+  undoRecordingHeal(no) {
+    return api.post('/automation/recording/heal/undo', no == null ? {} : { no })
+  },
   // 插入前验证：只看当前页面这一刻的状态，不回放
   verifyRecordingIntent(intent) {
     return api.post('/automation/recording/verify', { intent }, { timeout: 30000 })
@@ -284,6 +305,10 @@ batchDeleteTestcases(ids) {
   // 刷新页面要后端点一次浏览器（录制中会真的刷），所以有独立接口，超时给宽一点。
   addRecordingReload(afterNo = null) {
     return api.post('/automation/recording/reload', { after_no: afterNo }, { timeout: 30000 })
+  },
+  // 滑块验证：没有目标元素，只有容器选择器（可空）、重试次数、单次超时。
+  addRecordingSlider(payload) {
+    return api.post('/automation/recording/slider', payload, { timeout: 30000 })
   },
   // 在浏览器里把这一步的匹配元素全部框出来并编号，供人眼确认；index 省略就按当前选中的那个。
   highlightRecordingStep(no, index = null, framework = null) {

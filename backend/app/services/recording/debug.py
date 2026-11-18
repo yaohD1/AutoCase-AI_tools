@@ -18,7 +18,7 @@ import time
 import uuid
 from collections import deque
 
-from app.services.recording import replay
+from app.services.recording import healer, llm_healer, replay
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +114,19 @@ def _describe(step):
 class DebugSession:
     """一次调试回放。一个进程里同时只允许一个（浏览器很重，而且界面只有一个入口）。"""
 
-    def __init__(self, steps, framework, delay=None, headless=True):
+    def __init__(self, steps, framework, delay=None, headless=True, patcher=None, heal=True,
+                 app_config=None):
         self.id = 'dbg-%s' % uuid.uuid4().hex[:10]
         self.steps = steps
         self.framework = framework
         self.delay = DEFAULT_DELAY if delay is None else max(0.0, float(delay))
         self.headless = headless
+        # AI 自愈要按 AUTOMATION_WORKSPACE_ROOT 决定沙箱放哪，这里留个口子。
+        self.app_config = app_config or {}
+        # 写回录制步骤的通道。用回调而不是直接拿 RecordingSession：
+        # 这个模块不该知道录制会话长什么样，测试里也好换成假的。
+        self._patcher = patcher
+        self._heal_enabled = bool(heal) and patcher is not None
 
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
@@ -134,6 +141,10 @@ class DebugSession:
         self._stopped = False
         self._thread = None
         self._started = time.monotonic()
+        # 等待用户决定的修复建议。补丁单独放在这里：它带着完整候选（含 spec），
+        # 每次状态轮询都编码一遍不值得。
+        self._decision = None
+        self._heal_patch = None
 
         self._state = {
             'id': self.id,
@@ -146,6 +157,7 @@ class DebugSession:
             'error': None,
             'failed_no': None,
             'url': None,
+            'heal': None,
             'steps': [dict(_describe(s), status='pending', ms=None, used=None, error=None)
                       for s in steps],
         }
@@ -174,6 +186,11 @@ class DebugSession:
 
     def control(self, action):
         with self._cond:
+            if self._state['status'] in ('needs_heal', 'healing'):
+                # 停在这里是在等一个决定，暂停/继续/单步都没有意义——放行只会让
+                # 用户点了没反应，还以为界面坏了。停止仍然有效。
+                if action != 'stop':
+                    raise DebugError('这一步在等修复决定，先处理上面的建议')
             if action == 'pause':
                 if self._state['status'] in ('done', 'failed', 'stopped'):
                     return
@@ -205,6 +222,34 @@ class DebugSession:
 
     def set_speed(self, delay):
         self.delay = max(0.0, min(3.0, float(delay)))
+
+    def decide_heal(self, decision, writeback=False):
+        """用户对失败的处理：ai（让官方 healer 查）/ apply（应用并重试）/ skip / stop。
+
+        决定只在这里记下，真正的应用和重试在回放线程里做——浏览器是那个线程的，
+        跨线程碰 sync API 会直接把 Playwright 弄崩。
+        """
+        with self._cond:
+            card = self._state.get('heal')
+            if not card or self._state['status'] not in ('needs_heal', 'healing'):
+                raise DebugError('现在没有等待处理的问题')
+            if decision not in ('ai', 'apply', 'skip', 'stop'):
+                raise DebugError('不认识的处理决定：%s' % decision)
+            if decision == 'ai':
+                if self._state['status'] == 'healing' or card.get('status') == 'investigating':
+                    raise DebugError('AI 已经在调查了，等它出结果')
+            if decision == 'apply' and not card.get('can_apply'):
+                raise DebugError('这一处没有可应用的改动，只能跳过或停止')
+            if decision == 'apply':
+                # 立刻把卡片切成「正在重试」，否则用户点完到下一次轮询之间
+                # 按钮看起来没反应，很容易连点两下。
+                self._state['heal'] = dict(card, status='applying')
+            elif decision == 'ai':
+                self._state['heal'] = dict(card, status='queued', ai_ready=False)
+            self._decision = {'decision': decision, 'writeback': bool(writeback)}
+            self._cond.notify_all()
+        self._push()
+        return self.snapshot()
 
     def wait_done(self, timeout=MAX_RUNTIME):
         if self._thread:
@@ -301,6 +346,7 @@ class DebugSession:
                 if self._state['status'] not in ('stopped', 'failed'):
                     self._state['status'] = 'failed'
                     self._state['error'] = '回放异常退出：%s' % exc
+                self._state['heal'] = None
         finally:
             self._grabber = None
 
@@ -358,47 +404,65 @@ class DebugSession:
             with self._lock:
                 self._state['status'] = 'running'
             self._mark(i, status='running')
-            started = time.monotonic()
 
-            upcoming = self.steps[i + 1] if i + 1 < total else None
-            # 弹窗的处理器必须在上一步执行之前就交出去：等走到 dialog 那一步再注册，
-            # 页面已经挂起了（和 replay 里同一条理由）。
-            if upcoming and upcoming.get('type') == 'dialog' and probe is None:
-                probe = replay._arm_dialog(page, upcoming, {'seen': [], 'no': upcoming.get('no')})
+            current = step
+            attempt = 0
+            skipped = False
+            chosen = poll = ident = None
+            while True:
+                # 弹窗的处理器必须在上一步执行之前就交出去：等走到 dialog 那一步再注册，
+                # 页面已经挂起了（和 replay 里同一条理由）。重试时也要重新装。
+                probe = self._arm_upcoming(page, i, probe)
+                started = time.monotonic()
+                try:
+                    page, chosen, poll, ident = self._exec(context, page, current)
+                    break
+                except Exception as exc:  # noqa: BLE001 - 失败要留在画面上给人看
+                    replay._disarm_dialog(probe)
+                    probe = None
+                    ms = round((time.monotonic() - started) * 1000)
+                    self._mark(i, status='failed', ms=ms, error=str(exc)[:400])
+                    self._grab(force=True)
+                    verdict = self._handle_failure(i, page, current, exc, attempt)
+                    if verdict == 'stop':
+                        return
+                    if verdict == 'next':
+                        skipped = True
+                        break
+                    current = verdict['step']
+                    attempt += 1
+                    self._mark(i, status='running', error=None)
 
-            try:
-                page, chosen, poll = self._exec(context, page, step)
-            except Exception as exc:  # noqa: BLE001 - 失败要留在画面上给人看
-                replay._disarm_dialog(probe)
-                probe = None
-                ms = round((time.monotonic() - started) * 1000)
-                self._mark(i, status='failed', ms=ms, error=str(exc)[:400])
+            if skipped:
+                # 跳过不代表这一步没错，只是用户决定先往下看。状态给 skipped，
+                # 别混进 ok——否则一整轮跑完看起来像全绿。
+                self._mark(i, status='skipped')
                 with self._lock:
-                    self._state['status'] = 'failed'
-                    self._state['error'] = '第 %s 步（%s）失败：%s' % (
-                        step.get('no'), step.get('type'), exc)
-                    self._state['failed_no'] = step.get('no')
-                    # 失败自动暂停：画面停在出事那一刻，人才能看清到底发生了什么。
-                    self._paused = True
-                self._grab(force=True)
-                return
+                    self._state['status'] = 'running'
+                    self._state['heal'] = None
+                    # 跳过之后继续往下跑，顶部那条红字还挂着旧的失败原因会让人
+                    # 以为整轮还在出错。
+                    self._state['error'] = None
+                self._stepped = False
+                i += 1
+                continue
 
             ms = round((time.monotonic() - started) * 1000)
             used = self._used_of(chosen)
-            self._mark(i, status='ok', ms=ms, used=used)
+            suspect = self._suspect_note(current, ident)
+            self._mark(i, status='ok', ms=ms, used=used,
+                       suspect=bool(suspect), suspect_reason=suspect)
             with self._lock:
                 self._state['url'] = self._safe_url(page)
+                self._state['heal'] = None
             self._grab(force=True)
 
             if step.get('type') == 'dialog' and probe:
                 if not probe.get('seen'):
                     # 弹窗没来就是没来，别装作成功——多半是上一步没点中。
                     self._mark(i, status='failed', error='这一步应该有弹窗，但实际没有弹出来')
-                    with self._lock:
-                        self._state['status'] = 'failed'
-                        self._state['error'] = '第 %s 步应该有弹窗，但实际没有弹出来' % step.get('no')
-                        self._state['failed_no'] = step.get('no')
-                        self._paused = True
+                    self._fail_hard('第 %s 步应该有弹窗，但实际没有弹出来' % step.get('no'),
+                                    step.get('no'))
                     return
                 replay._disarm_dialog(probe)
                 probe = None
@@ -411,11 +475,199 @@ class DebugSession:
             self._state['status'] = 'done'
             self._state['index'] = total
 
+    def _arm_upcoming(self, page, i, probe):
+        upcoming = self.steps[i + 1] if i + 1 < len(self.steps) else None
+        if upcoming and upcoming.get('type') == 'dialog' and probe is None:
+            return replay._arm_dialog(page, upcoming, {'seen': [], 'no': upcoming.get('no')})
+        return probe
+
+    def _fail_hard(self, message, no):
+        """不再尝试修复，直接收摊。浏览器由 _run_playwright 的 finally 关掉。"""
+        with self._lock:
+            self._state['status'] = 'failed'
+            self._state['error'] = message
+            self._state['failed_no'] = no
+            self._state['heal'] = None
+            # 失败自动暂停：画面停在出事那一刻，人才能看清到底发生了什么。
+            self._paused = True
+        return 'stop'
+
+    def _handle_failure(self, i, page, step, exc, attempt):
+        """失败 → 停下来，把决定权交给人。
+
+        **不自动诊断。** 失败后只给一个「AI 自愈」入口，用户点了才起官方 healer。
+        理由：规则诊断要判断「元素还是不是录制时那个」，判不准的时候只能停；
+        而官方 healer 虽然慢，但它会真的跑、真的改、真的重跑，结论更硬。
+        让用户决定什么时候花这几分钟，比替他决定更合适。
+
+        这个方法会一直阻塞，期间浏览器保持打开——现场丢了，后面什么都查不了。
+        """
+        no = step.get('no')
+        message = '第 %s 步（%s）失败：%s' % (no, step.get('type'), exc)
+        if not self._heal_enabled:
+            return self._fail_hard(message, no)
+
+        card = self._failure_card(step, message, attempt)
+        self._show_heal(card, message, no)
+
+        patch = None
+        while True:
+            decision, writeback = self._wait_decision()
+            if decision == 'ai':
+                card = self._ai_investigate(i, page, step, card)
+                patch = self._heal_patch
+                continue
+            break
+
+        with self._lock:
+            self._state['heal'] = None
+            self._state['status'] = 'running'
+        self._push()
+        if decision == 'stop':
+            return self._fail_hard(message, no)
+        if decision == 'skip':
+            self._heal_patch = None
+            return 'next'
+
+        applied = False
+        note = ''
+        if writeback and card.get('writeback_ok') and patch:
+            try:
+                self._patcher(step.get('_session_no'), patch)
+                applied = True
+            except Exception as err:  # noqa: BLE001 - 写回失败不该挡住本次重试
+                logger.warning('修复写回失败：%s', err)
+                note = '写回失败：%s' % str(err)[:80]
+        self._heal_patch = None
+        self._mark(i, healed=True, heal_written=applied, heal_note=note or None,
+                   heal_title=card.get('title'))
+        with self._lock:
+            self._state['error'] = None
+        wait_ms = int((patch or {}).get('wait_ms') or 0)
+        if wait_ms > 0:
+            self._sleep_with_frames(wait_ms)
+        return {'step': healer.apply_patch(step, patch or {})}
+
+    def _failure_card(self, step, message, attempt):
+        """失败后的第一张卡片：只有事实，没有猜测。"""
+        return {
+            'no': step.get('no'),
+            'type': step.get('type'),
+            'alias': (step.get('target') or {}).get('alias'),
+            'status': 'idle',
+            'title': '第 %s 步失败' % (step.get('no') or ''),
+            'category': 'failed',
+            'reason': message,
+            'probes': [],
+            'changes': [],
+            'can_apply': False,
+            'writeback_ok': False,
+            'writeback_default': False,
+            'ai_ready': True,
+            'attempt': attempt + 1,
+            'max_attempt': 1,
+        }
+
+    def _show_heal(self, card, message, no):
+        with self._lock:
+            self._state['status'] = 'needs_heal'
+            self._state['error'] = message
+            self._state['failed_no'] = no
+            self._state['heal'] = card
+        self._push()
+        self._grab(force=True)
+
+    def _ai_investigate(self, i, page, step, base_card):
+        """点「AI 自愈」之后这一段：投影 → 官方 healer → 回填结果。
+
+        整段是阻塞的，但走的是回放线程（浏览器只归它）。等待期间持续出帧，
+        否则画面会冻在失败那一刻，用户以为整个页面死了。
+        """
+        with self._lock:
+            self._state['status'] = 'healing'
+            self._state['heal'] = dict(
+                base_card, status='investigating', title='AI 正在调查',
+                reason='正在把失败现场投影成 Playwright 用例，交给官方 healer 跑一遍。',
+                ai_ready=False)
+        self._push()
+        self._grab(force=True)
+
+        try:
+            card = llm_healer.investigate(
+                page, self.steps[:i + 1], app_config=self.app_config,
+                title='AutoCase 回放 · 第 %s 步' % (step.get('no') or ''),
+                on_tick=self._grab)
+        except Exception as exc:  # noqa: BLE001 - 自愈挂了不能把整次回放带走
+            logger.exception('AI 自愈失败')
+            text = str(exc)[:300] or exc.__class__.__name__
+            card = dict(base_card, status='blocked', category='ai_heal',
+                        title='AI 自愈', reason=text, ai_ready=True,
+                        blocked_reason='AI 没能给出可用的修复，可以重试或跳过这一步。',
+                        probes=['调查失败：%s' % text[:160]])
+
+        card.setdefault('no', step.get('no'))
+        card.setdefault('alias', (step.get('target') or {}).get('alias'))
+        card['ai_ready'] = True
+        # 补丁里带着完整 spec，不该跟着 260ms 的状态轮询反复发给前端。
+        patch = card.pop('patch', None)
+        if patch is not None:
+            card['writeback_ok'] = bool(step.get('_session_no'))
+            if not card['writeback_ok']:
+                card['writeback_default'] = False
+                card['writeback_note'] = '这一步是动作里的子步骤，改动只对本次回放生效。'
+        self._heal_patch = patch
+        with self._lock:
+            self._state['heal'] = card
+            self._state['status'] = 'needs_heal'
+        self._push()
+        self._grab(force=True)
+        return card
+
+    def _sleep_with_frames(self, ms):
+        """等待期间继续出帧，否则画面上是「点了应用之后一动不动」，像卡死。"""
+        deadline = time.monotonic() + ms / 1000.0
+        while time.monotonic() < deadline:
+            if self._stopped:
+                return
+            self._grab()
+            time.sleep(0.08)
+
+
+    def _wait_decision(self):
+        """阻塞到用户做出决定。期间持续出帧——不然画面会冻住，看起来像卡死。"""
+        while True:
+            with self._cond:
+                if self._stopped:
+                    return 'stop', False
+                if self._decision is not None:
+                    data = self._decision
+                    self._decision = None
+                    return data['decision'], data['writeback']
+            self._grab()
+            time.sleep(0.06)
+
     def _safe_url(self, page):
         try:
             return page.url
         except Exception:
             return None
+
+    def _suspect_note(self, step, ident):
+        """动作执行前后对不上的元素：不判失败，但也不能装作没事。
+
+        「结构定位漂移、点到了刷新按钮」这种不会抛错——Playwright 点成功了，
+        步骤也是绿的。这里拿录制快照和实际元素的身份特征比一次，冲突就标黄，
+        让人知道这一步虽然过了，但过的不是原来那个元素。
+        """
+        if not ident or not step.get('target'):
+            return None
+        try:
+            cmp = healer.compare_identity(step['target'].get('snap') or {}, ident)
+        except Exception:
+            return None
+        if cmp.get('verdict') != 'conflict':
+            return None
+        return cmp.get('reason') or '实际操作的元素的身份与录制时不同。'
 
     def _used_of(self, chosen):
         if not chosen:
@@ -432,11 +684,14 @@ class DebugSession:
         }
 
     def _exec(self, context, page, step):
-        """执行一步，返回 (当前页, 用到的候选, 轮询信息)。
+        """执行一步，返回 (当前页, 用到的候选, 轮询信息, 执行前的元素身份)。
 
         和 `replay._run_step` 的差别只有一处：执行前把目标元素高亮一下，
         用户才知道这一步到底点在哪。其余逻辑刻意保持一致，免得「回放跑通的」
         和「生成脚本跑通的」不是同一件事。
+
+        身份在**动作之前**读：点完按钮可能把自己带走，事后再读就什么都没了。
+        回放结束后拿它和录制快照比对，能抓出「定位没报错、但点到了别人」。
         """
         kind = step.get('type')
         if kind == 'new_page':
@@ -449,32 +704,41 @@ class DebugSession:
                 page.wait_for_load_state('domcontentloaded', timeout=15000)
             except Exception:
                 pass
-            return page, None, None
+            return page, None, None, None
 
         target = step.get('target')
         loc = None
+        ident = None
         if target:
             try:
                 loc, _ = replay._locator(page, target, self.framework)
-                loc.evaluate(_HL_ON, '#E24B4A')
+                # 高亮只等 0.8 秒：locator.evaluate 默认会等满 30 秒（它也要等元素
+                # 出现），元素没出来时等于在动作之前先白等一轮，失败总耗时直接翻倍。
+                loc.evaluate(_HL_ON, '#E24B4A', timeout=HIGHLIGHT_MS)
                 # 划完立刻出一帧：否则用户看到的永远是「操作之后」的页面，
                 # 那个红框一闪而过，等于没画。
                 self._grab(force=True)
             except Exception:
                 # 高亮失败（元素还没出现、页面正在跳）不该影响这一步本身
                 loc = None
+            if loc is not None:
+                try:
+                    ident = healer.read_identity(loc)
+                except Exception:
+                    ident = None
         chosen, poll = replay._run_step(step, page, self.framework)
         if loc is not None:
             try:
                 # 执行完再划一次：页面没跳的话，暂停时框还在，指得清是哪个元素。
-                # 页面已经跳走时这里会失败，正常。
-                loc.evaluate(_HL_ON, '#E24B4A')
+                # 页面已经跳走时这里会失败——同样只等 0.8 秒，别让「点击后跳转」
+                # 这种最常见的情况每步都多挂 30 秒。
+                loc.evaluate(_HL_ON, '#E24B4A', timeout=HIGHLIGHT_MS)
             except Exception:
                 pass
         # 新标签页可能在步骤执行中出现（点击打开了新窗口）
         if len(context.pages) > 1 and (step.get('page_index') or 0) < len(context.pages):
             page = context.pages[step.get('page_index') or 0]
-        return page, chosen, poll
+        return page, chosen, poll, ident
 
 
 # ---------- 单例 ----------
@@ -487,13 +751,21 @@ def current():
     return _current
 
 
-def start(steps, framework, delay=None, headless=True):
-    """起一次调试回放。上一个还活着就拒绝——两个浏览器同时在跑只会让人搞不清在看哪个。"""
+def start(steps, framework, delay=None, headless=True, patcher=None, heal=True,
+          app_config=None):
+    """起一次调试回放。上一个还活着就拒绝——两个浏览器同时在跑只会让人搞不清在看哪个。
+
+    `patcher(no, patch)` 是写回录制步骤的通道；不传就退化成「失败即停」。
+    `app_config` 决定 AI 自愈的沙箱位置（跟 AUTOMATION_WORKSPACE_ROOT 走）。
+    """
     global _current
     with _current_lock:
-        if _current is not None and _current.snapshot()['status'] in ('starting', 'running', 'paused'):
+        if _current is not None and _current.snapshot()['status'] in (
+                'starting', 'running', 'paused', 'healing', 'needs_heal'):
             raise DebugBusy('上一次调试回放还在跑，先停掉它')
-        _current = DebugSession(steps, framework, delay=delay, headless=headless).start()
+        _current = DebugSession(steps, framework, delay=delay, headless=headless,
+                                patcher=patcher, heal=heal,
+                                app_config=app_config).start()
         return _current
 
 

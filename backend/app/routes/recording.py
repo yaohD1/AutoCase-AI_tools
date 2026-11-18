@@ -524,6 +524,29 @@ def add_recording_step():
         return _error(str(exc), 400)
 
 
+@recording_bp.route('/automation/recording/slider', methods=['POST'])
+def add_recording_slider():
+    """插入一步「滑块验证」。
+
+    它没有目标元素：容器是运行时按 canvas 尺寸找出来的，也可以在这里指定选择器。
+    attempts / timeout 都有上下限，前端传什么都不至于让一次回放卡死半小时。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        after_no = body.get('after_no')
+        after_no = int(after_no) if after_no is not None else None
+        return jsonify(session.add_slider_step({
+            'selector': body.get('selector'),
+            'attempts': body.get('attempts'),
+            'timeout': body.get('timeout'),
+        }, after_no=after_no)), 200
+    except (RecordingError, TypeError, ValueError) as exc:
+        return _error(str(exc), 400)
+
+
 @recording_bp.route('/automation/recording/reload', methods=['POST'])
 def add_recording_reload():
     """插入一步「刷新页面」。录制中会顺带真的刷新，让后续步骤落在刷新后的页面上。"""
@@ -969,12 +992,23 @@ def start_debug_replay():
     framework = (body.get('framework') or '').strip() or session.framework or replay.PW_FRAMEWORK
     if framework not in (replay.PW_FRAMEWORK, replay.RF_FRAMEWORK):
         return _error('不支持的框架：%s' % framework, 400)
+    # 展开（动作调用变平铺）会按新顺序重排编号，写回时不能再用展开后的 no。
+    # 把原来的录制编号挂在 `_session_no` 上带过去；动作子步骤没有对应录制步骤，置空。
+    for step in steps:
+        step['_session_no'] = step.get('no')
+    steps = replay._expand(steps, session.action_definitions())
+    for step in steps:
+        if step.get('_action'):
+            step['_session_no'] = None
     try:
         runner = debug.start(
-            replay._expand(steps, session.action_definitions()),
+            steps,
             framework=framework,
             delay=body.get('delay'),
             headless=bool(body.get('headless', True)),
+            patcher=session.patch_target,
+            heal=bool(body.get('heal', True)),
+            app_config=current_app.config,
         )
     except debug.DebugBusy as exc:
         return _error(str(exc), 409)
@@ -1004,6 +1038,39 @@ def debug_replay_control():
     except debug.DebugError as exc:
         return _error(str(exc), 400)
     return jsonify(runner.snapshot()), 200
+
+
+@recording_bp.route('/automation/recording/debug/heal', methods=['POST'])
+def debug_replay_heal():
+    """对回放里失败的这一步做决定：应用建议并重试 / 跳过 / 停止。
+
+    `writeback` 决定要不要把新定位写回录制步骤（影响后续生成的代码）。
+    默认不写回：由前端按卡片上的勾选显式传，误改录制数据的代价比多点一次大。
+    """
+    runner = debug.current()
+    if runner is None:
+        return _error('没有正在进行的调试回放', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        snapshot = runner.decide_heal((body.get('decision') or '').strip(),
+                                      writeback=bool(body.get('writeback')))
+    except debug.DebugError as exc:
+        return _error(str(exc), 400)
+    return jsonify(snapshot), 200
+
+
+@recording_bp.route('/automation/recording/heal/undo', methods=['POST'])
+def undo_recording_heal():
+    """撤销回放里写回的定位修复。"""
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    no = body.get('no')
+    try:
+        return jsonify(session.undo_heal(int(no) if no is not None else None)), 200
+    except RecordingError as exc:
+        return _error(str(exc), 400)
 
 
 @recording_bp.route('/automation/recording/debug/stream', methods=['GET'])

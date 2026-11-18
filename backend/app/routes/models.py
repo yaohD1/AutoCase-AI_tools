@@ -140,6 +140,73 @@ def set_default_model():
         return _fail(exc)
 
 
+@models_bp.route('/models/healer', methods=['GET'])
+def get_healer_model():
+    """录制回放里「AI 自愈」用的模型。
+
+    和全局默认模型分开：healer 是长链路（跑测试、改文件、重跑），
+    实测有些模型单轮能跑、多轮工具调用却返回空，换一个不该把整条生成链路也换掉。
+    """
+    try:
+        explicit = models_config.healer_model_explicit()
+        return jsonify({
+            'model': models_config.healer_model(),
+            'explicit': explicit,
+            'default': models_config.default_model(),
+            'refs': models_config.model_refs(),
+        }), 200
+    except ModelConfigError as exc:
+        return _fail(exc)
+
+
+@models_bp.route('/models/healer', methods=['PUT'])
+def set_healer_model():
+    data = request.get_json(silent=True) or {}
+    try:
+        models_config.set_healer_model((data.get('model') or '').strip())
+        return jsonify({
+            'model': models_config.healer_model(),
+            'explicit': models_config.healer_model_explicit(),
+            'default': models_config.default_model(),
+            'refs': models_config.model_refs(),
+        }), 200
+    except ModelConfigError as exc:
+        return _fail(exc)
+
+
+@models_bp.route('/models/slider', methods=['GET'])
+def get_slider_model():
+    """滑块验证码求解用的模型。
+
+    和 healer 分开：这个必须能读图，所以不跟随全局默认（全局默认可能是纯文本模型）。
+    `default` 里给的是内置的豆包视觉引用，前端据此提示「没配就是它」。
+    """
+    try:
+        return jsonify({
+            'model': models_config.slider_model(),
+            'explicit': models_config.slider_model_explicit(),
+            'builtin': models_config.SLIDER_DEFAULT_REF,
+            'refs': models_config.model_refs(),
+        }), 200
+    except ModelConfigError as exc:
+        return _fail(exc)
+
+
+@models_bp.route('/models/slider', methods=['PUT'])
+def set_slider_model():
+    data = request.get_json(silent=True) or {}
+    try:
+        models_config.set_slider_model((data.get('model') or '').strip())
+        return jsonify({
+            'model': models_config.slider_model(),
+            'explicit': models_config.slider_model_explicit(),
+            'builtin': models_config.SLIDER_DEFAULT_REF,
+            'refs': models_config.model_refs(),
+        }), 200
+    except ModelConfigError as exc:
+        return _fail(exc)
+
+
 @models_bp.route('/models/test', methods=['POST'])
 def test_model():
     data = request.get_json(silent=True) or {}

@@ -166,6 +166,116 @@ def save_local(data):
         runtime_path().unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------- AI 自愈模型
+
+def default_model():
+    """全局默认模型（opencode 的 `model`）。"""
+    with _LOCK:
+        data = load_local()
+    return str(data.get('model') or '').strip()
+
+
+def healer_model_explicit():
+    """单独配的 healer 模型；空字符串表示「跟随全局默认」。"""
+    with _LOCK:
+        data = load_local()
+    return str((data.get('autocase') or {}).get('healer_model') or '').strip()
+
+
+def healer_model():
+    """录制回放里「AI 自愈」用的模型。没单独配就回落到全局默认。
+
+    为什么要单独一个：回放页的 healer 是长链路（跑测试、改文件、重跑），
+    实测有些模型能跑单轮但多轮工具调用会返回空，而生成链路的默认模型未必合适。
+    这条配置只影响 healer，不动 `model`，免得改一个设置把整条生成链路换掉。
+    """
+    with _LOCK:
+        data = load_local()
+    ref = str((data.get('autocase') or {}).get('healer_model') or '').strip()
+    return ref or str(data.get('model') or '').strip()
+
+
+def set_healer_model(ref):
+    """保存 healer 模型。空字符串表示「跟随全局默认」。"""
+    ref = (ref or '').strip()
+    with _LOCK:
+        data = load_local()
+        autocase = dict(data.get('autocase') or {})
+        if not ref:
+            autocase.pop('healer_model', None)
+        else:
+            try:
+                known = {str(m.get('id') or '') for m in flat_models(include_hidden=True)}
+            except Exception:  # noqa: BLE001 - 读不到列表就不挡保存
+                known = set()
+            if known and ref not in known:
+                raise ModelConfigError('模型不存在：%s。请先在模型服务里添加。' % ref)
+            autocase['healer_model'] = ref
+        if autocase:
+            data['autocase'] = autocase
+        else:
+            data.pop('autocase', None)
+        save_local(data)
+    return healer_model()
+
+
+# ---------------------------------------------------------------- 滑块模型
+
+# 滑块求解必须读图，纯文本模型接了也是白接。所以这里不提供「跟随全局默认」：
+# 默认直接指向内置登记好的豆包视觉 provider，用户配了别的就用别的。
+SLIDER_DEFAULT_REF = 'doubao-vision/ark-code-latest'
+
+
+def slider_model_explicit():
+    """单独配的滑块模型；空字符串表示「用内置默认」。"""
+    with _LOCK:
+        data = load_local()
+    return str((data.get('autocase') or {}).get('slider_model') or '').strip()
+
+
+def slider_model():
+    """滑块验证码求解用的模型。
+
+    和 healer 的差别只有一处：**不回落全局默认**。全局默认可能是纯文本模型
+    （生成链路用的就是这种），拿它去读图只会得到一句「看不懂这张图」，
+    而这个错要等 40 秒超时之后才暴露，非常难查。所以宁可在这里返回空，
+    让调用方立刻提示「去设置里选一个能看图的模型」。
+    """
+    ref = slider_model_explicit()
+    if ref:
+        return ref
+    # 内置默认只在那个 provider 真的还在时才返回：用户可能把它删了。
+    try:
+        known = {str(m.get('id') or '') for m in flat_models(include_hidden=True)}
+    except Exception:  # noqa: BLE001 - 读不到列表就当它还在，别把默认值一起弄丢
+        known = set()
+    return SLIDER_DEFAULT_REF if (not known or SLIDER_DEFAULT_REF in known) else ''
+
+
+def set_slider_model(ref):
+    """保存滑块模型。空字符串表示「回到内置默认」。"""
+    ref = (ref or '').strip()
+    with _LOCK:
+        data = load_local()
+        autocase = dict(data.get('autocase') or {})
+        if not ref:
+            autocase.pop('slider_model', None)
+        else:
+            try:
+                known = {str(m.get('id') or '') for m in flat_models(include_hidden=True)}
+            except Exception:  # noqa: BLE001 - 读不到列表就不挡保存
+                known = set()
+            if known and ref not in known:
+                raise ModelConfigError('模型不存在：%s。请先在模型服务里添加。' % ref)
+            autocase['slider_model'] = ref
+        if autocase:
+            data['autocase'] = autocase
+        else:
+            data.pop('autocase', None)
+        save_local(data)
+    return slider_model()
+
+
 # ---------------------------------------------------------------- 视图
 
 def _vision_flag(model, extra):

@@ -263,6 +263,8 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
   - 候选清单只列**当前框架**那一组（`pool_for`）：Playwright 与 Robot 各有一套，混在一起列十几条用户对不上号；`adopted` 标出生成用哪条。
   - **`div` 的文字定位走 `rf_text_leaf`，不要直接把 div 加进 `TEXT_TAGS`**：`//div[normalize-space(.)='X']` 会把祖先全算进来（一行文字的 div 按钮实测命中 4 个），所以 TEXT_TAGS 一直排除 div，div 按钮只剩 `rf_css`（结构定位，改版就点错）。现在的写法多一个「不能再有同标签、同样文本的后代」约束，只留最内层：文字唯一时命中 1 个且就是被点的那个，两处同名时仍是 2 个。动这条之前先跑 `test_recording_rf_text_leaf`。
   - **Playwright 的文本白名单 = `TEXT_TAGS + ('div',)`（`PW_TEXT_TAGS`）**：PW 的文本引擎只命中「最小的那个元素」，div 可以放心用；RF 对 div 会命中祖先，只能走 `rf_text_leaf`。两边白名单必须对齐，否则同一个可点的 li/td 会出现「Robot 按文字、Playwright 按结构」——用户看到的就是「明明文字不同，系统却认不出」。以前手写的 5 种标签漏了 li/td/p/h1~h6/strong，菜单项（`<li class="el-menu-item">`）正好中招。改白名单时先跑 `test_recording_pw_text_tags`。
+  - **文本要采两份口径：`text`（innerText）+ `text_flat`（textContent）**。查询端读的是 textContent——Playwright 的 text 引擎和 XPath 的 `normalize-space()` 都是，块级子元素之间**没有分隔符**；innerText 却在块之间插换行。于是「两行字分在两个 div 里」的卡片按钮（登录身份选择、带头像的列表项）拿 innerText 去查恒定 0 命中：Playwright 还能靠 `getByRole` 兜住，RF 没有 role 候选，只能掉到 `css=div:nth-of-type(2) > button`。`locators.text_variants()` 把两份都发出去，由 `count` 淘汰命不中的那条（实测 RF 的结构定位 8→3，零退化）。
+    两条边界：① 同组内 innerText 版必须排前面，新候选只能补位；② **innerText 为空时不发 PW 文本候选**——那种 textContent 多来自 `<svg><title>` 或 `display:none` 的提示语，`getByText` 会命中那个不可见节点（实测命中的是 `<title>` 本身，没有布局框，点它等于点空气），比结构定位更糟。守住 `test_recording_locator_parity` 里那 5 条。
   - 结论只有三档：`count==1` 绿「存在 · 唯一」、`count>1` 黄「匹配到 N 个，取第 K 个」、`count==0` 红「找不到」。失败要分 `no_target / no_frame / no_candidate / frame_lost / overlay_failed` 说清原因，别让用户以为是定位坏了。
   - 口径是**此刻**：页面可能已经走到后面几步，弹窗里必须写明页面 URL + 校验时间；`page_gone` 的步骤再补一句「只代表当前页面」。
   - 弹窗宽度写成 `min(520px, calc(100vw - 24px))`（el-dialog 的 `width` 属性）：面板窗口本来就是 400~800，写死 520 在窄面板里会横向溢出。`class` 上的 `max-width` **不生效**——Element 的 `.el-dialog` 根节点拿不到 scoped 的 `data-v-*`。
@@ -356,10 +358,59 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
 - **元素高亮改元素自己的 `outline`，不插 DOM 节点**（`_HL_ON`）：插一个 div 当覆盖层会被自己的定位器数进去，回放时「命中 1 个」突然变「命中 2 个」，排查半天才发现是自己画的框。备份值存在元素的 JS 属性 `__acOutline` 上，不进 DOM 属性。
 - **画面走 MJPEG**（`/debug/stream`，`<img src>` 直接吃）：比 SSE 少一层 base64（省 33%），比自己写 canvas 少一堆重连逻辑。抓帧是执行线程里 `page.screenshot(type=jpeg, quality=55)`，0.09 秒最小间隔（≈11fps）；暂停和步间停留期间持续抓，执行中每步前后各抓一张。**同一画面重复压进来只是浪费带宽**，长度没变就当没变（误判的代价只是少发一帧）。
 - **外部浏览器的 screencast 拿不到帧**：`connect_over_cdp` 连上去之后 `Page.startScreencast` 一帧都不出（实测），只能 `Page.captureScreenshot` 轮询（实测 25.6 fps，够用）。自己 `launch` 的浏览器 screencast 正常（13 fps），但 RF/Selenium 沙箱那条链路必须是外部连，所以统一按截图轮询设计。
-- **失败自动暂停**：`status=failed` 且 `_paused=True`，画面停在出事那一刻。前端靠 `state.error` + 失败步骤的 `error` 两处显示——列表里只有一行红字，底部错误条放完整原因（定位原文、实际值、调用日志）。
+- **失败不再直接结束，也不自动诊断**：接 `patcher` 时状态是 `needs_heal`，卡片 `status='idle'` 只有事实（哪一步、什么错），等用户点「让 AI 自愈」或跳过/停止；没接 `patcher` 时退回 `failed` + `_paused=True`。前端靠 `state.heal` 显示卡片、`state.error` 显示原始报错。
 - **断言/等待步骤必须有中文 label**（`INTENT_LABELS`）：这类步骤没有 `alias`，不补的话右侧列表和底部详情只剩一个「assert」，用户不知道它在等什么。
 - 前端轮询 `/debug/state`（260ms），收到 `done/failed/stopped` 就停；`<img>` 断流后重连一次拿最后一帧（后端在 5 秒无新帧时主动断开，避免中间层掐死后永久黑屏）。
 - 单例：同时只允许一场调试回放（`DebugBusy`）。页面 `onBeforeUnmount` 会 `stop`，刷新页面则先 `refresh` 接上已有会话，不要重开一个把人家顶掉。
+
+### 回放失败与 AI 自愈
+
+**失败不自动诊断，也不自动修。** 只有用户点「让 AI 自愈」才动，理由是这个动作要花 1–3 分钟，
+替他决定不如让他决定。原来那套规则诊断（`healer.diagnose`）已经从这条链路上摘掉，
+`healer.py` 保留下来当**验证器**：AI 给出的定位必须过 `_precheck` 才能进卡片。
+
+链路：`_exec` 抛错 → `_handle_failure` → 卡片 `status='idle'`（只有事实）
+→ 用户点「让 AI 自愈」→ `llm_healer.investigate` → 官方 `playwright-test-healer` 在沙箱里跑/改/重跑
+→ spec diff + 新定位 → `_precheck` → 卡片 `ready` / `blocked` → 用户决定写回、跳过或停止。
+
+- **投影必须和回放等价**：`spec_render` 把 steps 翻成 spec，定位走 `locators.render_pw` / `render_chain`，和回放、计数、预览共用同一份 spec。投影歪了，healer 修的就是另一个问题，结论再漂亮也是错的。
+- **只渲染到失败那一步**：后面的步骤依赖失败之后的状态，塞进去只会制造一批二次失败，把真正的错误淹掉。
+- **沙箱必须是独立 Git 仓库根**（`storage/healer_sandbox`）：opencode 会把**上层** git 仓库当 project root，`autocase/**` 这条权限规则就匹配不上，`apply_patch` 全被拒——报错只说「规则不允许」，不提路径，很难查（实测踩过）。
+- **沙箱固定复用**：`@playwright/test` 只装一次，`playwright.config.ts` 用 `channel: 'chrome'` 走系统 Chrome，不下浏览器。Windows 上 `npm` 是 `npm.cmd`，`subprocess` 直接用 `'npm'` 会 WinError 2，必须 `shutil.which`。
+- **AI 改了什么都得给人看**：卡片里的 `spec_diff` 是沙箱里的真实 diff、逐行着色。它可能顺手改了断言期望值，用户有权先看到再决定，别只显示「已修复」。
+- **写回前必须过 `_precheck`**：AI 在沙箱里跑通，不等于这条定位在**当前页面**也唯一命中。预检不过就 `blocked`，绝不放行。
+- **解析不出定位就说解析不出**：`parse_locator` 只认 `getBy*` / `locator` 和 `nth` / `first` / `last` / `filter` 链。改动里没有定位（比如只改了断言值）时返回 `None`，卡片给 `blocked_reason`，不猜一条写回去。
+- **补丁格式仍然是「primary + candidates + clear_frame」**：回放 PW 读 `primary`、RF 读 `candidates`、生成端用同一套函数。不要另造一套覆盖机制，那必然出现「回放过了、生成的还是旧定位」。
+- **失败要留住浏览器**：`_handle_failure` 阻塞在 `_wait_decision` 上等用户，浏览器由 `_run_playwright` 的 `finally` 才关。等待期间持续 `_grab`；AI 调查期间通过 `on_tick` 继续出帧，否则画面会冻住两分钟，看着像死了。
+- **卡片先出事实，再出结论**：`idle` 态只写「第 N 步失败 + 原始报错」，不预判原因。`ready`/`blocked` 才带 AI 的结论和 diff。
+- **动作执行前读一次身份，成功后比对**：`debug._exec` 在动作之前 `read_identity`，`_suspect_note` 发现 `conflict` 就把步骤标成 `suspect`（黄色「疑似点错」，仍算 ok）。结构定位漂移点到别人时 Playwright 不会报错，这是唯一能抓到它的地方，和 healer 无关，别一起删。
+- **写回可撤销**：`session.patch_target` 只接受 `primary` / `candidates` / `clear_frame`（`retry_only` 不落库），别的键一律拒绝——这个入口不该长成第二个「随便改步骤」的后门。每次写回压一条 `_heal_history`，`undo_heal(no)` 还原。
+- **动作子步骤写不回去**：`actions.expand` 会把 `call` 拆平并重排编号，所以在 `expand` 之前先把录制编号挂在 `_session_no` 上；子步骤没有对应录制步骤，置空并只允许「本次生效」。
+- **模型单独配**：`models_config.healer_model()` 读 `opencode.models.json` 的 `autocase.healer_model`，缺省回落全局 `model`。实测有些模型单轮能跑、多轮工具调用却返回空（tokens 全 0、`parts` 为空、无 `finish`），换它不该牵连生成链路，所以设置按钮放在回放页的齿轮里，不在设置页。
+- **沉浸模式**：页头 `⤢` 把右侧栏变成浮在画面上的抽屉，预览吃满整宽（1440×900 的缩放比从 ~0.67 提到 0.95+），`ESC` 退出。不做 `display:none`——步骤列表是「看着画面操作」的一部分，收起来就得来回切。
+
+### 滑块验证步骤（`slider`）
+
+- **它是第五种手动步骤，不是回放兜底**：工具栏「滑块验证」→ `POST /automation/recording/slider` → `session.add_slider_step`。和断言、等待加载、固定等待并列，录制时插入、回放时按顺序执行、生成时翻译成 `solveSlider`。
+- **不做拖动自动识别**：滑块拖动在 DOM 里只是一串 pointermove，和「按住拖一下滚动条」长得一模一样，自动识别必然误判。让用户显式加一步，语义最清楚。
+- **步骤没有 target**：只有 `slider: {selector, attempts, timeout}`。`selector` 空 = 运行时按 canvas 尺寸自动识别；页面上有多个验证码时才需要填。
+- **求解流程的顺序不能换**（`slider.solve`）：找容器 → 隐藏拼图块 → 截图放大 2 倍 → 问视觉模型 → 自标定比例拖动 → 轮询结果。
+  - **隐藏拼图块是最关键的一步**：拼图块和缺口形状完全一样、叠在同一片区域，不藏起来模型会把块本身当成缺口。实测六轮失败全栽在这。
+  - **比例必须自标定**：先走 24px 量出「鼠标走 N、拼图块走多少」，再算剩下要走多远。实测这个组件是 116/120≈0.9654，写死 1.0 会差 3–4px，正好在容差边上。
+  - **不能固定 sleep 判结果**：校验是异步的，松手后要一两秒才有结论。固定等 2.5 秒会把「校验中」判成失败——实测把 4/4 通过误判成 0/4。
+- **重试是重新出题、重新识别，不是再拖一次**：组件失败后会把底图整张换掉（实测失败前后容器截图 99.6% 的像素不同），缺口位置随之改变。所以 `attempts > 0` 时走「等组件复位 → 重找容器 → 重新截图 → 重新问模型」，只有识别这一步也失败（模型超时、返回不可解析）才退回旧坐标 ±2px。改之前是「等 1200ms 后 target±2」，在新底图上几乎必然失败。
+  - 代价是每次重试多一次模型调用（20–40 秒），`attempts` 因此同时是「最多问几次模型」：默认 2 意味着最坏 3 次识别 + 3 次拖动。
+  - 重试前先等「验证失败」提示消失（`_wait_reset` / `waitReset`）：提示还挂着时，`_wait_result` 一读 body 就会把上一轮的结果当成这一轮的。
+  - 重试时 `find_scene` 返回 None 要报错，不能拿旧 handle 继续拖：元素已经断开，`_wait_result` 会立刻返回「消失=通过」，变成假绿。
+  - 结果里的 `reads` 记着每次尝试用的坐标和来源（`model` / `fallback`），排障时用来区分「模型这次认错了」和「拖动没被接收」。
+- **失败提示的白名单要保守**：`FAIL_WORDS` 不能收「拖动滑块完成验证」这类**初始提示**，它一直在页面上，收进来会让每次松手都立刻判失败。
+- **模型必须能读图，所以不回落全局默认**：`models_config.slider_model()` 默认 `doubao-vision/ark-code-latest`，`slider_model_explicit()` 为空时不读 `model`。全局默认可能是纯文本模型，回落过去只会得到一句「看不懂这张图」，而这个错要等 40 秒超时之后才暴露。provider 被删掉时返回空串，让调用方立刻提示去设置。
+- **投影不执行滑块**：`spec_render` 只写一行注释并计入 `unsupported`。写成 `solveSlider` 调用会让沙箱里的 healer 去修一个不存在的函数，那是最坏的一种假失败。
+- **生成的 TS 必须自己读 `.env`**：Playwright 不会自动加载 `.env`，只写文件不改读取逻辑的话，用户拿到项目一跑就是「缺少环境变量」。`slider_ts.py` 里 `readDotenv()` 从文件位置向上找四层，不引 dotenv 依赖（目标项目不一定装了）。
+- **TS 版按 canvas 序号定位，不按坐标反查**：拼图块拖动后会移动，用 `getBoundingClientRect` 的坐标去 `find` 回来，第二次重试时必然找不到——实测 `ratio` 从 0.9654 掉成 1，等于重试形同虚设。`findScene` 返回带 `index` 的盒子，后续一律 `page.locator('canvas').nth(index)`。Python 侧本来就用 elementHandle，没有这个问题。
+- **生成端平台注入，不让写手发挥**：`emit._ensure_slider_utils` 在 `guard.snapshot` **之前**把 `utils/slider.ts` 写进 target_path 同级目录（之后写会被判越界），`_write_slider_env` 按 key 去重补 `.env` 三项。写手只被要求 `import { solveSlider } from './utils/slider'` 并 await 调用。
+- **`.env` 已存在的键不覆盖**：同一个项目反复生成不能把 .env 越堆越乱；换模型后重新生成也不改已有行，那属于用户自己的环境。
+
 
 ## 自动化脚本约定
 
@@ -394,6 +445,8 @@ opencode 收不收图看模型条目的 `modalities.input` 里有没有 `image`�
 - AI 配置：`/api/ai-configs`。
 - 知识库：`/api/knowledge/*`。
 - 自动化：`/api/automation/config`、`/api/automation/generate`、`/api/automation/generations`、`/api/automation/generations/<id>/artifact`、`/api/automation/generations/<id>/commit`。
+- 录制与调试回放：`/api/automation/recording/debug/start|state|control|stream`、`debug/heal`（提交处理决定，body `{decision: ai|apply|skip|stop, writeback}`，`ai` 表示让官方 healer 去查）、`recording/heal/undo`（撤销写回的定位）。AI 自愈模型：`GET|PUT /api/models/healer`。
+- 滑块验证步骤：`POST /api/automation/recording/slider`（body `{after_no, selector, attempts, timeout}`）。滑块模型：`GET|PUT /api/models/slider`（`builtin` 是内置的豆包引用，`explicit` 为空表示用内置）。
 - 录制与路径浏览：`backend/app/routes/recording.py`（`/api/automation/recording/*`）、`backend/app/routes/browse.py`（`/api/automation/browse` 列工作区目录、`/api/automation/browse/files` 列工作区内目标文件）。两者都是只读，且只能浏览 `AUTOMATION_WORKSPACE_ROOT` 内；前端 `PathPickerDialog.vue` 复用这两个接口，避免手填绝对路径。
 
 ## 常用命令

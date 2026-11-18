@@ -154,6 +154,12 @@
   const snap = (el, liftedFrom) => {
     // 下拉框的 innerText 包含全部选项文字，不能作为名称。
     const text = el.tagName === 'SELECT' ? null : ((el.innerText || '').trim().slice(0, 80) || null);
+    // 同一段文字的另一种口径。Playwright 的 text 引擎和 XPath 的 normalize-space()
+    // 读的都是 textContent——块级子元素之间**没有任何分隔符**；innerText 却在块之间插换行。
+    // 卡片式按钮（"Dyh 管理员" 和 "t2" 分在两个 div 里）拿 innerText 去查恒定 0 命中，
+    // RF 因此只能掉到 css 结构路径。两份都留着，由 count 淘汰命不中的那条。
+    const flat = el.tagName === 'SELECT' ? null
+      : ((el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80) || null);
     const label = labelText(el);
     // Python 侧拿不到 DOM 节点，只能靠一个临时属性认出「用户点的到底是哪一个」，
     // 它在计数完就被摘掉（session._count 末尾的 CLEAR_MARK_JS），不会留在页面上。
@@ -192,6 +198,7 @@
       placeholder: el.getAttribute('placeholder'),
       testid: el.getAttribute('data-testid'),
       text: text,
+      text_flat: flat,
       id: el.id || null,
       attr_name: el.getAttribute('name'),
       class_raw: classRaw,

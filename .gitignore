@@ -86,3 +86,6 @@ opencode.runtime.emit-*.json
 # WorkBuddy 的本地记忆：每个会话一份工作记录，跟代码无关。
 # 已经跟踪的历史 md 不受影响，这里只挡新生成的。
 .workbuddy/
+
+# AI 自愈沙箱：node_modules + 每次临时生成的 spec，都是运行产物。
+storage/healer_sandbox/

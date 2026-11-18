@@ -4,7 +4,7 @@
 """
 
 STEP_TYPES = ('goto', 'reload', 'click', 'fill', 'select', 'press', 'dialog',
-              'new_page', 'assert', 'wait', 'sleep', 'call')
+              'new_page', 'assert', 'wait', 'sleep', 'call', 'slider')
 
 # 断言 / 等待的意图类型，固定 schema。代码片段由生成 agent 按框架写。
 INTENT_TYPES = (
@@ -67,12 +67,13 @@ def make_target(snap, candidates, primary, status):
 
 
 def make_step(step_type, no, target=None, value=None, label=None, url=None, page_index=0,
-              source='record', dialog=None, action=None, args=None):
+              source='record', dialog=None, action=None, args=None, slider=None):
     """一步操作。source 为 record（录制得到）或 manual（用户在工具栏添加）。
 
     press 用 value 存键名（Playwright 写法，如 Enter / Control+Enter）；
     dialog 用 dialog 存 {'kind', 'message', 'action'}，value 另存一遍 action 便于前端直接读。
     call 是「调用一个具名动作」：action 指向动作 id，args 是这次调用的实参。
+    slider 是滑块验证的配置：{'selector', 'attempts', 'timeout'}，selector 空表示自动识别。
     """
     if step_type not in STEP_TYPES:
         raise ValueError('unknown step type: %s' % step_type)
@@ -93,6 +94,9 @@ def make_step(step_type, no, target=None, value=None, label=None, url=None, page
     if step_type == 'call':
         step['action'] = action
         step['args'] = args or {}
+    # 同理只给 slider 挂：它不是「指向一个元素」，而是一段固定流程 + 三个参数。
+    if step_type == 'slider':
+        step['slider'] = dict(slider or {})
     return step
 
 
