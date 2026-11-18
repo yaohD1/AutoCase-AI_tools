@@ -659,8 +659,21 @@ function errorText(error) {
     || (error && error.message) || '操作失败'
 }
 
-function leave() {
+async function leave() {
   api.controlDebugReplay('stop').catch(() => {})
+  // 由录制页开出来的独立窗口：退出就是关窗。不要在这里 router.push('/recording')，
+  // 那会在回放窗口里又渲染一份录制页，看起来像「录制页被重置了」。
+  if (route.query.window === '1') {
+    try {
+      await api.closeReplayWindow()
+      return
+    } catch (error) {
+      // 服务端关不掉时退回浏览器自己的能力；仍失败就明确告诉用户手动关。
+      window.close()
+      ElMessage.warning('窗口未能自动关闭，请手动关闭此窗口')
+      return
+    }
+  }
   router.push('/recording')
 }
 

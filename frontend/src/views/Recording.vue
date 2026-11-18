@@ -1318,8 +1318,9 @@
         </div>
       </el-card>
 
-      <!-- 生成：面板模式下录制中就藏起来，停止后再出现（面板空间留给步骤） -->
-      <aside v-if="session && (!compactMode || isStopped)" class="side-rail">
+      <!-- 生成：面板模式下录制中就藏起来，停止或暂停后再出现（录制中空间留给步骤；
+           暂停时步骤不再增长，正好可以回放/生成）。 -->
+      <aside v-if="session && (!compactMode || isStopped || paused)" class="side-rail">
         <div class="rail-head">
           <span class="card-title">准备与生成</span>
           <span class="rail-steps">{{ steps.length }} 步</span>
@@ -1467,16 +1468,18 @@
         <div class="rail-foot">
         <!-- 回放校验：跑的是内存里的录制 IR，不是生成的脚本，所以暂停或停止后就能跑，
              不需要先经过「生成」。按钮放在这里，不要再塞回生成结果卡片里。 -->
-        <div v-if="canReplay && steps.length" class="replay-block">
+        <div v-if="steps.length" class="replay-block">
           <div class="replay-row">
-            <el-button size="small" type="primary" @click="openDebugReplay">调试回放</el-button>
+            <el-button size="small" type="primary" :disabled="!canReplay"
+                       :title="canReplay ? '打开独立回放窗口' : '先暂停录制'"
+                       @click="openDebugReplay">调试回放</el-button>
             <!-- 「快速校验」入口已下线（反馈是根本用不上，只留调试回放）。
                  只隐藏 UI，后端一行没动：/automation/recording/replay 接口和
                  replay.replay_checked 都保留着（7 个测试文件仍在覆盖它），
                  要恢复就把下面这行取消注释。 -->
             <!-- <el-button size="small" :loading="replaying" @click="runReplay">快速校验</el-button> -->
             <span class="field-hint">
-              可逐步暂停，无需生成
+              {{ canReplay ? '独立窗口回放，录制页不动' : '录制中 · 先暂停才能回放' }}
             </span>
           </div>
           <div v-if="replayStale" class="replay-stale">
@@ -2214,9 +2217,25 @@ const planBody = ref(null)
 const noteDialog = reactive({ visible: false, quote: '', comment: '' })
 const selTip = reactive({ visible: false, x: 0, y: 0, text: '' })
 let noteSeq = 0
-// 调试回放：另开一页，左画面右步骤，能暂停单步。跑的是同一份 IR、同一套定位，
-// 结论和下面的 runReplay 一致——一个看过程，一个只看结果。
-function openDebugReplay() {
+// 调试回放：另开一个**独立窗口**看，录制页和被测 iframe 都不动。
+// 之前用 router.push 在同一个标签页跳，嵌入模式的被测页会被直接卸载，
+// 退出后只能回到一个没有 iframe 的录制页，看起来像「莫名多了个页面」。
+async function openDebugReplay() {
+  if (!canReplay.value) {
+    ElMessage.info('先暂停录制，再打开调试回放')
+    return
+  }
+  // 浏览器已关（比如停止后又点了关闭浏览器）就没有窗口可挂，退回整页跳转。
+  if (session.value && session.value.browser_open) {
+    try {
+      await api.openReplayWindow({ framework: config.framework })
+      ElMessage.success('已在新窗口打开调试回放')
+      return
+    } catch (error) {
+      // 开窗失败不挡功能：退回原来的整页跳转，至少还能看回放。
+      ElMessage.warning(`打开独立窗口失败，已在当前页打开：${errorText(error)}`)
+    }
+  }
   router.push({ path: '/recording/replay', query: { framework: config.framework } })
 }
 

@@ -87,5 +87,85 @@ class ReplayRouteTest(unittest.TestCase):
         self.assertIn('browser not installed', resp.get_json()['error'])
 
 
+OPEN_WINDOW = '/api/automation/recording/replay/window'
+CLOSE_WINDOW = OPEN_WINDOW + '/close'
+
+
+class ReplayWindowRouteTest(unittest.TestCase):
+    """独立回放窗口：录制页不动，所以入口/出口都走服务端。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = create_app()
+        cls.app.config['TESTING'] = True
+        cls.client = cls.app.test_client()
+
+    def setUp(self):
+        RecordingSession._current = None
+
+    def _session(self, status='stopped', browser=True):
+        session = RecordingSession.__new__(RecordingSession)
+        session.status = status
+        session._browser = mock.Mock() if browser else None
+        session.open_replay_window = mock.Mock(return_value={'open': True})
+        session.close_replay_window = mock.Mock(return_value={'open': False})
+        RecordingSession._current = session
+        return session
+
+    def test_no_session_is_not_found(self):
+        self.assertEqual(self.client.post(OPEN_WINDOW, json={}).status_code, 404)
+
+    def test_browser_closed_is_conflict(self):
+        self._session(browser=False)
+        resp = self.client.post(OPEN_WINDOW, json={})
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn('浏览器已关闭', resp.get_json()['error'])
+
+    def test_open_passes_framework(self):
+        session = self._session()
+        resp = self.client.post(OPEN_WINDOW, json={'framework': 'robot-selenium'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()['open'])
+        session.open_replay_window.assert_called_once_with('robot-selenium')
+
+    def test_close_without_session_is_ok(self):
+        resp = self.client.post(CLOSE_WINDOW)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.get_json()['open'])
+
+    def test_close_calls_session(self):
+        session = self._session()
+        resp = self.client.post(CLOSE_WINDOW)
+        self.assertEqual(resp.status_code, 200)
+        session.close_replay_window.assert_called_once()
+
+
+class ReplayUrlTest(unittest.TestCase):
+    """回放页地址必须和录制页同源，且带上 window=1 让页面知道自己是受管窗口。"""
+
+    def _session(self, panel_url='', embed_url=None):
+        session = RecordingSession.__new__(RecordingSession)
+        session._panel_url = panel_url
+        session._embed_url = embed_url
+        session.framework = 'robot-selenium'
+        return session
+
+    def test_uses_panel_origin_and_drops_its_query(self):
+        session = self._session(panel_url='http://localhost:5173/recording?panel=1')
+        self.assertEqual(
+            session._replay_url('playwright-ts'),
+            'http://localhost:5173/recording/replay?framework=playwright-ts&window=1')
+
+    def test_falls_back_to_embed_url(self):
+        session = self._session(embed_url='http://localhost:5173/recording?embed=1&target=x')
+        url = session._replay_url('')
+        self.assertIn('/recording/replay?', url)
+        self.assertIn('framework=robot-selenium', url)
+        self.assertIn('window=1', url)
+
+    def test_no_frontend_url(self):
+        self.assertIsNone(self._session()._replay_url('playwright-ts'))
+
+
 if __name__ == '__main__':
     unittest.main()

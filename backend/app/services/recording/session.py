@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -356,6 +356,12 @@ class RecordingSession(object):
         self._panel_proc = None
         self._panel_profile = None
         self._panel_hwnd = 0
+        # 调试回放窗口：独立 context，和录制 context 隔离。
+        # 关键：录制 context 会给每个新页面补一条 new_page 步骤（见 _handle_new_page），
+        # 回放页要是开在同一个 context 里，步骤列表会凭空多一步。
+        self._replay_context = None
+        self._replay_page = None
+        self._replay_closing = False
         # 被测窗口的 HWND 与「粘合」线程：拖其中一个，另一个跟着走。
         self._main_hwnd = 0
         self._glue = None
@@ -468,6 +474,18 @@ class RecordingSession(object):
     def set_pause(self, on):
         """暂停 / 继续录制（浏览器保持可用，暂停期间的操作不入库）。"""
         return self._call('set_pause', on=bool(on))
+
+    def open_replay_window(self, framework=None):
+        """在录制浏览器里另开一个窗口跑调试回放。
+
+        用独立 context，不挂在录制 context 下——否则「开窗口」本身会被记成一步
+        new_page。窗口关闭时由 _on_replay_context_closed 收掉回放沙箱。
+        """
+        return self._call('replay_window', timeout=25, framework=framework or '')
+
+    def close_replay_window(self):
+        """关掉回放窗口（用户点「退出」或录制结束收尾时用）。"""
+        return self._call('replay_window_close', timeout=15)
 
     def stop(self):
         """停止记录，但把浏览器留着：停止后仍可拾取元素、验证断言。"""
@@ -634,6 +652,8 @@ class RecordingSession(object):
                 'panel_hidden': bool(getattr(self, '_panel_hidden', False)),
                 # 浏览器的生命周期比录制长：停止后仍开着，前端据此决定能否继续拾取 / 验证。
                 'browser_open': self._browser_open(),
+                # 回放窗口是否开着：前端据此把按钮文案换成「切换到回放窗口」，避免点两次。
+                'replay_window': getattr(self, '_replay_page', None) is not None,
                 # 有没有抓到登录态：生成本身不依赖它，但「跑一遍」依赖。
                 'auth_saved': bool(getattr(self, '_storage_state', None)),
                 # 断言解析器（录制期常驻的 opencode）状态：就绪 / 启动中 / 不可用。
@@ -1467,6 +1487,10 @@ class RecordingSession(object):
                 elif name == 'set_pause':
                     self._set_paused(kwargs['on'])
                     result = {'paused': self._paused}
+                elif name == 'replay_window':
+                    result = self._open_replay_window_now(kwargs.get('framework'))
+                elif name == 'replay_window_close':
+                    result = self._close_replay_window_now()
                 elif name == 'relayout':
                     result = {'laid_out': self.layout_windows()}
                 elif name == 'panel_mode':
@@ -1541,6 +1565,18 @@ class RecordingSession(object):
             # 面板窗口是独立 context，先关它再关浏览器。
             if self._panel_context is not None:
                 self._panel_context.close()
+        except Exception:
+            pass
+        try:
+            # 回放窗口也是独立 context；不关的话它会比录制浏览器活得更久。
+            self._close_replay_window_now()
+        except Exception:
+            pass
+        try:
+            # 主动关窗时 _on_replay_context_closed 会被 _replay_closing 挡住，
+            # 这里补一次停沙箱，否则回放无头浏览器会一直挂着。
+            from app.services.recording import debug
+            debug.stop_current()
         except Exception:
             pass
         # 无壳面板是独立进程，粘合线程也要收掉，否则钩子会一直挂在已销毁的窗口上。
@@ -1627,6 +1663,110 @@ class RecordingSession(object):
             self._panel_context = None
             return
         self.layout_windows()
+
+    # ---- 调试回放窗口（独立 context，不进录制步骤）----
+
+    def _replay_url(self, framework):
+        """回放页地址：从面板 / 嵌入地址取 origin，再拼回放路由。
+
+        没有前端地址（比如脚本直接开录制、没配面板）时返回 None，调用方退回
+        「整页跳过去」，至少功能还在，只是会离开录制现场。
+        """
+        base = (getattr(self, '_panel_url', '') or getattr(self, '_embed_url', '') or '').strip()
+        if not base:
+            return None
+        parts = urlparse(base)
+        if not parts.scheme or not parts.netloc:
+            return None
+        query = urlencode({
+            'framework': framework or self.framework or '',
+            # window=1：回放页据此知道自己是「被管理窗口」，退出走 close 而不是路由跳转。
+            'window': '1',
+        })
+        return '%s://%s/recording/replay?%s' % (parts.scheme, parts.netloc, query)
+
+    def _open_replay_window_now(self, framework):
+        if self._browser is None or self._context is None:
+            raise RecordingError('浏览器已关闭，无法打开回放窗口')
+        url = self._replay_url(framework)
+        if url is None:
+            raise RecordingError('没有前端地址，无法打开回放窗口')
+        # 已经开着一个就换掉，避免点两次叠出两个回放窗口。
+        self._close_replay_window_now()
+        context = None
+        try:
+            context = self._browser.new_context(no_viewport=True, ignore_https_errors=True)
+            page = context.new_page()
+            # 用户直接点窗口右上角 X 时也要收掉回放沙箱，否则 headless 那边会一直挂着。
+            context.on('close', lambda _ctx: self._on_replay_context_closed())
+            page.goto(url, wait_until='domcontentloaded', timeout=15000)
+        except Exception as exc:
+            try:
+                if context is not None:
+                    context.close()
+            except Exception:
+                pass
+            raise RecordingError('打开回放窗口失败：%s' % exc)
+        self._replay_context = context
+        self._replay_page = page
+        self._place_replay_window(page)
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
+        return {'open': True}
+
+    def _place_replay_window(self, page):
+        """摆到屏幕中间，别和被测窗口完全重叠。取不到屏幕信息就交给系统默认。"""
+        try:
+            size = self._context.pages[0].evaluate(
+                '() => ({ w: screen.availWidth, h: screen.availHeight })')
+            total_w = int(size.get('w') or 0)
+            total_h = int(size.get('h') or 0)
+            if total_w <= 0 or total_h <= 0:
+                return
+            width = max(900, int(total_w * 0.78))
+            height = max(640, int(total_h * 0.88))
+            self._set_window_bounds(page, {
+                'left': max(0, (total_w - width) // 2),
+                'top': max(0, (total_h - height) // 2),
+                'width': width,
+                'height': height,
+            })
+        except Exception:
+            pass
+
+    def _close_replay_window_now(self):
+        context, self._replay_context = self._replay_context, None
+        self._replay_page = None
+        self._replay_closing = True
+        try:
+            if context is not None:
+                context.close()
+        except Exception:
+            pass
+        finally:
+            self._replay_closing = False
+        # 窗口没了，回放沙箱也没有继续跑的意义（页面里的 stop 请求可能因为
+        # 窗口先被销毁而没发出来）。
+        try:
+            from app.services.recording import debug
+            debug.stop_current()
+        except Exception:
+            pass
+        return {'open': False}
+
+    def _on_replay_context_closed(self):
+        """窗口被用户关掉（不是我们主动 close）时，顺手把回放沙箱收掉。"""
+        if self._replay_closing:
+            return
+        self._replay_context = None
+        self._replay_page = None
+        try:
+            from app.services.recording import debug
+            debug.stop_current()
+        except Exception:
+            pass
 
     def _panel_browser(self):
         """给面板窗口挑一个浏览器：优先系统 Edge，没有就退回自带的 Chromium。"""

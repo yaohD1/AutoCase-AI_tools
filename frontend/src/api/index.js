@@ -379,6 +379,14 @@ batchDeleteTestcases(ids) {
   replayRecording(data) {
     return api.post('/automation/recording/replay', data, { timeout: 300000 })
   },
+  // 调试回放窗口：开/关都走服务端，窗口是录制浏览器里另起的一个 context，
+  // 这样录制页不会被导航走，也不会多记一条 new_page 步骤。
+  openReplayWindow(data) {
+    return api.post('/automation/recording/replay/window', data, { timeout: 40000 })
+  },
+  closeReplayWindow() {
+    return api.post('/automation/recording/replay/window/close', {}, { timeout: 20000 })
+  },
   listRecordingGenerations() {
     return api.get('/automation/recording/generations')
   },

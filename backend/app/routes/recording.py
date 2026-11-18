@@ -1050,6 +1050,38 @@ def debug_replay_state():
     return jsonify(runner.snapshot()), 200
 
 
+@recording_bp.route('/automation/recording/replay/window', methods=['POST'])
+def open_replay_window():
+    """在录制浏览器里另开一个窗口看调试回放（录制页与步骤都不动）。
+
+    为什么要独立窗口：回放页开在录制标签页里会把整页导航走，嵌入模式的被测页面
+    直接卸载，退出后也回不来。窗口另开在**独立 context**里，录制上下文收不到
+    page 事件，所以不会凭空多一条 new_page 步骤。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    if not session._browser_open():
+        return _error('浏览器已关闭，无法打开回放窗口', 409)
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(session.open_replay_window(body.get('framework'))), 200
+    except RecordingError as exc:
+        return _error(str(exc), 400)
+
+
+@recording_bp.route('/automation/recording/replay/window/close', methods=['POST'])
+def close_replay_window():
+    """关掉回放窗口。回放页的「退出」走这里，避免它自己路由跳走。"""
+    session = RecordingSession.current()
+    if session is None:
+        return jsonify({'open': False}), 200
+    try:
+        return jsonify(session.close_replay_window()), 200
+    except RecordingError as exc:
+        return _error(str(exc), 400)
+
+
 @recording_bp.route('/automation/recording/debug/control', methods=['POST'])
 def debug_replay_control():
     runner = debug.current()
