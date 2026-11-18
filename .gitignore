@@ -89,3 +89,9 @@ opencode.runtime.emit-*.json
 
 # AI 自愈沙箱：node_modules + 每次临时生成的 spec，都是运行产物。
 storage/healer_sandbox/
+
+# ---- 探针工作区：本地验证用的脚本 / 截图 / 独立仓库，不进主仓库 ----
+# .probe/slider 是滑块调试的逐步截图（139 张、11M），.probe/healer-agent 里
+# 有独立 .git 和 node_modules —— 单独 add 会把 22M 和一堆 gitlink 带进来。
+# 这些是一次性验证产物，留在本地即可。
+.probe/
