@@ -1717,7 +1717,14 @@ class RecordingSession(object):
         return {'open': True}
 
     def _place_replay_window(self, page):
-        """摆到屏幕中间，别和被测窗口完全重叠。取不到屏幕信息就交给系统默认。"""
+        """回放窗口铺满屏幕。
+
+        回放是「左画面右步骤」，窗口小了右侧步骤栏会被压得很窄，等于看不见
+        正在跑哪一步。先请求最大化（保留标题栏和关闭按钮，符合桌面上「全屏」的
+        直觉）；headless 或窗口管理器拒绝时再退到铺满可用区域。
+        """
+        if self._maximize(page):
+            return
         try:
             size = self._context.pages[0].evaluate(
                 '() => ({ w: screen.availWidth, h: screen.availHeight })')
@@ -1725,13 +1732,9 @@ class RecordingSession(object):
             total_h = int(size.get('h') or 0)
             if total_w <= 0 or total_h <= 0:
                 return
-            width = max(900, int(total_w * 0.78))
-            height = max(640, int(total_h * 0.88))
             self._set_window_bounds(page, {
-                'left': max(0, (total_w - width) // 2),
-                'top': max(0, (total_h - height) // 2),
-                'width': width,
-                'height': height,
+                'left': 0, 'top': 0,
+                'width': total_w, 'height': total_h,
             })
         except Exception:
             pass
@@ -2269,7 +2272,11 @@ class RecordingSession(object):
 
     @staticmethod
     def _maximize(page):
-        """嵌入模式是单窗口，直接最大化，让被测页面拿到整屏宽度。"""
+        """把窗口最大化，返回是否真的设上了。
+
+        嵌入模式是单窗口，直接最大化，让被测页面拿到整屏宽度；
+        回放窗口也走这里（最大化失败时要退到「铺满可用区域」，所以得有返回值）。
+        """
         try:
             cdp = page.context.new_cdp_session(page)
             info = cdp.send('Browser.getWindowForTarget')
@@ -2278,8 +2285,9 @@ class RecordingSession(object):
                 'bounds': {'windowState': 'maximized'}
             })
             cdp.detach()
+            return True
         except Exception:
-            pass
+            return False
 
     # ---- 被录制页面里的浮层（面板 + 即时徽标）----
 

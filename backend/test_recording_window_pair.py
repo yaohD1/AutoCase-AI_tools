@@ -361,5 +361,57 @@ class PlanFollowTest(unittest.TestCase):
         self.assertEqual(target, (1000, 0, 800, 900))
 
 
+class ReplayWindowPlacementTest(unittest.TestCase):
+    """回放窗口必须铺满。
+
+    回放页是「左画面右步骤」，窗口小一圈右侧步骤栏就被压窄，看不出正在跑哪一步。
+    曾经按 78% 屏宽居中摆，反馈是「不是全屏」，所以这里钉住两条：
+    优先最大化，最大化失败才退到铺满可用区域（不是退到 78%）。
+    """
+
+    def _session(self):
+        session = RecordingSession.__new__(RecordingSession)
+        session._context = MagicMock()
+        session._context.pages = [MagicMock()]
+        session._set_window_bounds = MagicMock()
+        return session
+
+    def test_prefers_maximize(self):
+        session = self._session()
+        page = MagicMock()
+        with patch.object(RecordingSession, '_maximize', return_value=True) as maximize:
+            session._place_replay_window(page)
+        maximize.assert_called_once_with(page)
+        session._set_window_bounds.assert_not_called()
+
+    def test_falls_back_to_full_work_area(self):
+        """headless 下最大化会失败，这时铺满可用区域，而不是缩成 78%。"""
+        session = self._session()
+        page = MagicMock()
+        session._context.pages[0].evaluate.return_value = {'w': 1600, 'h': 900}
+        with patch.object(RecordingSession, '_maximize', return_value=False):
+            session._place_replay_window(page)
+        session._set_window_bounds.assert_called_once()
+        bounds = session._set_window_bounds.call_args.args[1]
+        self.assertEqual((bounds['left'], bounds['top']), (0, 0))
+        self.assertEqual((bounds['width'], bounds['height']), (1600, 900))
+
+    def test_maximize_reports_failure(self):
+        """CDP 抛异常时要返回 False，否则调用方不会走兜底。"""
+        page = MagicMock()
+        page.context.new_cdp_session.side_effect = RuntimeError('no cdp')
+        self.assertFalse(RecordingSession._maximize(page))
+
+    def test_maximize_reports_success(self):
+        page = MagicMock()
+        cdp = page.context.new_cdp_session.return_value
+        self.assertTrue(RecordingSession._maximize(page))
+        sent = [c.args[0] for c in cdp.send.call_args_list]
+        self.assertIn('Browser.getWindowForTarget', sent)
+        bounds = [c.args[1] for c in cdp.send.call_args_list
+                  if c.args[0] == 'Browser.setWindowBounds'][0]
+        self.assertEqual(bounds['bounds'], {'windowState': 'maximized'})
+
+
 if __name__ == '__main__':
     unittest.main()

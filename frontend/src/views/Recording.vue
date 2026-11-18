@@ -1383,7 +1383,8 @@
         </div>
         <!-- 没停录制时把 4 行检查压成一行，别占掉半屏 -->
         <div v-else class="gen-compact">
-          {{ paused ? '暂停中' : '录制中' }} · 已录 <b>{{ steps.length }}</b> 步 · 停止后可生成
+          {{ paused ? '暂停中' : '录制中' }} · 已录 <b>{{ steps.length }}</b> 步 ·
+          {{ paused ? '可直接生成任务书' : '停止后可生成' }}
           <span v-if="blockers.length" class="gen-compact-bad">· {{ blockers.length }} 处定位待确认</span>
         </div>
 
@@ -1549,18 +1550,21 @@
         <!-- 任务书只有这一个入口：卡片是 flex:none，永远贴在面板底部，不用滚。
              正文在浮层里读（见下方 Teleport），这里只交代「写到哪、几步」。 -->
         <div v-else class="plan-ready">
-          <span :class="['check-dot', shownPlanError ? '' : 'ok']"></span>
+          <span :class="['check-dot', shownPlanError || planStale ? '' : 'ok']"></span>
           <div class="plan-ready-main">
             <div class="plan-ready-title">
               <!-- 重新规划失败时旧版还在：说「没生成出来」会误导，得说清用的是哪一版 -->
               <template v-if="shownPlanError && planData">重新规划失败，仍是上一版</template>
               <template v-else-if="shownPlanError">任务书没生成出来</template>
+              <!-- 暂停时生成完又接着录：任务书对不上新步骤了，必须说清楚，否则会照着旧书写 -->
+              <template v-else-if="planStale">任务书已过期 · 步骤有变</template>
               <template v-else>
                 任务书已就绪 · {{ planSteps.length }} 步<template v-if="planReusable.length"> · 复用 {{ planReusable.length }} 项</template>
               </template>
             </div>
             <div class="plan-ready-sub">
               <template v-if="shownPlanError">{{ shownPlanError.message }}</template>
+              <template v-else-if="planStale">重新规划后再执行</template>
               <template v-else-if="planTarget">写入 <code>{{ planTarget }}</code></template>
               <template v-else>写入位置未定，请打开任务书确认</template>
             </div>
@@ -1573,7 +1577,7 @@
           <span class="gen-block-dot"></span>{{ generateBlockReason }}
         </div>
         <div v-else-if="!generating && !planState" class="field-hint">
-          任务书仅只读；确认后写入目标文件
+          任务书仅只读；确认后写入<template v-if="paused && isRecording"> · 继续录需重新规划</template>
         </div>
         <div v-else-if="!generating" class="field-hint">
           写入仅在任务书内触发；步骤变更需重新规划
@@ -2498,8 +2502,11 @@ watch(() => emit.value.status, (status) => {
   }
 })
 
+// 暂停等同于「这一段落定稿」：步骤不再增长，规划基于的快照是稳定的。
+// 继续录之后步骤会变，任务书自动变成过期态（见 planStale），需要重新规划。
+const settled = computed(() => isStopped.value || (isRecording.value && paused.value))
 const canPlan = computed(() =>
-  isStopped.value && steps.value.length > 0 &&
+  settled.value && steps.value.length > 0 &&
   !!config.workspace.trim() && !!config.model && !generating.value
 )
 const canExecute = computed(() =>
@@ -2507,7 +2514,8 @@ const canExecute = computed(() =>
 )
 // 按钮置灰时，告诉用户第一个不满足的条件是什么（定位不唯一不再是阻断项，见 executePlan 的确认框）
 const generateBlockReason = computed(() => {
-  if (!isStopped.value) return '' // 未停止时「gen-compact」一行已经说明了原因，不重复
+  // 录制中（未暂停）由「gen-compact」那一行说明原因，不重复
+  if (!settled.value) return ''
   if (!steps.value.length) return '尚未录制步骤'
   if (!config.workspace.trim()) return '未填写工作区（Git 目录）'
   if (!config.model) return '未选择模型'

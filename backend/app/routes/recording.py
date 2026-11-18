@@ -784,7 +784,11 @@ def _prepare_generation(body):
     session = RecordingSession.current()
     if session is None:
         return None, _error('没有录制', 404)
-    if session.status not in ('stopped', 'idle_timeout', 'closed'):
+    # 暂停等同于「这一段落定稿」：步骤不再增长，规划基于的快照是稳定的。
+    # 继续录之后步骤会变，前端据此把任务书标成过期并要求重新规划。
+    settled = session.status in ('stopped', 'idle_timeout', 'closed') or (
+        session.status == 'recording' and getattr(session, 'paused', False))
+    if not settled:
         return None, _error('请先停止录制', 409)
     model = (body.get('model') or '').strip()
     # 前端没带（面板刷新、旧书签、直接调接口）时用这次录制本身的框架：

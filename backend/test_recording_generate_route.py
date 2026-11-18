@@ -61,6 +61,42 @@ class GenerateRouteTest(unittest.TestCase):
         self._stopped_session(status='recording')
         self.assertEqual(self._post().status_code, 409)
 
+    def test_plan_runs_while_paused(self):
+        """暂停时步骤集不再变化，任务书基于的快照是稳定的，不必等停止。
+
+        继续录之后步骤会变，前端据此把任务书标成过期并要求重新规划。
+        """
+        session = self._stopped_session(status='recording', steps=[{'no': 1}])
+        session._paused = True
+        result = {'plan': {'steps': [{'no': 1}]}, 'target_path': 'a.robot',
+                  'suggestion': None, 'reason': None, 'steps': 1, 'chars': 20}
+        with mock.patch.object(emit, 'plan', return_value=result) as planner:
+            r = self._plan()
+        self.assertEqual(r.status_code, 200, r.get_json())
+        planner.assert_called_once()
+
+    def test_write_runs_while_paused(self):
+        """暂停时也能按任务书写入；写的是文件，步骤本身一条不动。"""
+        session = self._stopped_session(status='recording', steps=[{'no': 1}])
+        session._paused = True
+        root = Path(tempfile.mkdtemp(prefix='gen-paused-'))
+        (root / 'proj').mkdir()
+        before = self.app.config['AUTOMATION_WORKSPACE_ROOT']
+        self.app.config['AUTOMATION_WORKSPACE_ROOT'] = str(root)
+        self.addCleanup(self.app.config.__setitem__, 'AUTOMATION_WORKSPACE_ROOT', before)
+        result = {'path': 'a.robot', 'changed': ['a.robot'], 'validated': True,
+                  'framework': 'robot-selenium', 'detected': None, 'reply': 'ok'}
+
+        def fake_generate(runner, workspace, *args, **kwargs):
+            (Path(workspace) / 'a.robot').write_text('*** Test Cases ***', encoding='utf-8')
+            return result
+
+        with mock.patch.object(emit, 'generate', side_effect=fake_generate) as gen:
+            r = self._post(plan={'steps': [{'no': 1}], 'target_path': 'a.robot'})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        gen.assert_called_once()
+        self.assertEqual(len(session.ir()), 1, '写入不该动录制步骤')
+
     def test_model_is_required(self):
         self._stopped_session()
         self.assertEqual(self._post(model='').status_code, 400)
