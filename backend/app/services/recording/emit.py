@@ -16,6 +16,7 @@ from pathlib import Path
 from app.services.recording import detect, guard, toolchain
 from app.services.recording.locators import (best_effort, false_positive, inline_nth,
                                             pick_for, pool_for)
+from app.services.recording.captcha_ts import CAPTCHA_TS
 from app.services.recording.slider_ts import SLIDER_TS
 
 logger = logging.getLogger(__name__)
@@ -286,6 +287,10 @@ def _steps_for_prompt(steps, framework, actions=None):
             # 滑块不是「点一个元素」，写手拿到 locator 也没用。把三个参数原样给它，
             # 规则里会说明必须调 solveSlider，不要自己拼拖动代码。
             item['slider'] = step['slider']
+        if step.get('captcha') is not None:
+            # 同理：验证码是一段流程（截图 → 问模型 → 填入），把配置原样交出去，
+            # 规则里要求必须调 solveCaptcha。
+            item['captcha'] = step['captcha']
         if step.get('seconds') is not None:
             item['seconds'] = step['seconds']
         target = step.get('target')
@@ -981,8 +986,29 @@ def _ensure_slider_utils(root, target_path, steps, framework):
     return (target.parent / 'utils' / 'slider.ts').as_posix()
 
 
+def _ensure_captcha_utils(root, target_path, steps, framework):
+    """把验证码工具写进 target_path 同级的 utils/，返回相对路径；不需要就返回 None。
+
+    和滑块同一个位置、同一个理由：必须在 guard.snapshot 之前落盘，写完才算
+    「项目原有文件」，既不进 diff，也不会被越界检查当成 agent 乱写。
+    """
+    if framework != PW_FRAMEWORK:
+        return None
+    if not any((step.get('type') == 'captcha') for step in (steps or [])):
+        return None
+    target = Path(target_path)
+    utils_dir = Path(root) / target.parent / 'utils'
+    utils_dir.mkdir(parents=True, exist_ok=True)
+    (utils_dir / 'captcha.ts').write_text(CAPTCHA_TS, encoding='utf-8')
+    return (target.parent / 'utils' / 'captcha.ts').as_posix()
+
+
 def _write_slider_env(root):
-    """把滑块模型的三个环境变量补进项目根的 .env。已存在的键一个都不覆盖。
+    """把视觉模型的三个环境变量补进项目根的 .env。已存在的键一个都不覆盖。
+
+    滑块和验证码共用这一组（SLIDER_MODEL_*）：都是「能看图的模型」，
+    没必要配两遍。captcha.ts 里优先读 CAPTCHA_MODEL_*，缺了才回落这里写的值，
+    所以想给验证码单独换模型时，自己往 .env 加三个 CAPTCHA_MODEL_* 就行。
 
     用户明确要求「直接写到 env，如果之前已经加过就不写了」：生成出来的代码要能
     开箱即跑，但同一个项目反复生成不能把 .env 越堆越乱，所以按 key 去重。
@@ -1105,6 +1131,18 @@ def _prompt(payload, resumed=False):
             '（工具文件由平台写在 target_path 同级的 utils/ 里，不要覆盖它）。\n'
             '- 这个调用是异步的，必须 await；它内部最多重试 3 次，失败会抛错，不要再包一层重试。\n'
             '- 不要给这一步写断言：滑块通过后页面自己会跳转，后续步骤的断言已经覆盖了结果。\n'
+        )
+    if any(step.get('type') == 'captcha' for step in payload.get('steps') or []):
+        head += (
+            '本次步骤里有**图形验证码识别**（steps 里 type 为 captcha 的项）。\n'
+            '- 不要自己写截图、放大、调模型、填输入框的代码，也不要去读验证码元素的 innerText。\n'
+            '- 直接调用平台注入的 `solveCaptcha(page, config)`，config 用该项的 captcha 字段原值\n'
+            '  （字段名是 camelCase：selector / inputSelector / charset / length / attempts）。\n'
+            '- 从平台生成的 `utils/captcha` 导入：`import { solveCaptcha } from \'./utils/captcha\';`'
+            '（工具文件由平台写在 target_path 同级的 utils/ 里，不要覆盖它）。\n'
+            '- 这个调用是异步的，必须 await；它内部已经做了刷新重试，失败会抛错，不要再包一层重试。\n'
+            '- 它只负责把码填进输入框，**不点提交**：点击登录/确定是后面独立的步骤，不要并进来。\n'
+            '- 不要给这一步写断言。码对不对由后面的提交结果决定，这里断言不了。\n'
         )
     return (
         head
@@ -1245,10 +1283,14 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
 
     before = None
     resumed = session is not None
-    # 有滑块步骤时先把工具文件落到项目里（在快照之前，见函数注释）。
+    # 有滑块 / 验证码步骤时先把工具文件落到项目里（在快照之前，见函数注释）。
     slider_utils = _ensure_slider_utils(root, target_path, steps, framework)
+    captcha_utils = _ensure_captcha_utils(root, target_path, steps, framework)
     if slider_utils:
         logger.info('录制生成：已注入滑块工具 %s', slider_utils)
+    if captcha_utils:
+        logger.info('录制生成：已注入验证码工具 %s', captcha_utils)
+    if slider_utils or captcha_utils:
         _write_slider_env(root)
     try:
         # 快照本身也可能失败（git 异常、目录不可读），必须放在 try 里，否则会变成没有原因的 500。

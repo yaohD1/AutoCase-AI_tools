@@ -23,7 +23,7 @@ SLIDER_TS = r"""/**
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
 export interface SliderConfig {
   /** 容器 CSS 选择器；留空则按 canvas 尺寸自动识别 */
@@ -132,53 +132,78 @@ async function askModel(png: Buffer, width: number, height: number): Promise<num
   throw new Error(`模型没有返回可解析的坐标：${String(message.content || '').slice(0, 120)}`);
 }
 
-type CanvasBox = { index: number; x: number; y: number; width: number; height: number };
+type CanvasBox = { locator: Locator; x: number; y: number; width: number; height: number };
 
-async function findScene(page: Page, selector?: string) {
-  // 记住 canvas 的**序号**而不是只留坐标：拼图块拖动后会移动，
-  // 靠坐标反查会在第二次重试时找不到（实测 ratio 从 0.9654 掉成 1）。
-  const canvases = page.locator('canvas');
-  const total = await canvases.count();
+/** 取候选画布。root 可以是页面，也可以是用户拾取到的容器 / 画布。 */
+async function collectCanvases(root: Locator | Page, isElement: boolean): Promise<CanvasBox[]> {
   const items: CanvasBox[] = [];
-  for (let i = 0; i < total; i += 1) {
-    const box = await canvases.nth(i).boundingBox();
-    if (box) items.push({ index: i, x: box.x, y: box.y, width: box.width, height: box.height });
+  const push = async (loc: Locator) => {
+    const box = await loc.boundingBox().catch(() => null);
+    if (box) items.push({ locator: loc, x: box.x, y: box.y, width: box.width, height: box.height });
+  };
+  // 拾取到的可能直接就是画布本身：它不在自己的 querySelectorAll('canvas') 里。
+  if (isElement) {
+    const tag = await (root as Locator).evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
+    if (tag === 'canvas') await push(root as Locator);
   }
-  const big = items.filter((c) => c.width >= 200 && c.width <= 640 &&
-    c.height >= 110 && c.height <= 300 && c.width > c.height);
-  if (!big.length) return null;
-  const bg = big.sort((a, b) => b.width * b.height - a.width * a.height)[0];
-  const piece = items.find((c) => c.width < 100 && c.height >= 60 &&
-    Math.abs(c.x - bg.x) < 40 && Math.abs(c.y - bg.y) < 24) || null;
+  const canvases = root.locator('canvas');
+  const total = await canvases.count();
+  for (let i = 0; i < total; i += 1) await push(canvases.nth(i));
+  return items;
+}
 
+async function findHandle(page: Page, bg: CanvasBox) {
   const bottom = bg.y + bg.height;
-  let handle: any = null;
   for (const sel of HANDLE_SELECTORS) {
     for (const el of await page.locator(sel).all()) {
       const box = await el.boundingBox();
       if (!box) continue;
       if (box.width < 30 || box.width > 90 || box.height < 30 || box.height > 90) continue;
+      // 手柄贴着画布底部外侧（实测在下方 20px），不是贴着画布顶部的。
       if (Math.abs(box.x - bg.x) < 60 && box.y - bottom >= 0 && box.y - bottom < 90) {
-        handle = { locator: el, box };
-        break;
+        return { locator: el, box };
       }
     }
-    if (handle) break;
   }
-  if (!handle) return null;
-  return { bg, piece, handle, selector };
+  return null;
 }
 
-async function canvasBox(page: Page, item: { index: number }) {
-  return page.locator('canvas').nth(item.index).boundingBox();
+async function findScene(page: Page, selector?: string) {
+  // 候选一律用 locator 而不是坐标：拼图块拖动后会移动，靠坐标反查
+  // 会在第二次重试时找不到（实测 ratio 从 0.9654 掉成 1）。
+  const roots: Array<{ root: Locator | Page; isElement: boolean }> = [];
+  const picked = (selector || '').trim();
+  if (picked) {
+    // 用户指定了容器就只在这个范围里找：页面上有多个验证码时，
+    // 「自动挑最大的」经常不是他想要的那个。
+    const found = page.locator(picked);
+    const total = await found.count();
+    for (let i = 0; i < total; i += 1) roots.push({ root: found.nth(i), isElement: true });
+  }
+  roots.push({ root: page, isElement: false });
+
+  for (const { root, isElement } of roots) {
+    const items = await collectCanvases(root, isElement);
+    const big = items.filter((c) => c.width >= 200 && c.width <= 640 &&
+      c.height >= 110 && c.height <= 300 && c.width > c.height);
+    // 容器本身也可能落在尺寸区间里，但它配不上手柄（手柄在它内部）。
+    // 按面积从大到小逐个试，配不上就落到内部真正的画布上。
+    for (const bg of big.sort((a, b) => b.width * b.height - a.width * a.height)) {
+      const handle = await findHandle(page, bg);
+      if (!handle) continue;
+      const piece = items.find((c) => c.width < 100 && c.height >= 60 &&
+        Math.abs(c.x - bg.x) < 40 && Math.abs(c.y - bg.y) < 24) || null;
+      return { bg, piece, handle, selector };
+    }
+  }
+  return null;
 }
 
 async function setPieceVisible(page: Page, piece: any, visible: boolean) {
   if (!piece) return;
   try {
-    // 按序号找，不按坐标：拖动后坐标已经变了。
-    await page.locator('canvas').nth(piece.index).evaluate((el, on) => {
-      (el as HTMLElement).style.visibility = on ? '' : 'hidden';
+    await piece.locator.evaluate((el: HTMLElement, on: boolean) => {
+      el.style.visibility = on ? '' : 'hidden';
     }, visible);
   } catch {
     // 元素已经不在（组件被销毁），后面自然会失败，这里不额外抛。
@@ -255,7 +280,12 @@ export async function solveSlider(page: Page, config: SliderConfig = {}): Promis
   const attempts = Math.min(Math.max(config.attempts ?? 2, 0), 5);
   const timeout = Math.min(Math.max(config.timeout ?? 20, 5), 90);
 
-  let scene = await findScene(page, config.selector);
+  let scene;
+  try {
+    scene = await findScene(page, config.selector);
+  } catch (err) {
+    throw new Error(`容器选择器无效：${String(err).slice(0, 120)}`);
+  }
   if (!scene) {
     throw new Error('当前页面上没有找到滑块（没找到符合尺寸的 canvas 和拖动手柄）');
   }
@@ -271,7 +301,12 @@ export async function solveSlider(page: Page, config: SliderConfig = {}): Promis
       // 只有识别这一步也失败，才退回上次坐标挪几像素。
       await page.waitForTimeout(1200);
       await waitReset(page);
-      const fresh = await findScene(page, config.selector);
+      let fresh = await findScene(page, config.selector);
+      // 重绘有个一两百毫秒的空窗：失败提示已经消失，但新画布还没插回来。
+      for (let i = 0; i < 4 && !fresh; i += 1) {
+        await page.waitForTimeout(300);
+        fresh = await findScene(page, config.selector);
+      }
       if (!fresh) {
         throw new Error('滑块没有通过，重试时组件已经从页面上消失了（可能被关掉或页面跳走）。' +
           `上一次识别的缺口坐标是 ${target}。`);
@@ -296,7 +331,7 @@ export async function solveSlider(page: Page, config: SliderConfig = {}): Promis
     // 比例不能写死：鼠标走 120px，拼图块可能只走 116px。先量 24px 再算剩下要走多少。
     let ratio = 1;
     if (scene.piece) {
-      const moved = await canvasBox(page, scene.piece).catch(() => null);
+      const moved = await scene.piece.locator.boundingBox().catch(() => null);
       if (moved && moved.x - scene.piece.x > 4) {
         ratio = Math.min(Math.max((moved.x - scene.piece.x) / PROBE_PX, 0.5), 2);
       }

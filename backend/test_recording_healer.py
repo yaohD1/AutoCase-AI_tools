@@ -171,7 +171,7 @@ class DiagnoseTest(unittest.TestCase):
         card = healer.diagnose(self.page, _step(target=target), 'playwright-ts', 'Timeout',
                                attempt=healer.MAX_ATTEMPT + 1)
         self.assertFalse(card['can_apply'])
-        self.assertIn('自动修过', card['reason'])
+        self.assertIn('已自动修复', card['reason'])
 
     def test_rf_mode_still_writes_a_playwright_primary(self):
         """RF 回放里修完，写回的 primary 仍必须是 PW 候选——primary 只服务 PW 那条链路。"""

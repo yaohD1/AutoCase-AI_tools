@@ -239,7 +239,7 @@ NAV_FROM_CLICK_SECONDS = 1.5
 STEP_TITLES = {'goto': '打开', 'reload': '刷新', 'click': '点击', 'fill': '输入', 'select': '选择',
                'press': '按键', 'dialog': '弹窗',
                'new_page': '标签页', 'assert': '断言', 'wait': '等待', 'sleep': '等待',
-               'slider': '滑块验证'}
+               'slider': '滑块验证', 'captcha': '验证码识别'}
 STATUS_LABELS = {'unique': '唯一定位', 'fragile': '结构定位', 'ambiguous': '定位不唯一', 'stale': '定位已变化'}
 STATUS_TONES = {'unique': 'ok', 'fragile': 'warn', 'ambiguous': 'bad'}
 # 就地编辑允许改的字段：只改「值」，不动定位（换元素走拾取）。
@@ -1184,6 +1184,17 @@ class RecordingSession(object):
         """
         return self._call('slider', config=config or {}, after_no=after_no)
 
+    def add_captcha_step(self, config=None, after_no=None):
+        """插入一步「验证码识别」。
+
+        和滑块一样是用户显式加的一步：验证码图片和「商品缩略图」在 DOM 里没有
+        可靠区别，自动识别只会到处乱认，不如让用户点一下拾取。
+
+        这一步只负责把码填进输入框，不点提交 —— 提交是后面 click 步骤的事，
+        这样同一步也能用在注册、找回密码、点「获取短信验证码」上。
+        """
+        return self._call('captcha', config=config or {}, after_no=after_no)
+
     def _add_slider(self, config=None, after_no=None, **_):
         config = config or {}
         with self._lock:
@@ -1192,7 +1203,35 @@ class RecordingSession(object):
                 'slider', no=0, source='manual',
                 page_index=self._page_index(page) if page is not None else 0,
                 slider={
-                    'selector': str(config.get('selector') or '').strip()[:200],
+                    # 拾取给的是绝对路径，200 字容易截断成非法选择器，放宽到 500。
+                    'selector': str(config.get('selector') or '').strip()[:500],
+                    'attempts': max(0, min(int(config.get('attempts') or 2), 5)),
+                    'timeout': max(5, min(int(config.get('timeout') or 20), 90)),
+                },
+            )
+            self._insert_step(step, after_no)
+            self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def _add_captcha(self, config=None, after_no=None, **_):
+        """插入一条「识别验证码并填入」。
+
+        和滑块的区别：滑块自己判断过没过，验证码只负责把码填对 —— 提交是后面
+        click「登录」那一步的事。所以这里没有 timeout 之外的成败判定参数。
+        """
+        config = config or {}
+        with self._lock:
+            page = self._current_page()
+            step = ir.make_step(
+                'captcha', no=0, source='manual',
+                page_index=self._page_index(page) if page is not None else 0,
+                captcha={
+                    # 拾取给的是绝对路径，200 字容易截断成非法选择器，放宽到 500。
+                    'selector': str(config.get('selector') or '').strip()[:500],
+                    'input_selector': str(config.get('input_selector') or '').strip()[:500],
+                    'charset': str(config.get('charset') or 'digits').strip()[:10],
+                    'length': max(0, min(int(config.get('length') or 0), 12)),
                     'attempts': max(0, min(int(config.get('attempts') or 2), 5)),
                     'timeout': max(5, min(int(config.get('timeout') or 20), 90)),
                 },
@@ -1446,6 +1485,8 @@ class RecordingSession(object):
                     result = self._add_reload(kwargs.get('after_no'))
                 elif name == 'slider':
                     result = self._add_slider(kwargs.get('config'), kwargs.get('after_no'))
+                elif name == 'captcha':
+                    result = self._add_captcha(kwargs.get('config'), kwargs.get('after_no'))
                 elif name == 'highlight':
                     result = self._highlight_now(kwargs['no'], kwargs.get('index'),
                                                  kwargs.get('framework') or 'playwright-ts')

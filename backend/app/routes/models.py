@@ -174,20 +174,35 @@ def set_healer_model():
         return _fail(exc)
 
 
+def _slider_view():
+    """滑块 / 验证码的模型视图。
+
+    `refs` 只给能读图的模型：这两步都要把截图交给模型，下拉里混进纯文本模型
+    会让人选到一个「看不懂这张图」的，而这个错要等 40 秒超时之后才暴露。
+    但当前值如果就是手工配的纯文本模型，也要原样带上 —— 否则下拉显示空白，
+    看起来像「没配置」，反而更难查。
+    """
+    current = models_config.slider_model()
+    refs = models_config.vision_refs()
+    if current and current not in refs:
+        refs = refs + [current]
+    return {
+        'model': current,
+        'explicit': models_config.slider_model_explicit(),
+        'builtin': models_config.SLIDER_DEFAULT_REF,
+        'refs': refs,
+    }
+
+
 @models_bp.route('/models/slider', methods=['GET'])
 def get_slider_model():
-    """滑块验证码求解用的模型。
+    """滑块 / 验证码用的视觉模型。
 
     和 healer 分开：这个必须能读图，所以不跟随全局默认（全局默认可能是纯文本模型）。
-    `default` 里给的是内置的豆包视觉引用，前端据此提示「没配就是它」。
+    `builtin` 里给的是内置的豆包视觉引用，前端据此提示「没配就是它」。
     """
     try:
-        return jsonify({
-            'model': models_config.slider_model(),
-            'explicit': models_config.slider_model_explicit(),
-            'builtin': models_config.SLIDER_DEFAULT_REF,
-            'refs': models_config.model_refs(),
-        }), 200
+        return jsonify(_slider_view()), 200
     except ModelConfigError as exc:
         return _fail(exc)
 
@@ -197,12 +212,7 @@ def set_slider_model():
     data = request.get_json(silent=True) or {}
     try:
         models_config.set_slider_model((data.get('model') or '').strip())
-        return jsonify({
-            'model': models_config.slider_model(),
-            'explicit': models_config.slider_model_explicit(),
-            'builtin': models_config.SLIDER_DEFAULT_REF,
-            'refs': models_config.model_refs(),
-        }), 200
+        return jsonify(_slider_view()), 200
     except ModelConfigError as exc:
         return _fail(exc)
 

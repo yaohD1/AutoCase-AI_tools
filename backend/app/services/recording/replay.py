@@ -10,7 +10,7 @@ import time
 
 from playwright.sync_api import expect, sync_playwright
 
-from app.services.recording import slider
+from app.services.recording import captcha, slider
 from app.services.recording.ir import PAGE_READY
 from app.services.recording.locators import best_effort, build_locator, pick_for
 
@@ -251,6 +251,14 @@ def _run_step(step, page, framework=PW_FRAMEWORK):
         if not outcome.get('ok'):
             raise ReplayError(outcome.get('error') or '滑块验证没有通过')
         return None, {'slider': outcome}
+    if kind == 'captcha':
+        # 和滑块一样是「一段固定流程」，但它不判成败：码填进去了就算这一步成功，
+        # 码对不对由后面的提交 + 断言决定。所以这里没有 ok 字段要检查。
+        try:
+            outcome = captcha.solve(page, step.get('captcha') or {})
+        except captcha.CaptchaError as exc:
+            raise ReplayError(str(exc)) from exc
+        return None, {'captcha': outcome}
     if kind in ('assert', 'wait'):
         return _assert(step['intent'], step.get('target'), page, framework)
     raise ReplayError('回放不支持的步骤：%s' % kind)
@@ -271,6 +279,15 @@ def _step_label(step):
     if kind == 'slider':
         selector = ((step.get('slider') or {}).get('selector') or '').strip()
         return '滑块验证（%s）' % (selector or '自动识别容器')
+    if kind == 'captcha':
+        conf = step.get('captcha') or {}
+        bits = ['字母数字' if conf.get('charset') == 'alnum'
+                else ('任意字符' if conf.get('charset') == 'any' else '数字')]
+        if conf.get('length'):
+            bits.append('%d 位' % conf['length'])
+        if not (conf.get('selector') or '').strip():
+            bits.append('自动找图')
+        return '验证码识别（%s）' % ' · '.join(bits)
     return None
 
 
@@ -279,6 +296,7 @@ def _entry(step, chosen, ok, error=None, poll=None):
     target = step.get('target') or {}
     # 滑块把结果放在 poll 里带出来，这里拆出去（见下面的字段说明）。
     slider_detail = poll.get('slider') if isinstance(poll, dict) else None
+    captcha_detail = poll.get('captcha') if isinstance(poll, dict) else None
     used = None
     if chosen:
         matches = chosen.get('count')
@@ -309,8 +327,9 @@ def _entry(step, chosen, ok, error=None, poll=None):
         # 轮询等待才有的明细：等了几秒、刷新了几轮。失败时靠它区分「设备没起来」和「定位写错了」。
         # 滑块的结果不能塞进 poll：前端把 poll 当「等了多久 / 刷新几次」渲染，
         # 塞进去就会显示成「轮询 undefineds」。单独一个字段。
-        'poll': None if slider_detail else poll,
+        'poll': None if (slider_detail or captcha_detail) else poll,
         'slider': slider_detail,
+        'captcha': captcha_detail,
     }
 
 

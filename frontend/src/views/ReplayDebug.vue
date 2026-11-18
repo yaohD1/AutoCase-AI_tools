@@ -10,13 +10,13 @@
         {{ statusText }}<template v-if="state.elapsed"> · {{ state.elapsed }}s</template>
       </span>
       <span v-if="suspectCount" class="dbg-badge warn"
-            title="这些步骤执行成功了，但实际操作的元素和录制时不是同一个">
+            title="这些步骤执行成功，但命中元素与录制时不一致">
         ⚠ {{ suspectCount }} 步疑似点错
       </span>
       <div class="dbg-head-actions">
-        <button type="button" class="dbg-icon" title="AI 自愈模型" @click="openModels">⚙</button>
+        <button type="button" class="dbg-icon" title="模型设置" @click="openModels">⚙</button>
         <button type="button" :class="['dbg-icon', { on: immersive }]"
-                :title="immersive ? '退出放大（Esc）' : '放大预览（把右侧栏收成浮层）'"
+                :title="immersive ? '退出放大（Esc）' : '放大预览（收起右侧栏）'"
                 @click="toggleImmersive">⤢</button>
         <el-button size="small" :loading="restarting" @click="restart">重新开始</el-button>
         <el-button size="small" text @click="leave">退出</el-button>
@@ -24,7 +24,7 @@
     </header>
 
     <div v-if="bootError" class="dbg-boot-error">
-      <div class="dbg-boot-title">没能启动调试回放</div>
+      <div class="dbg-boot-title">调试回放未能启动</div>
       <div class="dbg-boot-text">{{ bootError }}</div>
       <el-button size="small" type="primary" @click="restart">重试</el-button>
     </div>
@@ -43,7 +43,7 @@
                  用户会以为卡在加载上。暂停态直接说清楚它在等谁。 -->
             <div v-if="!streamSrc || !hasFrame" class="dbg-veil">
               <template v-if="paused">
-                <span>已暂停在第 {{ state.index || 1 }} 步，点「继续」开始</span>
+                <span>已暂停在第 {{ state.index || 1 }} 步 · 点「继续」</span>
               </template>
               <template v-else>
                 <span class="dbg-spinner"></span>
@@ -72,7 +72,7 @@
             <span v-if="playing" class="dbg-ico-pause"><i></i><i></i></span>
             <span v-else class="dbg-ico-play"></span>
           </button>
-          <button type="button" class="dbg-btn" :title="'走一步'" :disabled="!canStep" @click="stepOnce">
+          <button type="button" class="dbg-btn" :title="'单步执行'" :disabled="!canStep" @click="stepOnce">
             <span class="dbg-ico-step"><i></i><b></b></span>
           </button>
           <button type="button" class="dbg-btn" title="停止" :disabled="!canPlay && !canStep" @click="stopRun">
@@ -97,16 +97,16 @@
             </span>
             <span class="dbg-step-kind">{{ item.type }}</span>
             <span class="dbg-step-name" :title="stepTitle(item)">{{ stepTitle(item) }}</span>
-            <span v-if="item.healed" class="dbg-step-heal" :title="item.heal_note || '这一步应用了修复'">
+            <span v-if="item.healed" class="dbg-step-heal" :title="item.heal_note || '本步已应用修复'">
               已修
             </span>
             <span v-if="item.suspect" class="dbg-step-warn"
-                  :title="item.suspect_reason || '实际操作的元素的身份与录制时不同'">
+                  :title="item.suspect_reason || '命中元素与录制时不一致'">
               疑似点错
             </span>
             <span v-if="item.ms != null" class="dbg-step-ms">{{ item.ms }}ms</span>
           </li>
-          <li v-if="!state.steps.length" class="dbg-step is-empty">还没有步骤</li>
+          <li v-if="!state.steps.length" class="dbg-step is-empty">暂无步骤</li>
         </ol>
 
         <div class="dbg-detail">
@@ -133,7 +133,7 @@
               疑似点错：{{ currentStep.suspect_reason }}
             </div>
           </template>
-          <div v-else class="dbg-faint">回放还没开始</div>
+          <div v-else class="dbg-faint">回放未开始</div>
         </div>
 
         <!-- 失败后的修复卡片。故意盖在右侧栏底部而不是弹一个遮罩：
@@ -148,11 +148,10 @@
 
           <div v-if="heal.status === 'investigating' || heal.status === 'queued'" class="dbg-heal-busy">
             <span class="dbg-spinner"></span>
-            <span>AI 正在沙箱里把这段步骤跑一遍、定位、改、再跑一遍，通常 1–3 分钟…</span>
+            <span>AI 在沙箱中执行、定位、改写并复验，通常 1–3 分钟…</span>
           </div>
           <div v-else-if="heal.status === 'idle'" class="dbg-heal-hint">
-            这一步执行失败。可以让 AI 自愈去查（它会真的跑测试、改定位、再验证），
-            也可以直接跳过。
+            执行失败：可让 AI 自愈排查，或直接跳过
           </div>
 
           <template v-else>
@@ -178,7 +177,7 @@
             </div>
 
             <div v-if="heal.evidence && heal.evidence.length" class="dbg-heal-evidence">
-              <div class="dbg-heal-ev-head">身份核对（录制时 → 当前页面）</div>
+              <div class="dbg-heal-ev-head">身份核对 · 录制时 → 当前页</div>
               <div v-for="(e, i) in heal.evidence" :key="i"
                    :class="['dbg-heal-ev-row', e.level || (e.ok ? 'match' : 'info')]">
                 <span class="dbg-heal-ev-ico">{{ e.level === 'conflict' ? '✗' : (e.ok ? '✓' : '·') }}</span>
@@ -199,7 +198,7 @@
             <div v-if="heal.blocked_reason" class="dbg-heal-blocked">{{ heal.blocked_reason }}</div>
 
             <details v-if="heal.spec_diff" class="dbg-heal-code">
-              <summary>AI 在沙箱里改了什么（spec diff）</summary>
+              <summary>沙箱改动（spec diff）</summary>
               <pre class="dbg-heal-pre"><span v-for="(l, i) in diffLines" :key="i"
                 :class="['dl', l.kind]">{{ l.text }}</span></pre>
             </details>
@@ -215,7 +214,7 @@
 
             <label v-if="heal.can_apply && heal.writeback_ok" class="dbg-heal-wb">
               <input v-model="writeback" type="checkbox">
-              <span>写回第 {{ heal.no }} 步（后续生成的代码使用新定位）</span>
+              <span>写回第 {{ heal.no }} 步（影响后续生成）</span>
             </label>
             <div v-else-if="heal.writeback_note" class="dbg-heal-note">{{ heal.writeback_note }}</div>
 
@@ -223,14 +222,14 @@
               <button v-if="canAiHeal" type="button"
                       :class="['dbg-heal-btn', { primary: !heal.can_apply }]"
                       :disabled="healBusy" @click="aiHeal">
-                {{ heal.status === 'idle' ? '让 AI 自愈' : '重新让 AI 调查' }}
+                {{ heal.status === 'idle' ? 'AI 自愈' : '重新调查' }}
               </button>
               <button v-if="heal.can_apply" type="button" class="dbg-heal-btn primary"
                       :disabled="healBusy" @click="applyHeal">
                 {{ heal.status === 'applying' ? '正在重试…' : '应用并重试' }}
               </button>
               <button type="button" class="dbg-heal-btn" :disabled="healBusy" @click="skipHeal">
-                跳过这一步
+                跳过
               </button>
               <button type="button" class="dbg-heal-btn ghost" :disabled="healBusy" @click="stopHeal">
                 停止回放
@@ -249,7 +248,7 @@
       <div class="dbg-model-sec">
         <div class="dbg-model-title">AI 自愈</div>
         <p class="dbg-model-hint">
-          点「让 AI 自愈」时用这个模型跑官方 healer：会真的执行测试、改定位、再重跑一遍。
+          AI 自愈所用模型；会实际执行测试并复验
         </p>
         <el-select v-model="modelValue" filterable clearable placeholder="跟随全局默认"
                    class="dbg-model-select">
@@ -260,9 +259,10 @@
       </div>
 
       <div class="dbg-model-sec">
-        <div class="dbg-model-title">滑块验证</div>
+        <div class="dbg-model-title">滑块 / 验证码（视觉模型）</div>
         <p class="dbg-model-hint">
-          回放到「滑块验证」步骤时用这个模型看缺口。必须能读图，所以不跟随全局默认。
+          滑块 / 验证码共用；需支持读图，不跟随全局默认<br>
+          仅列已标记可读图的模型（设置 → AI 服务）
         </p>
         <el-select v-model="sliderValue" filterable clearable placeholder="使用内置默认"
                    class="dbg-model-select">
@@ -270,8 +270,12 @@
           <el-option v-for="ref in sliderRefs" :key="ref" :label="ref" :value="ref" />
         </el-select>
         <p class="dbg-model-default">
-          当前生效：{{ sliderModel || '未配置（回放到滑块会直接报错）' }}
+          当前生效：{{ sliderModel || '未配置（回放到滑块/验证码会直接报错）' }}
           <span v-if="!sliderExplicit"> · 内置默认</span>
+        </p>
+        <p class="dbg-model-hint dbg-model-foot">
+          仅影响平台内回放；生成代码读项目根
+          <code>.env</code>（<code>SLIDER_MODEL_*</code>）
         </p>
       </div>
 
@@ -293,9 +297,9 @@ const route = useRoute()
 const router = useRouter()
 
 const SPEEDS = [
-  { label: '慢', delay: 1.2, hint: '每步停 1.2 秒，看清页面怎么变' },
+  { label: '慢', delay: 1.2, hint: '每步停 1.2 秒，观察页面变化' },
   { label: '标准', delay: 0.55, hint: '每步停 0.55 秒' },
-  { label: '快', delay: 0.2, hint: '每步停 0.2 秒，只看流程通不通' },
+  { label: '快', delay: 0.2, hint: '每步停 0.2 秒，只看流程是否走通' },
 ]
 
 // 后端在没有会话时只回一个 {status:'idle'}，不补齐的话模板里 steps.length 直接炸。
@@ -1346,6 +1350,8 @@ onBeforeUnmount(() => {
 .dbg-heal-pre .dl.meta { color: #8290a3; }
 
 .dbg-model-hint { margin: 0 0 10px; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+/* 紧跟在「当前生效」后面的补充说明：默认没有上边距，会粘成一段。 */
+.dbg-model-hint.dbg-model-foot { margin-top: 4px; }
 /* 两组配置用一条细线分开：healer 和滑块各管各的，改错一处不该影响另一处 */
 .dbg-model-sec + .dbg-model-sec {
   margin-top: 18px;

@@ -745,3 +745,13 @@ def runtime_config():
 def model_refs():
     """所有 `provider/model` 形式的可选值，给前端下拉和校验用。"""
     return [m['id'] for m in flat_models()]
+
+
+def vision_refs():
+    """能读图的模型，给滑块 / 验证码的模型下拉用。
+
+    这两个步骤都要把截图交给模型，选到纯文本模型只会得到一句「看不懂这张图」，
+    而这个错要等 40 秒超时之后才暴露 —— 从下拉里点错一个，排查成本极高。
+    所以只列明确标了 `vision: true` 的（`vision` 缺省按 true 处理，老配置不会被误杀）。
+    """
+    return [m['id'] for m in flat_models() if m.get('vision')]

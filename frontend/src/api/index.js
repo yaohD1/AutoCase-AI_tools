@@ -310,6 +310,10 @@ batchDeleteTestcases(ids) {
   addRecordingSlider(payload) {
     return api.post('/automation/recording/slider', payload, { timeout: 30000 })
   },
+  // 验证码识别：验证码位置必填（拾取），输入框可空（空则从验证码附近往上找）。
+  addRecordingCaptcha(payload) {
+    return api.post('/automation/recording/captcha', payload, { timeout: 30000 })
+  },
   // 在浏览器里把这一步的匹配元素全部框出来并编号，供人眼确认；index 省略就按当前选中的那个。
   highlightRecordingStep(no, index = null, framework = null) {
     return api.post('/automation/recording/highlight', { no, index, framework }, { timeout: 30000 })

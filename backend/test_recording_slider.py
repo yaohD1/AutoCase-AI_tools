@@ -229,7 +229,9 @@ class RetryTest(unittest.TestCase):
     def test_disappeared_component_is_reported(self):
         """组件没了还拿旧坐标拖，_wait_result 会因为元素断开直接判通过——假绿。"""
         page = _FakePage(self._png())
-        with mock.patch.object(slider, 'find_scene', side_effect=[_scene(), None]), \
+        # 首次能找到，之后（含重试前的几次重查）一律找不到
+        with mock.patch.object(slider, 'find_scene',
+                               side_effect=[_scene()] + [None] * 6), \
                 mock.patch.object(slider, 'ask_model', return_value=(120.0, 'm')), \
                 mock.patch.object(slider.time, 'sleep', lambda *_: None):
             with self.assertRaises(slider.SliderError) as ctx:
@@ -259,6 +261,63 @@ class GeneratedTsTest(unittest.TestCase):
         self.assertIn('target = nudge(target, scene.bg.width)', SLIDER_TS)
         # 旧实现是「等 1200ms 后 target±2」，那种写法里 target 不会在重试时被重新赋值
         self.assertNotIn('target + [-2, 0, 2]', SLIDER_TS)
+
+
+class SceneFromElementTest(unittest.TestCase):
+    """拾取给的是容器还是画布，都要能落成同一组「背景 + 拼图块 + 手柄」。"""
+
+    HANDLE = {'x': 565, 'y': 425, 'width': 50, 'height': 50}
+    CANVAS = {'x': 565, 'y': 245, 'width': 310, 'height': 160}
+
+    def _page(self):
+        page = mock.Mock()
+        handle = mock.Mock()
+        handle.bounding_box.return_value = self.HANDLE
+        page.query_selector_all.return_value = [handle]
+        return page
+
+    def test_container_resolves_to_inner_canvas(self):
+        page = self._page()
+        canvas = mock.Mock()
+        canvas.bounding_box.return_value = self.CANVAS
+        root = mock.Mock()
+        root.evaluate.return_value = False
+        root.query_selector_all.return_value = [canvas]
+
+        scene = slider.find_scene(page, root=root)
+        self.assertIsNotNone(scene)
+        self.assertEqual(scene['bg']['el'], canvas)
+        self.assertEqual(scene['bg']['box']['width'], 310)
+        self.assertEqual(scene['handle']['box']['y'], self.HANDLE['y'])
+
+    def test_canvas_element_resolves_to_itself(self):
+        page = self._page()
+        canvas = mock.Mock()
+        canvas.bounding_box.return_value = self.CANVAS
+        canvas.evaluate.return_value = True
+        canvas.query_selector_all.return_value = []
+
+        scene = slider.find_scene(page, root=canvas)
+        self.assertIsNotNone(scene)
+        self.assertEqual(scene['bg']['el'], canvas)
+
+    def test_bad_selector_is_readable(self):
+        page = mock.Mock()
+        page.query_selector_all.side_effect = Exception('Unexpected token')
+        with self.assertRaises(slider.SliderError) as ctx:
+            slider._scene_by_selector(page, '.a[')
+        self.assertIn('无效', str(ctx.exception))
+
+    def test_selector_is_tried_before_autodetect(self):
+        """填了选择器就是「我要这一个」，不能先让自动识别挑最大的那个。"""
+        page = mock.Mock()
+        page.query_selector_all.return_value = [mock.Mock()]
+        with mock.patch.object(slider, 'find_scene', return_value=None) as find:
+            with self.assertRaises(slider.SliderError):
+                slider.solve(page, {'attempts': 0, 'selector': '.vue-puzzle-vcode'})
+        self.assertEqual(find.call_count, 2)
+        self.assertIsNotNone(find.call_args_list[0].kwargs.get('root'))
+        self.assertIsNone(find.call_args_list[1].kwargs.get('root'))
 
 
 class ModelConfigTest(unittest.TestCase):

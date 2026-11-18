@@ -137,6 +137,11 @@ def _step_lines(step, unsupported):
         # 写一个不存在的 solveSlider 调用——后者会让 healer 去「修」一个假报错。
         unsupported.append('第 %s 步是滑块验证，投影只占位不执行（需要视觉模型）' % step.get('no'))
         return ['  // 滑块验证：投影不执行，回放时由视觉求解器完成']
+    if kind == 'captcha':
+        # 同理不投影：沙箱里没有视觉模型的配置，写一个不存在的 solveCaptcha
+        # 只会让 healer 去「修」一个假报错。
+        unsupported.append('第 %s 步是验证码识别，投影只占位不执行（需要视觉模型）' % step.get('no'))
+        return ['  // 验证码识别：投影不执行，回放时由视觉求解器完成']
     if kind in ('assert', 'wait'):
         return _assert_line(step)
 

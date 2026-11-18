@@ -547,6 +547,33 @@ def add_recording_slider():
         return _error(str(exc), 400)
 
 
+@recording_bp.route('/automation/recording/captcha', methods=['POST'])
+def add_recording_captcha():
+    """插入一步「验证码识别」。
+
+    两个选择器都来自拾取：验证码元素必填（猜不到就报错，不静默跳过），
+    输入框可空（空则从验证码元素向上逐层找）。attempts 有上限，避免一次回放
+    连着问十几次模型。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        after_no = body.get('after_no')
+        after_no = int(after_no) if after_no is not None else None
+        return jsonify(session.add_captcha_step({
+            'selector': body.get('selector'),
+            'input_selector': body.get('input_selector'),
+            'charset': body.get('charset'),
+            'length': body.get('length'),
+            'attempts': body.get('attempts'),
+            'timeout': body.get('timeout'),
+        }, after_no=after_no)), 200
+    except (RecordingError, TypeError, ValueError) as exc:
+        return _error(str(exc), 400)
+
+
 @recording_bp.route('/automation/recording/reload', methods=['POST'])
 def add_recording_reload():
     """插入一步「刷新页面」。录制中会顺带真的刷新，让后续步骤落在刷新后的页面上。"""

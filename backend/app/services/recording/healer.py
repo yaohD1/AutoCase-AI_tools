@@ -52,14 +52,14 @@ CATEGORY_LABELS = {
 # 这些东西改了也没用——问题不在脚本里。判错的代价很小（用户会看到「环境问题」
 # 然后自己判断），但能让「网络挂了」不再被当成「定位写错了」。
 _ENV_PATTERNS = (
-    (re.compile(r'net::ERR_'), '页面没能打开（网络层报错），和定位无关'),
-    (re.compile(r'NS_ERROR_'), '页面没能打开（浏览器层报错）'),
+    (re.compile(r'net::ERR_'), '页面未加载（网络错误），与定位无关'),
+    (re.compile(r'NS_ERROR_'), '页面未加载（浏览器错误）'),
     (re.compile(r'ERR_CERT|SSL'), '证书校验失败'),
     (re.compile(r'ECONNREFUSED|ECONNRESET'), '目标服务拒绝连接'),
-    (re.compile(r'Target page, context or browser has been closed'), '浏览器或标签页已经被关掉'),
-    (re.compile(r'Target closed'), '浏览器或标签页已经被关掉'),
-    (re.compile(r'Timeout \d+ms exceeded while navigating'), '页面加载超时，多半是服务端慢或没起来'),
-    (re.compile(r'Execution context was destroyed'), '页面在执行过程中被跳转重置'),
+    (re.compile(r'Target page, context or browser has been closed'), '浏览器或标签页已关闭'),
+    (re.compile(r'Target closed'), '浏览器或标签页已关闭'),
+    (re.compile(r'Timeout \d+ms exceeded while navigating'), '页面加载超时（服务端慢或未启动）'),
+    (re.compile(r'Execution context was destroyed'), '执行中页面被跳转重置'),
 )
 
 
@@ -94,7 +94,7 @@ def _blocked(card, category, reason, blocked_reason=None, probes=None,
     card['reason'] = reason
     card['status'] = 'blocked'
     card['can_apply'] = False
-    card['blocked_reason'] = blocked_reason or '这里没有能自动验证的改法，需要你判断。'
+    card['blocked_reason'] = blocked_reason or '无可自动验证的改法，需人工判断'
     card['verdict'] = verdict
     card['evidence'] = evidence or []
     if probes:
@@ -116,7 +116,7 @@ def _ready(card, category, reason, patch, changes, confidence, verify=None,
     card['evidence'] = evidence or []
     card['can_apply'] = bool(verify and verify.get('ok'))
     if not card['can_apply']:
-        card['blocked_reason'] = '预检没有通过，改了也点不中。'
+        card['blocked_reason'] = '预检未通过，改动无法落点'
     card['patch'] = patch
     if probes:
         card['probes'].extend(probes)
@@ -238,7 +238,7 @@ def _precheck(root, spec, step, index=None):
     if step.get('type') in ('fill', 'select'):
         try:
             if not locator.is_editable():
-                return {'ok': False, 'text': '元素找到了，但当前不可输入',
+                return {'ok': False, 'text': '元素存在，但不可输入',
                         'state': None, 'verdict': cmp['verdict'], 'evidence': cmp['evidence']}
         except Exception:
             pass
@@ -252,17 +252,17 @@ def _identity_refusal(card, verify, require=False):
     if verdict == 'conflict':
         return _blocked(
             card, 'element_replaced',
-            verify.get('text') or '命中的元素和录制时不是同一个。',
-            blocked_reason='换定位会点到别的元素。请确认它是被删了、改名了，还是换了位置。',
+            verify.get('text') or '命中元素与录制时不一致',
+            blocked_reason='换定位会指向其他元素；请确认元素被删、改名或移位',
             probes=['身份核对：命中元素与录制快照冲突'],
             verdict='conflict', evidence=verify.get('evidence'))
     if verdict == 'unknown' and require:
-        reason = ('读不到命中元素的身份信息（页面可能正在跳转），无法确认是不是同一个。'
+        reason = ('读不到命中元素身份（页面可能正在跳转），无法确认是否同一元素'
                   if not verify.get('evidence')
-                  else '命中的元素身上没有任何一项能和录制快照对上，无法确认是不是同一个。')
+                  else '命中元素无可比对特征，无法确认身份')
         return _blocked(
             card, 'element_replaced', reason,
-            blocked_reason='宁可不修，也不要把点击落到一个来路不明的元素上。',
+            blocked_reason='证据不足时不发补丁，避免点击落到其他元素',
             probes=['身份核对：证据不足'],
             verdict='unknown', evidence=verify.get('evidence'))
     return None
@@ -287,8 +287,8 @@ def _wait_retry(card, primary, verify, reason):
 def _hidden_refusal(card, verify):
     return _blocked(
         card, 'element_hidden',
-        '唯一命中的元素当前不可见（可能是隐藏的占位节点，或者被折叠了）。重试也点不中它。',
-        blocked_reason='如果它本应可见，更像是产品状态变了；如果只是暂时收起，请等页面恢复后手动重试。',
+        '唯一命中元素当前不可见（隐藏占位或被折叠），重试亦无法点击',
+        blocked_reason='若本应可见，可能是产品状态变化；若暂时收起，待恢复后手动重试',
         probes=['身份核对：%s' % verify.get('verdict')],
         verdict=verify.get('verdict'), evidence=verify.get('evidence'))
 
@@ -516,24 +516,23 @@ def diagnose(page, step, framework, error, attempt=1):
 
     if attempt > MAX_ATTEMPT:
         return _blocked(card, 'unknown',
-                        '这一步已经自动修过 %d 次，还是没过。继续试同一个方向意义不大。'
+                        '已自动修复 %d 次仍未通过，同一方向继续尝试意义有限'
                         % MAX_ATTEMPT,
-                        blocked_reason='建议停下来看看到底是脚本问题还是页面真的变了。')
+                        blocked_reason='建议先判断是脚本问题还是页面变化')
 
     for pattern, reason in _ENV_PATTERNS:
         if pattern.search(text):
             return _blocked(card, 'env', reason,
-                            blocked_reason='这类问题改脚本没用，先确认目标站点是好的。')
+                            blocked_reason='此类问题改脚本无效，先确认目标站点可用')
 
     kind = step.get('type')
     if kind == 'dialog':
         return _blocked(card, 'dialog',
-                        '这一步应该弹出浏览器原生弹窗，但实际没有出现。多半是上一步没点中，'
-                        '或者页面把它改成了自定义弹层。')
+                        '未出现浏览器原生弹窗；多为上一步未点中，或页面改用了自定义弹层')
     if kind == 'new_page':
-        return _blocked(card, 'unsupported', '新标签页没有打开，通常意味着触发它的那一步没生效。')
+        return _blocked(card, 'unsupported', '新标签页未打开，触发它的步骤可能未生效')
     if not step.get('target'):
-        return _blocked(card, 'unsupported', '这一步没有目标元素，没法通过换定位来修。')
+        return _blocked(card, 'unsupported', '此步无目标元素，无法通过换定位修复')
     if kind in ('assert', 'wait'):
         return _diagnose_assert(page, card, step, framework, text)
     return _diagnose_action(page, card, step, framework, text)
@@ -552,9 +551,8 @@ def _diagnose_assert(page, card, step, framework, text):
                               'page_text_contains', 'url_contains'):
         # 内容类断言失败永远是「改脚本会把问题盖住」：要么产品真的变了，要么这是个 bug。
         return _blocked(card, 'assertion',
-                        '页面上的实际内容和录制时不一致。改断言等于把这次变化当成预期，'
-                        '以后真出问题也发现不了。',
-                        blocked_reason='请自己判断是产品改版还是缺陷，再决定要不要改期望值。')
+                        '页面内容与录制时不一致；改断言会把本次变化当作预期',
+                        blocked_reason='请判断是产品改版还是缺陷，再决定是否调整期望值')
 
     if same and same['count'] == 1:
         spec = same.get('spec') or (primary or {}).get('spec')
@@ -575,9 +573,9 @@ def _diagnose_assert(page, card, step, framework, text):
         if cmp['verdict'] == 'conflict':
             return _blocked(
                 card, 'element_replaced',
-                '这条断言要找的元素已经不在了；现在唯一命中的是另一个元素。%s'
+                '断言目标元素已不存在，当前唯一命中的是另一元素。%s'
                 % (cmp.get('reason') or ''),
-                blocked_reason='换一个元素去断言，等于换了断言对象。',
+                blocked_reason='替换元素等于更换断言对象',
                 probes=['身份核对：命中元素与录制快照冲突'])
 
         visible = enabled = True
@@ -594,20 +592,20 @@ def _diagnose_assert(page, card, step, framework, text):
         if kind in ('visible', 'wait_visible') and not visible:
             return _blocked(
                 card, 'assertion',
-                '元素还在，但当前不可见——页面状态和录制时不一样，重试也不会变可见。',
-                blocked_reason='这更像产品行为变了，或者上一步没走到位。',
+                '元素存在但不可见，重试不会改变状态',
+                blocked_reason='更可能是产品行为变化，或上一步未完成',
                 probes=['断言状态：hidden'])
         if kind in ('hidden', 'wait_hidden') and visible:
             return _blocked(
                 card, 'assertion',
-                '元素现在仍然是可见的，和「应该隐藏」对不上。',
-                blocked_reason='页面状态变了，改断言等于把这次变化当成预期。',
+                '元素当前仍可见，与「应隐藏」不符',
+                blocked_reason='页面状态已变，改断言会把变化当作预期',
                 probes=['断言状态：visible'])
         if kind == 'enabled' and not enabled:
             return _blocked(
                 card, 'assertion',
-                '元素还在，但当前是禁用状态。',
-                blocked_reason='这多半是产品状态或上一步没成功，不是定位问题。',
+                '元素存在，但当前为禁用状态',
+                blocked_reason='多为产品状态或上一步失败，非定位问题',
                 probes=['断言状态：disabled'])
 
         # 去掉失效的 iframe 本身就是修复，别把它并进「纯重试」——纯重试不写回，
@@ -615,7 +613,7 @@ def _diagnose_assert(page, card, step, framework, text):
         patch = {'clear_frame': True} if frame_missing else {'retry_only': True}
         return _ready(
             card, 'transient',
-            '元素现在是好的（唯一命中、状态一致），失败更像是当时还没渲染完或被临时遮住。直接重试一次。',
+            '元素当前正常（唯一命中、状态一致），失败或为当时未渲染完',
             patch,
             [{'label': '定位', 'before': _short(primary.get('desc')), 'after': '不改，直接重试'}],
             0.7,
@@ -625,8 +623,8 @@ def _diagnose_assert(page, card, step, framework, text):
         )
 
     return _blocked(card, 'locator_changed',
-                    '这条断言要找的元素在当前页面上已经找不到了（命中 0 个）。',
-                    blocked_reason='换一个元素去断言，等于换了断言对象，需要你确认。',
+                    '断言目标元素在当前页面命中 0 个',
+                    blocked_reason='替换元素等于更换断言对象，需确认',
                     probes=['重数主定位：命中 0 个'])
 
 
@@ -637,11 +635,11 @@ def _diagnose_action(page, card, step, framework, text):
     primary = target.get('primary') or {}
     root, frame_missing = _root_of(page, snap)
     if frame_missing:
-        card['probes'].append('录制时记下的 iframe 已经不在了，改在主页面重新查找')
+        card['probes'].append('iframe 已不存在，改在主页面上重新查找')
 
     counted = refresh_candidates(target, root)
     if not counted:
-        return _blocked(card, 'unknown', '这个元素一条候选都没了，页面结构可能整体变了。')
+        return _blocked(card, 'unknown', '所有候选均失效，页面结构可能已变化')
 
     same = _same_as_primary(counted, primary)
     primary_now = same['count'] if same else -1
@@ -658,8 +656,7 @@ def _diagnose_action(page, card, step, framework, text):
             return refusal
         return _ready(
             card, 'frame_changed',
-            '录制时记下的 iframe 在当前页面已经不存在了；去掉这层约束后，'
-            '主页面里能唯一找到这个元素，身份也对得上。',
+            'iframe 已不存在；去掉约束后主页面上唯一命中且身份一致',
             {'clear_frame': True},
             [{'label': 'iframe', 'before': snap.get('frame_name') or snap.get('frame_url'),
               'after': '不限定 iframe'}],
@@ -677,9 +674,8 @@ def _diagnose_action(page, card, step, framework, text):
         if gone:
             return _blocked(
                 card, 'row_gone',
-                '录制时锁定的那一行（%s）已经不在页面上了。剩下的同名按钮属于别的行，'
-                '换过去会点到别人。' % gone,
-                blocked_reason='这多半是这一行被删了、被筛掉了，或者上一步没成功。',
+                '行锚点（%s）已不在页面；其余同名按钮属于其他行，换过去会点错' % gone,
+                blocked_reason='该行可能被删除、被筛除，或上一步失败',
                 probes=['行锚点：%s 已不存在' % gone],
                 verdict='conflict',
                 evidence=[{'label': '行锚点', 'recorded': gone,
@@ -696,21 +692,19 @@ def _diagnose_action(page, card, step, framework, text):
         if verify.get('state') == 'disabled':
             return _wait_retry(
                 card, primary, verify,
-                '元素身份是对的，但它现在是禁用状态（多半在提交/加载中）。'
-                '改定位没用，先等一会儿再用原定位重试。')
+                '身份一致但处于禁用状态（提交/加载中）；改定位无效，稍后用原定位重试')
         if verify.get('state') == 'hidden':
             return _hidden_refusal(card, verify)
         if not verify.get('ok'):
             return _ready(
-                card, 'locator_changed', '主定位唯一命中，但预检没有通过。',
+                card, 'locator_changed', '主定位唯一命中，预检未通过',
                 {'retry_only': True, 'clear_frame': frame_missing},
                 [{'label': '定位', 'before': _short(primary.get('desc')), 'after': '不改，直接重试'}],
                 0.5, verify=verify, risk='medium',
                 verdict=verify.get('verdict'), evidence=verify.get('evidence'))
         return _ready(
             card, 'transient',
-            '录制时那条定位现在是好的（唯一命中、身份一致），失败更像是当刻还没渲染完'
-            '或被临时遮住。直接重试一次。',
+            '原定位当前正常（唯一命中、身份一致），失败或为当时未渲染完',
             {'retry_only': True, 'clear_frame': frame_missing},
             [{'label': '定位', 'before': _short(primary.get('desc')), 'after': '不改，直接重试'}],
             0.72,
@@ -733,9 +727,8 @@ def _diagnose_action(page, card, step, framework, text):
                      'clear_frame': frame_missing}
             return _ready(
                 card, 'ambiguous',
-                '录制时主定位只命中 1 个，现在是 %d 个。录制时记下你点的是第 %d 个，'
-                '而且第 %d 个的身份和录制时对得上，可以按那个序号定位。'
-                % (primary_now, index + 1, index + 1),
+                '主定位当时 1 个，现为 %d 个；录制序号为第 %d 个且身份一致，可按序号定位'
+                % (primary_now, index + 1),
                 patch,
                 [{'label': '主定位', 'before': _short(primary.get('desc')),
                   'after': _short(primary.get('desc')) + '  → 取第 %d 个' % (index + 1)}],
@@ -747,9 +740,8 @@ def _diagnose_action(page, card, step, framework, text):
                 evidence=verify.get('evidence'),
             )
         return _blocked(card, 'ambiguous',
-                        '现在有 %d 个元素能匹配录制时那条定位，但录制时只有一个，'
-                        '系统没有记下你点的是哪一个。' % primary_now,
-                        blocked_reason='这种情况换定位只能靠猜，建议改用文本或属性重新录制这一步。')
+                        '%d 个元素匹配原定位，且未记录录制时点击序号' % primary_now,
+                        blocked_reason='无序号无法定位，建议按文本或属性重新录制')
 
     # 3) 一条都不中：用当前页面重新挑一条唯一的语义定位。
     replacement = pick_for(framework, counted)
@@ -769,12 +761,12 @@ def _diagnose_action(page, card, step, framework, text):
         alive = [c for c in counted if c.get('count', 0) > 1]
         if alive:
             return _blocked(card, 'ambiguous',
-                            '主定位失效了，其余候选也都不是唯一命中（最多的一条命中 %d 个）。'
+                            '主定位失效，其余候选均非唯一（最多命中 %d 个）'
                             % max(c['count'] for c in alive),
-                            blocked_reason='没有能唯一指认这个元素的候选，只能人工处理。')
+                            blocked_reason='无唯一候选，需人工处理')
         return _blocked(card, 'locator_changed',
-                        '录制时那条定位和它的备选在当前页面上全都匹配不到任何元素。',
-                        blocked_reason='元素可能已经被删掉或换了页面，需要你确认。')
+                        '原定位及备选在当前页面均匹配 0 个',
+                        blocked_reason='元素可能已删除或页面已切换，需确认')
 
     verify = _precheck(root, replacement['spec'], step)
     refusal = _identity_refusal(card, verify, require=True)
@@ -783,16 +775,15 @@ def _diagnose_action(page, card, step, framework, text):
     if verify.get('state') == 'disabled':
         return _wait_retry(
             card, primary, verify,
-            '候选元素的身份对得上，但它现在是禁用状态（多半在提交/加载中）。'
-            '先等一会儿，等页面恢复后再用原定位重试。')
+            '候选身份一致但处于禁用状态（提交/加载中）；稍后用原定位重试')
     if verify.get('state') == 'hidden':
         return _hidden_refusal(card, verify)
     if frame_missing and not verify.get('ok'):
         return _blocked(card, 'frame_changed',
-                        '去掉失效的 iframe 约束后，主页面里仍然没有能唯一命中的候选。')
+                        '去掉 iframe 约束后仍无唯一命中候选')
     if not verify.get('ok'):
         return _ready(
-            card, 'locator_changed', '找到了候选，但预检没有通过。',
+            card, 'locator_changed', '已找到候选，预检未通过',
             {'primary': dict(replacement, spec=replacement['spec']), 'candidates': counted,
              'clear_frame': frame_missing},
             [{'label': '主定位', 'before': _short(primary.get('desc')),
@@ -823,15 +814,15 @@ def _diagnose_action(page, card, step, framework, text):
     pw_pick = replacement if replacement is stable_item else (
         pick_for('playwright-ts', counted) or replacement)
     category = 'frame_changed' if frame_missing else 'locator_changed'
-    reason = ('录制时那条定位在当前页面已经匹配不到任何元素了，'
-              '但同一次录制留下的另一条候选还能唯一命中，身份也对得上。')
+    reason = ('原定位在当前页面匹配 0 个，'
+              '但同期记录的另一条候选仍唯一命中且身份一致')
     if frame_missing:
-        reason = ('录制时记下的 iframe 在当前页面不存在了；去掉这层约束后，'
-                  '主页面里有一条候选能唯一命中，身份也对得上。')
+        reason = ('iframe 在当前页面已不存在；去掉该约束后，'
+                  '主页面上有一条候选唯一命中且身份一致。')
     if verdict == 'probable':
-        reason += '不过只有 class / 结构特征能对上，页面改版后可能再失效。'
+        reason += '仅 class / 结构特征吻合，改版后可能再次失效。'
     if replacement['kind'] in FRAGILE_KINDS and replacement is not stable_item:
-        reason += '新定位是结构路径，页面一改版又会失效。'
+        reason += '新定位为结构路径，改版后仍会失效。'
 
     return _ready(
         card, category, reason,

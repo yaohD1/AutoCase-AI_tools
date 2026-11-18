@@ -76,12 +76,33 @@ def _plausible(box):
             and box['width'] > box['height'])
 
 
-def _canvas_boxes(page):
+def _canvas_boxes(page, root=None):
+    """取候选画布。`root` 是用户拾取到的容器 / 画布，None 表示整页。
+
+    拾取给的可能是外层容器（.vue-puzzle-vcode）也可能直接是 canvas，
+    两种都要能落成一组候选 —— 前者取内部画布，后者把自己算进来。
+    """
+    els = []
+    if root is not None:
+        try:
+            if root.evaluate('(el) => el.tagName.toLowerCase() === "canvas"'):
+                els.append(root)
+        except Exception:  # noqa: BLE001 - 取不到标签名就只找后代
+            pass
+        try:
+            els.extend(root.query_selector_all('canvas'))
+        except Exception:  # noqa: BLE001 - 元素在遍历中消失是常事
+            pass
+    else:
+        try:
+            els.extend(page.query_selector_all('canvas'))
+        except Exception:  # noqa: BLE001
+            pass
     out = []
-    for el in page.query_selector_all('canvas'):
+    for el in els:
         try:
             box = el.bounding_box()
-        except Exception:  # noqa: BLE001 - 元素在遍历中消失是常事
+        except Exception:  # noqa: BLE001
             continue
         if box:
             out.append({'el': el, 'box': box})
@@ -110,34 +131,66 @@ def _find_handle(page, bg_box):
     return None
 
 
-def find_scene(page):
-    """在当前页面上找一组「背景 + 拼图块 + 手柄」。
-
-    返回 None 表示这一步现在没有滑块。调用方据此给「页面上没有找到滑块」，
-    而不是抛一个看不懂的 Playwright 异常。
-    """
-    canvases = _canvas_boxes(page)
-    if not canvases:
-        return None
-    big = [c for c in canvases if _plausible(c['box'])]
-    if not big:
-        return None
-    bg = max(big, key=lambda c: c['box']['width'] * c['box']['height'])
-
-    # 拼图块和背景同尺寸关系：宽不到 100、高度接近容器、初始位置贴左上。
-    piece = None
+def _find_piece(canvases, bg_box):
+    """拼图块：宽不到 100、高度接近容器、初始位置贴背景图左上角。"""
     for item in canvases:
         box = item['box']
         if box['width'] >= 100 or box['height'] < 60:
             continue
-        if abs(box['x'] - bg['box']['x']) < 40 and abs(box['y'] - bg['box']['y']) < 24:
-            piece = item
-            break
+        if abs(box['x'] - bg_box['x']) < 40 and abs(box['y'] - bg_box['y']) < 24:
+            return item
+    return None
 
-    handle = _find_handle(page, bg['box'])
-    if handle is None:
+
+def find_scene(page, root=None):
+    """在当前页面上找一组「背景 + 拼图块 + 手柄」。
+
+    `root` 是用户拾取到的元素（容器或画布）。给了就只在它的范围里找，
+    页面上有多个验证码时才不会认错。
+
+    返回 None 表示这一步现在没有滑块。调用方据此给「页面上没有找到滑块」，
+    而不是抛一个看不懂的 Playwright 异常。
+    """
+    canvases = _canvas_boxes(page, root)
+    if not canvases:
         return None
-    return {'bg': bg, 'piece': piece, 'handle': handle}
+    # 容器本身也可能「看着像」背景图（310×230 同样落在尺寸区间里），但它配不上手柄：
+    # 手柄在它内部，而 _find_handle 找的是贴着底边外侧的那一个。
+    # 所以按面积从大到小逐个试，配不上就自然落到它内部真正的画布上。
+    candidates = [c for c in canvases if _plausible(c['box'])]
+    for bg in sorted(candidates, key=lambda c: -(c['box']['width'] * c['box']['height'])):
+        handle = _find_handle(page, bg['box'])
+        if handle is None:
+            continue
+        return {'bg': bg, 'piece': _find_piece(canvases, bg['box']), 'handle': handle}
+    return None
+
+
+def _scene_by_selector(page, selector):
+    """按用户指定的选择器框定范围找滑块。
+
+    选择器可以指向外层容器（.vue-puzzle-vcode），也可以直接指向画布 ——
+    拾取这两种都可能给到。真正落成场景的是容器内部那块背景画布。
+    """
+    try:
+        els = page.query_selector_all(selector)
+    except Exception as exc:  # noqa: BLE001 - 非法选择器要让用户看到原因
+        raise SliderError('容器选择器无效：%s' % _short(exc, 120)) from exc
+    for el in els:
+        scene = find_scene(page, root=el)
+        if scene:
+            return scene
+    return None
+
+
+def _locate(page, selector):
+    """先按用户指定的选择器找，找不到再全页自动识别。
+
+    选择器失效（元素暂时不在、写错了）不该让整步直接失败：自动识别是
+    更宽松的兜底，页面上只有一个验证码时它照样能找到。
+    """
+    scene = _scene_by_selector(page, selector) if selector else None
+    return scene if scene is not None else find_scene(page)
 
 
 def _set_piece_visible(piece, visible):
@@ -373,18 +426,9 @@ def solve(page, config=None, on_tick=None):
     selector = str(config.get('selector') or '').strip()
 
     started = time.perf_counter()
-    scene = find_scene(page)
-    if scene is None and selector:
-        # 手填了选择器：用它框定范围再找一次，避免页面上有多个验证码时认错。
-        for el in page.query_selector_all(selector):
-            box = el.bounding_box()
-            if not box:
-                continue
-            fake = {'bg': {'el': el, 'box': box}, 'piece': None,
-                    'handle': _find_handle(page, box)}
-            if fake['handle']:
-                scene = fake
-                break
+    # 用户指定了选择器就以它为准：页面上有多个验证码时，「自动识别」挑最大的那个
+    # 经常不是他想要的。选择器失效（元素暂时不在、写错了）才退回全局自动识别。
+    scene = _locate(page, selector)
     if scene is None:
         raise SliderError('当前页面上没有找到滑块（没找到符合尺寸的 canvas 和拖动手柄）。')
 
@@ -400,7 +444,14 @@ def solve(page, config=None, on_tick=None):
             # 才退回上次坐标（±2px），那种情况至少还有一次机会。
             page.wait_for_timeout(1200)
             _wait_reset(page)
-            fresh = find_scene(page)
+            fresh = _locate(page, selector)
+            # 重绘有个一两百毫秒的空窗：失败提示已经消失，但新画布还没插回来。
+            # 这时候直接判「组件消失」会把一次正常的重试误报成失败。
+            for _ in range(4):
+                if fresh is not None:
+                    break
+                page.wait_for_timeout(300)
+                fresh = _locate(page, selector)
             if fresh is None:
                 raise SliderError(
                     '滑块没有通过，重试时组件已经从页面上消失了（可能被关掉或页面跳走）。'

@@ -178,14 +178,14 @@
         <span class="panel-title" :title="panelTitle">{{ panelState }}</span>
         <span v-if="steps.length" class="panel-count">{{ steps.length }} 步</span>
         <!-- 待确认数量放标题条：它决定「现在能不能生成」，比步数更该先看到 -->
-        <span v-if="reviewCount" class="panel-pending" :title="`${reviewCount} 步定位还没确认（不唯一或只有结构定位），生成前要逐条定下来`">{{ reviewCount }} 待确认</span>
+        <span v-if="reviewCount" class="panel-pending" :title="`${reviewCount} 步定位未确认（不唯一或仅结构定位），生成前需逐条确认`">{{ reviewCount }} 待确认</span>
         <div class="panel-actions">
           <!-- 头部只放「现在对浏览器做什么」，且一律图标 + tooltip。420px 以下文字按钮会被压成竖排
                （实测 320px 时「录制中」只剩 20px 宽、一个字一行）。拾取 / 配置 / 关浏览器频率低，
                收进「更多」；「收起面板」在关掉页内浮层后没有恢复入口，所以不再提供。 -->
           <template v-if="panelFloat">
             <button v-if="isRecording" type="button" class="panel-icon" :class="{ 'is-on': paused }"
-                    :title="paused ? '继续把操作记录为步骤' : '浏览器照常可用，但操作不再记为步骤'"
+                    :title="paused ? '继续记录步骤' : '浏览器可用，不记录步骤'"
                     @click="togglePause">
               <el-icon><VideoPlay v-if="paused" /><VideoPause v-else /></el-icon>
             </button>
@@ -228,7 +228,7 @@
         <h1>自动化工具</h1>
         <p>
           在真实浏览器里操作，记录步骤与唯一定位；录制时会自动打开编排面板，插入断言后按工作区框架生成脚本。
-          <span class="hint-dot" title="写入后可以预览，再提交或撤销；校验失败会自动还原，不留半成品。">?</span>
+          <span class="hint-dot" title="写入后可预览、提交或撤销；校验失败自动还原">?</span>
         </p>
       </div>
       <div class="page-actions">
@@ -516,9 +516,9 @@
                        :icon="VideoCamera" :loading="booting" @click="onStartClick">开始录制</el-button>
             <div v-else class="panel-tools">
               <button type="button" class="panel-tool" :disabled="!canEdit" @click="insertReload()"
-                      title="插入一步「刷新页面」，并真的刷新浏览器（在浏览器里按 F5 不会被录制）">刷新</button>
+                      title="插入刷新步骤，并实际刷新浏览器">刷新</button>
               <button type="button" class="panel-tool" :disabled="!canEdit" @click="openDraft('assert')"
-                      title="插入一步：判断页面上的某个状态是否成立">断言</button>
+                      title="判断页面状态是否成立">断言</button>
               <el-dropdown trigger="click" placement="bottom-start" :disabled="!canEdit" @command="openDraft">
                 <button type="button" class="panel-tool" :disabled="!canEdit" title="等待加载（推荐）/ 固定等待">等待</button>
                 <template #dropdown>
@@ -557,7 +557,7 @@
               :plain="paused"
               :icon="paused ? VideoPlay : VideoPause"
               :loading="pausing"
-              :title="paused ? '继续把操作记录为步骤' : '浏览器照常可用，但操作不再记为步骤'"
+              :title="paused ? '继续记录步骤' : '浏览器可用，不记录步骤'"
               @click="togglePause"
             >
               {{ paused ? '继续' : '暂停' }}
@@ -569,7 +569,7 @@
               :plain="picking"
               :icon="Aim"
               :disabled="!canInspect"
-              :title="canInspect ? '在浏览器里点元素，只登记为可引用的元素，不记为步骤（页面里按 Esc 也能退出）' : '浏览器已关闭，无法再拾取元素'"
+              :title="canInspect ? '点选元素入库，不记为步骤（Esc 退出）' : '浏览器已关闭，无法再拾取元素'"
               @click="togglePick(!picking)"
             >
               {{ picking ? '退出拾取' : '拾取元素' }}
@@ -586,17 +586,19 @@
               :icon="Refresh"
               :disabled="!canEdit"
               :loading="addingReload"
-              :title="isRecording ? '插入一步「刷新页面」，并真的刷新浏览器（在浏览器里按 F5 不会被录制）' : '插入一步「刷新页面」（浏览器已停止录制，不会真的刷新）'"
+              :title="isRecording ? '插入刷新步骤，并实际刷新浏览器' : '插入刷新步骤（已停止录制，不会真刷新）'"
               @click="insertReload()"
             >
               刷新页面
             </el-button>
-            <el-button :icon="CircleCheck" :disabled="!canEdit" title="插入一步：判断页面上的某个状态是否成立（需要等它慢慢成立时，在表单里展开「等到成立」）" @click="openDraft('assert')">添加断言</el-button>
-            <el-button :icon="Loading" :disabled="!canEdit" title="插入一步：等页面加载到指定状态。点击后页面跳转、站点又慢的时候用它，比固定等待可靠" @click="openDraft('ready')">等待加载</el-button>
-            <el-button :icon="Clock" :disabled="!canEdit" title="插入一步：不管条件，先干等指定秒数。等页面加载请用左边的「等待加载」——固定等待既慢又不可靠" @click="openDraft('sleep')">固定等待</el-button>
+            <el-button :icon="CircleCheck" :disabled="!canEdit" title="判断页面状态是否成立；可设「等到成立」" @click="openDraft('assert')">添加断言</el-button>
+            <el-button :icon="Loading" :disabled="!canEdit" title="等待页面加载到指定状态，比固定等待可靠" @click="openDraft('ready')">等待加载</el-button>
+            <el-button :icon="Clock" :disabled="!canEdit" title="无条件等待指定秒数；加载请用「等待加载」" @click="openDraft('sleep')">固定等待</el-button>
             <!-- 滑块不做自动识别：拖动在 DOM 里只是一串 pointermove，和拖滚动条长得一样，
                  自动认出必然误判。让用户显式加一步，语义最清楚。 -->
-            <el-button :icon="Pointer" :disabled="!canEdit" title="插入一步「滑块验证」：回放到这里时用视觉模型找缺口并拖动。只对拼图缺口型有效" @click="openDraft('slider')">滑块验证</el-button>
+            <el-button :icon="Pointer" :disabled="!canEdit" title="用视觉模型找缺口并拖动；限拼图缺口型" @click="openDraft('slider')">滑块验证</el-button>
+            <!-- 验证码同样不让自动识别：页面上的验证码图片和普通缩略图在 DOM 里没有可靠区别。 -->
+            <el-button :icon="Postcard" :disabled="!canEdit" title="用视觉模型识别字符并填入；支持数字、字母、算术" @click="openDraft('captcha')">验证码</el-button>
           </div>
 
           <span class="toolbar-sep"></span>
@@ -609,7 +611,7 @@
               :plain="selectMode"
               :icon="selectMode ? Close : Files"
               :disabled="!canEdit || !steps.length"
-              :title="selectMode ? '退出封装选择（Esc）' : '多选连续的几步，把它们封装成一个可以反复调用的动作'"
+              :title="selectMode ? '退出封装选择（Esc）' : '多选连续步骤，封装为可复用动作'"
               @click="toggleSelectMode"
             >
               {{ selectMode ? '取消封装' : '封装' }}
@@ -645,7 +647,7 @@
                   <el-button size="small" type="primary" plain :disabled="!canEdit"
                              style="flex:none;white-space:nowrap" @click="insertAction(action)">插入</el-button>
                   <el-button size="small" text :icon="Delete" :disabled="!canEdit || action.calls > 0"
-                             :title="action.calls > 0 ? '还有调用点，先解封再删' : '从动作库删除'" @click="removeAction(action)" />
+                             :title="action.calls > 0 ? '有调用点，需先解封' : '从动作库删除'" @click="removeAction(action)" />
                 </div>
               </div>
             </el-popover>
@@ -829,11 +831,11 @@
                     {{ statusLabel(effectiveStatus(step)) }}
                   </el-tag>
                   <span v-if="chosenOf(step.target)?.index_invalid" class="chosen-warn"
-                        title="你选的序号，在停止录制时的页面上已经不存在了：生成出来会点不到，需要重新选">序号已失效</span>
+                        title="序号已失效，生成后点不到；请重新选择">序号已失效</span>
                   <!-- 图标按钮这类控件：你点的是里层的图形，但脚本点的是元素的中心，
                        中心被挡住时 Playwright 会拒绝点击。录制时已自动改用能点到的父容器。 -->
                   <span v-if="step.target.snap && step.target.snap.lifted" class="lifted-hint"
-                        :title="`这块区域的中心被别的元素压住了，脚本点它会报 intercepts pointer events；已把定位上提到能点到的父容器（原来是 <${step.target.snap.lifted}>）。生成写进去的就是上提后的这一条。`"
+                        :title="`中心点被遮挡（Playwright 会报 intercepts pointer events），定位已上提至可点击父容器；原为 <${step.target.snap.lifted}>`"
                   >已上提</span>
                   <!-- 人眼确认：把这条定位匹配到的元素全部框出来。比任何文字都可靠，
                        尤其是「两个都叫确定」这种文本和行文本都一样的场景。 -->
@@ -843,7 +845,7 @@
                     :icon="Aim"
                     :loading="peek.no === step.no && !!peek.loading"
                     :disabled="!canInspect"
-                    :title="canInspect ? '在浏览器里框出这条定位匹配到的元素，确认是不是这一个' : '浏览器已关闭，无法框出元素'"
+                    :title="canInspect ? '在当前页面框出该定位匹配的元素' : '浏览器已关闭，无法框出元素'"
                     @click.stop="peekTarget(step)"
                   />
                   <!-- 定位详情：采用的到底是哪一条、此刻页面上还在不在、唯不唯一。
@@ -853,7 +855,7 @@
                     text
                     :icon="Search"
                     :disabled="!canInspect"
-                    :title="canInspect ? '查看采用的定位，并在当前页面上校验它还在不在、唯不唯一' : '浏览器已关闭，无法校验当前页面'"
+                    :title="canInspect ? '查看定位并在当前页面校验唯一性' : '浏览器已关闭，无法校验当前页面'"
                     @click.stop="openLocDetail(step)"
                   />
                 </div>
@@ -1021,14 +1023,14 @@
               type="textarea"
               :rows="2"
               maxlength="300"
-              placeholder="用自然语言描述，例如：提交成功的提示出现 / 等到加载遮罩消失 / 页面包含「登录成功」"
+              placeholder="描述期望结果，如：出现「登录成功」提示"
             />
             <el-button :loading="draft.parsing" :disabled="!config.model || !draft.text.trim()" @click="parseDraft">
               解析
             </el-button>
           </div>
           <div v-if="draft.kind === 'assert'" class="field-hint">
-            {{ config.model ? '解析结果会填进下面的表单，改完再插入；插入的永远是表单里的内容。' : '未选择模型：直接在下面的表单里填写。' }}
+            {{ config.model ? '解析结果填入表单；插入以表单为准' : '未选模型：直接填写表单' }}
           </div>
 
           <div v-if="draft.parsed" class="parsed-preview">
@@ -1043,16 +1045,30 @@
                容器留空就按 canvas 尺寸自动识别，换站点也能用。 -->
           <div v-if="draft.kind === 'slider'" class="slider-body">
             <div class="slider-field">
-              <span class="poll-label">容器选择器</span>
+              <span class="poll-label">验证码位置</span>
               <el-input
                 v-model="draft.sliderSelector"
-                placeholder="留空自动识别（按 canvas 尺寸找）"
-                maxlength="200"
+                placeholder="留空自动识别，或右侧拾取"
+                maxlength="500"
                 clearable
               />
+              <el-button
+                size="small"
+                :type="draft.picking ? 'warning' : 'default'"
+                :plain="draft.picking"
+                :disabled="!canInspect"
+                :title="canInspect ? '在浏览器中点选验证码图片区域' : '浏览器已关闭，无法拾取'"
+                @click="pickForDraft('slider')"
+              >
+                {{ draft.picking ? '请在页面点击…' : '拾取' }}
+              </el-button>
             </div>
             <div class="field-hint">
-              页面上只有一个验证码时留空即可；同时出现多个时填容器的 CSS 选择器，例如 .vue-puzzle-vcode
+              拾取时点<b>图片区域</b>，无需点拖动手柄；仅一个验证码可留空。
+              <template v-if="draft.picking">Esc 退出拾取</template>
+            </div>
+            <div v-if="draft.sliderPicked" class="field-hint">
+              已拾取 · {{ draft.sliderPicked }}
             </div>
             <div class="poll-row">
               <span class="poll-label">失败重试</span>
@@ -1076,7 +1092,88 @@
               <span class="poll-unit">秒</span>
             </div>
             <div class="field-hint">
-              一次识别约 20–40 秒（要调视觉模型）。重试 2 次即最多拖 3 次，最坏约 2 分钟。
+              单次 20–40 秒 · 重试 2 次，上限约 2 分钟
+            </div>
+          </div>
+
+          <div v-if="draft.kind === 'captcha'" class="slider-body">
+            <div class="slider-field">
+              <span class="poll-label">验证码</span>
+              <el-input
+                v-model="draft.captchaSelector"
+                placeholder="点右侧拾取验证码图片"
+                maxlength="500"
+                clearable
+              />
+              <el-button
+                size="small"
+                :type="draft.picking && draft.pickField === 'captcha' ? 'warning' : 'default'"
+                :plain="draft.picking && draft.pickField === 'captcha'"
+                :disabled="!canInspect"
+                :title="canInspect ? '在浏览器中点选验证码图片' : '浏览器已关闭，无法拾取'"
+                @click="pickForDraft('captcha')"
+              >
+                {{ draft.picking && draft.pickField === 'captcha' ? '请点击…' : '拾取' }}
+              </el-button>
+            </div>
+            <div class="slider-field">
+              <span class="poll-label">输入框</span>
+              <el-input
+                v-model="draft.captchaInputSelector"
+                placeholder="留空自动查找输入框"
+                maxlength="500"
+                clearable
+              />
+              <el-button
+                size="small"
+                :type="draft.picking && draft.pickField === 'input' ? 'warning' : 'default'"
+                :plain="draft.picking && draft.pickField === 'input'"
+                :disabled="!canInspect"
+                :title="canInspect ? '在浏览器中点选验证码输入框' : '浏览器已关闭，无法拾取'"
+                @click="pickForDraft('input')"
+              >
+                {{ draft.picking && draft.pickField === 'input' ? '请点击…' : '拾取' }}
+              </el-button>
+            </div>
+            <div class="field-hint">
+              拾取时点<b>图片区域</b>，勿点整个登录框。
+              <template v-if="draft.picking">Esc 退出拾取</template>
+            </div>
+            <div v-if="draft.captchaPicked" class="field-hint">
+              已拾取 · {{ draft.captchaPicked }}
+            </div>
+            <div class="poll-row">
+              <span class="poll-label">字符类型</span>
+              <el-select v-model="draft.captchaCharset" size="small" style="width: 110px">
+                <el-option label="纯数字" value="digits" />
+                <el-option label="字母数字" value="alnum" />
+                <el-option label="任意字符" value="any" />
+              </el-select>
+              <span class="poll-label" style="margin-left: 14px">位数</span>
+              <el-input-number
+                v-model="draft.captchaLength"
+                :min="0"
+                :max="12"
+                controls-position="right"
+                size="small"
+                style="width: 92px"
+              />
+              <span class="poll-unit">位</span>
+            </div>
+            <div class="poll-row">
+              <span class="poll-label">失败重试</span>
+              <el-input-number
+                v-model="draft.captchaAttempts"
+                :min="0"
+                :max="5"
+                controls-position="right"
+                size="small"
+                style="width: 92px"
+              />
+              <span class="poll-unit">次</span>
+            </div>
+            <div class="field-hint">
+              位数 0 为不校验；不符则刷新重试 · 单次 6–10 秒 · <b>仅填码，不提交</b>
             </div>
           </div>
 
@@ -1211,7 +1308,7 @@
               v-if="draft.kind === 'assert'"
               :loading="draft.verifying"
               :disabled="!canInspect"
-              :title="canInspect ? '在浏览器当前页面上判断这条断言现在成不成立' : '浏览器已关闭，无法再看当前页面'"
+              :title="canInspect ? '在当前页面验证这条断言' : '浏览器已关闭，无法再看当前页面'"
               @click="verifyDraft"
             >
               验证当前页面
@@ -1250,7 +1347,7 @@
 
         <div v-if="isStopped" class="checklist">
           <div :class="['check', { ok: steps.length > 0 }]">
-            <span class="check-dot"></span>已录制 {{ steps.length }} 个步骤
+            <span class="check-dot"></span>已录制 {{ steps.length }} 步
           </div>
           <div :class="['check', { ok: isStopped }]">
             <span class="check-dot"></span>录制已停止
@@ -1259,26 +1356,28 @@
             <span class="check-dot"></span>
             <span class="check-text">
               {{ blockers.length
-                ? `第 ${blockers.join('、')} 步定位待确认，选定之后才能生成`
-                : (pageGoneCount ? '当前页面上的步骤都有唯一定位' : '所有步骤都有唯一定位') }}
+                ? `第 ${blockers.join('、')} 步定位待确认，选定后可生成`
+                : (pageGoneCount ? '当前页面步骤均有唯一定位' : '所有步骤均有唯一定位') }}
             </span>
             <!-- 页面跑掉的步骤当场框不出来，停在这里还能一条条回去看 -->
             <el-button v-if="reviewCount" text size="small" class="check-action" @click="startLocReview">
-              {{ reviewCount }} 步待确认 · 逐条看
+              {{ reviewCount }} 步待确认 · 逐条确认
             </el-button>
           </div>
           <div v-if="pageGoneCount" class="check warn">
-            <span class="check-dot"></span>{{ pageGoneCount }} 个步骤的目标页面已翻走，按录制时定位生成，请回放确认
+            <span class="check-dot"></span>{{ pageGoneCount }} 步页面已翻走 · 按录制定位生成，回放确认
           </div>
           <div v-if="fragileCount" class="check warn">
-            <span class="check-dot"></span>{{ fragileCount }} 个步骤使用结构定位，已标黄，生成后请留意
+            <span class="check-dot"></span>{{ fragileCount }} 步为结构定位 · 改版可能失效
           </div>
           <div v-if="suspectCount" class="check warn">
-            <span class="check-dot"></span>{{ suspectCount }} 个步骤的「唯一」定位其实指向了别的元素，生成不会采用，请先重新框选
+            <span class="check-dot"></span>{{ suspectCount }} 步定位指向其他元素 · 需重新框选
           </div>
           <div :class="['check', { ok: !!config.workspace && !!config.model }]">
             <span class="check-dot"></span>
-            工作区、模型均已填写<span v-if="!config.targetPath.trim()">（目标文件留空，交给任务书定）</span>
+            <span class="check-text">
+              工作区、模型已填写<span v-if="!config.targetPath.trim()"> · 目标文件由任务书决定</span>
+            </span>
           </div>
         </div>
         <!-- 没停录制时把 4 行检查压成一行，别占掉半屏 -->
@@ -1299,7 +1398,7 @@
           <div class="field-hint">
             {{ shownResult.validated ? '校验通过' : '未校验' }}
             <template v-if="shownResult.run && shownResult.run.ran">
-              · {{ shownResult.run.ok ? `已跑通 ${shownResult.run.total || 1} 个用例` : '但真跑没过' }}
+              · {{ shownResult.run.ok ? `${shownResult.run.total || 1} 个用例通过` : '用例未通过' }}
               <template v-if="shownResult.run.ok && shownResult.run.duration_ms">
                 · {{ (shownResult.run.duration_ms / 1000).toFixed(1) }}s
               </template>
@@ -1309,14 +1408,14 @@
           </div>
           <div v-if="shownResult.run && !shownResult.run.ok" class="gen-degraded">
             <div class="gen-degraded-title">
-              {{ shownResult.run.ran ? '类型检查过了，但真跑没过' : `没能执行验证：${shownResult.run.reason || '未知原因'}` }}
+              {{ shownResult.run.ran ? '类型检查通过，用例未通过' : `未执行验证：${shownResult.run.reason || '未知原因'}` }}
             </div>
             <ul v-if="shownResult.run.errors && shownResult.run.errors.length">
               <li v-for="(item, idx) in shownResult.run.errors" :key="idx">{{ item }}</li>
             </ul>
             <div v-if="shownResult.run.note" class="field-hint">{{ shownResult.run.note }}</div>
             <pre v-if="!shownResult.run.ran && shownResult.run.tail" class="gen-run-tail">{{ shownResult.run.tail }}</pre>
-            <div class="field-hint">文件已保留，可以直接改，或撤销这次写入。</div>
+            <div class="field-hint">文件已保留，可修改或撤销</div>
           </div>
           <div v-if="shownResult.degraded && shownResult.degraded.length" class="gen-degraded">
             <div class="gen-degraded-title">{{ shownResult.degraded.length }} 步使用了降级定位，请回放确认</div>
@@ -1343,7 +1442,7 @@
               </li>
             </ul>
             <div class="field-hint">
-              脚本需要的辅助文件（helper / fixture）保留即可；还原会把这次改动之前的内容写回去。
+              helper / fixture 建议保留；还原即恢复改动前内容
             </div>
             <div class="gen-outside-actions">
               <el-button
@@ -1352,14 +1451,14 @@
                 :disabled="!shownResult.backup_id || !!reverting"
                 @click="revertOutside(shownResult.outside)"
               >全部还原</el-button>
-              <span v-if="!shownResult.backup_id" class="field-hint">这份结果没有可还原的备份</span>
+              <span v-if="!shownResult.backup_id" class="field-hint">无可还原备份</span>
             </div>
           </div>
           <div class="gen-result-actions">
             <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: shownResult.generation_id } })">
               查看生成记录
             </el-button>
-            <span class="field-hint">预览文件内容、提交到 Git 或撤销这次写入</span>
+            <span class="field-hint">预览内容 · 提交 Git · 撤销写入</span>
           </div>
         </div>
 
@@ -1371,11 +1470,13 @@
         <div v-if="canReplay && steps.length" class="replay-block">
           <div class="replay-row">
             <el-button size="small" type="primary" @click="openDebugReplay">调试回放</el-button>
-            <el-button size="small" :loading="replaying" @click="runReplay">快速校验</el-button>
+            <!-- 「快速校验」入口已下线（反馈是根本用不上，只留调试回放）。
+                 只隐藏 UI，后端一行没动：/automation/recording/replay 接口和
+                 replay.replay_checked 都保留着（7 个测试文件仍在覆盖它），
+                 要恢复就把下面这行取消注释。 -->
+            <!-- <el-button size="small" :loading="replaying" @click="runReplay">快速校验</el-button> -->
             <span class="field-hint">
-              {{ paused
-                ? '暂停中也能跑：另开一个无头浏览器从第 1 步重演，不动你当前这个窗口'
-                : '在浏览器里把录制重跑一遍，只验定位还命中不命中，不需要先生成' }}
+              可逐步暂停，无需生成
             </span>
           </div>
           <div v-if="replayStale" class="replay-stale">
@@ -1458,7 +1559,7 @@
             <div class="plan-ready-sub">
               <template v-if="shownPlanError">{{ shownPlanError.message }}</template>
               <template v-else-if="planTarget">写入 <code>{{ planTarget }}</code></template>
-              <template v-else>写入位置还没定，打开任务书确认</template>
+              <template v-else>写入位置未定，请打开任务书确认</template>
             </div>
           </div>
           <el-button size="small" :type="shownPlanError && !planData ? 'default' : 'primary'" @click="openPlanSheet">
@@ -1469,10 +1570,10 @@
           <span class="gen-block-dot"></span>{{ generateBlockReason }}
         </div>
         <div v-else-if="!generating && !planState" class="field-hint">
-          任务书只读项目、不写文件；你确认之后才会写入目标文件。
+          任务书仅只读；确认后写入目标文件
         </div>
         <div v-else-if="!generating" class="field-hint">
-          写入只在任务书里触发；改了录制步骤需要重新生成任务书。
+          写入仅在任务书内触发；步骤变更需重新规划
         </div>
 
         </div>
@@ -1489,7 +1590,7 @@
               <span v-if="planData" class="plan-head-meta">
                 {{ planSteps.length }} 步<template v-if="planReusable.length"> · 复用 {{ planReusable.length }} 项</template>
               </span>
-              <span class="plan-sheet-tip">选中正文任意一段，可以只针对它提意见</span>
+              <span class="plan-sheet-tip">选中正文可单独提意见</span>
               <button type="button" class="plan-sheet-close" title="关闭（Esc）" @click="closePlanSheet">✕</button>
             </header>
 
@@ -1527,7 +1628,7 @@
                 <div class="plan-block">
                   <div class="plan-block-title">可复用的封装</div>
                   <div v-if="!planReusable.length" class="field-hint">
-                    项目里没有找到能覆盖这些步骤的现成封装，这次全部手写。
+                    未找到可复用封装，全部手写
                   </div>
                   <ul v-else class="plan-reuse">
                     <li v-for="(item, idx) in planReusable" :key="idx">
@@ -1590,7 +1691,7 @@
                       <el-input
                         v-model="planTargetDraft"
                         size="small"
-                        placeholder="工作区内相对路径，例如 tests/login.spec.ts"
+                        placeholder="工作区相对路径，如 tests/login.spec.ts"
                         @keyup.enter="savePlanTarget"
                       />
                       <div class="plan-target-edit-btns">
@@ -1601,8 +1702,7 @@
                     <div v-if="planTargetError" class="plan-target-error">{{ planTargetError }}</div>
                     <div v-if="planResult.reason" class="plan-suggest-reason">{{ planResult.reason }}</div>
                     <div v-if="planTargetChanged" class="plan-target-changed">
-                      位置是你改的。任务书里的相对 import 是按规划给的位置算的，可能已经不对；
-                      不确定就点「重新规划」，让 AI 按新位置重算一遍。
+                      位置已手动修改 · 相对 import 可能失效，建议重新规划
                     </div>
                     <div v-if="planSuggestion && !planTargetChosen" class="plan-suggest">
                       <div class="plan-suggest-title">
@@ -1611,7 +1711,7 @@
                       <el-button size="small" type="warning" plain @click="adoptSuggestion">采用这个路径</el-button>
                     </div>
                     <div class="field-hint">
-                      这是本次唯一允许写入的文件。点「按此执行」才算授权，不点什么都不写。
+                      本次唯一写入点 · 需「按此执行」授权
                     </div>
                   </div>
 
@@ -1621,7 +1721,7 @@
                       <span v-if="planNotes.length" class="plan-notes-count">{{ planNotes.length }} 条</span>
                     </div>
                     <div v-if="!planNotes.length" class="field-hint">
-                      没有意见就直接执行；有意见会在写入时一并交给 AI。
+                      无意见可直接执行；意见随写入提交
                     </div>
                     <div v-for="note in planNotes" :key="note.id" class="plan-note">
                       <div v-if="note.quote" class="plan-quote">「{{ note.quote }}」</div>
@@ -1651,7 +1751,7 @@
                     <span class="gen-block-dot"></span>{{ executeBlockReason }}
                   </div>
                   <div v-else-if="!writing" class="field-hint">
-                    执行只写目标文件；校验失败会保留文件并把错误告诉你。
+                    仅写目标文件；校验失败保留文件并报错
                   </div>
                 </div>
               </aside>
@@ -1683,7 +1783,7 @@
           :rows="4"
           maxlength="800"
           show-word-limit
-          placeholder="例如：这一步必须用 getByRole，不要用 getByText"
+          placeholder="如：必须用 getByRole，勿用 getByText"
         />
         <template #footer>
           <el-button @click="noteDialog.visible = false">取消</el-button>
@@ -1775,11 +1875,11 @@
         <div class="gd-body">
           <div class="gd-field">
             <span class="gd-label">动作名</span>
-            <el-input v-model="groupDialog.name" size="small" maxlength="40" placeholder="例如 登录、新增一条记录" />
+            <el-input v-model="groupDialog.name" size="small" maxlength="40" placeholder="如：登录、新增记录" />
           </div>
           <div class="gd-field">
             <span class="gd-label">说明</span>
-            <el-input v-model="groupDialog.desc" size="small" maxlength="200" placeholder="可选，会写进代码注释" />
+            <el-input v-model="groupDialog.desc" size="small" maxlength="200" placeholder="可选，写入代码注释" />
           </div>
           <div class="gd-section">
             <span>参数</span>
@@ -1855,7 +1955,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Files, FolderOpened, Loading, Plus, Pointer, Refresh, Search, Setting, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Files, FolderOpened, Loading, Plus, Pointer, Postcard, Refresh, Search, Setting, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -1895,11 +1995,11 @@ const READY_TIMEOUT_DEFAULT = 15
 const STEP_LABELS = {
   goto: '打开页面', reload: '刷新', click: '点击', fill: '输入', select: '选择', press: '按键',
   dialog: '弹窗', new_page: '新标签页', call: '动作',
-  assert: '断言', wait: '等待', sleep: '固定等待', slider: '滑块验证'
+  assert: '断言', wait: '等待', sleep: '固定等待', slider: '滑块验证', captcha: '验证码识别'
 }
 // 动作调用用紫色系（kind-action 在样式里单独定义）：它不是一种操作，
 // 而是「一串操作的入口」，跟任何一种原子步骤共色都会让人误读。
-const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger', call: 'action', slider: 'warning' }
+const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger', call: 'action', slider: 'warning', captcha: 'warning' }
 const STATE_LABELS = {
   idle: '未开始', starting: '启动中', recording: '录制中', stopping: '停止中', stopped: '已停止',
   cancelled: '已取消', failed: '失败', idle_timeout: '超时已停止', closed: '浏览器已关闭'
@@ -2115,7 +2215,7 @@ const noteDialog = reactive({ visible: false, quote: '', comment: '' })
 const selTip = reactive({ visible: false, x: 0, y: 0, text: '' })
 let noteSeq = 0
 // 调试回放：另开一页，左画面右步骤，能暂停单步。跑的是同一份 IR、同一套定位，
-// 所以它和下面这个「快速校验」不会给出互相打架的结论——一个看过程，一个看结果。
+// 结论和下面的 runReplay 一致——一个看过程，一个只看结果。
 function openDebugReplay() {
   router.push({ path: '/recording/replay', query: { framework: config.framework } })
 }
@@ -2161,8 +2261,8 @@ watch(config, (value) => {
 }, { deep: true })
 
 const targetPlaceholder = computed(() => (config.framework === 'robot-selenium'
-  ? '留空由任务书决定，也可以填 tests/login.robot'
-  : '留空由任务书决定，也可以填 tests/login.spec.ts'))
+  ? '留空由任务书决定，或填 tests/login.robot'
+  : '留空由任务书决定，或填 tests/login.spec.ts'))
 
 // ---- 路径选择（浏览工作区目录 / 目标文件）----
 // 浏览器拿不到本地绝对路径，所以由后端在 AUTOMATION_WORKSPACE_ROOT 内列目录，前端只填相对路径。
@@ -2389,15 +2489,15 @@ const canExecute = computed(() =>
 // 按钮置灰时，告诉用户第一个不满足的条件是什么（定位不唯一不再是阻断项，见 executePlan 的确认框）
 const generateBlockReason = computed(() => {
   if (!isStopped.value) return '' // 未停止时「gen-compact」一行已经说明了原因，不重复
-  if (!steps.value.length) return '还没有录制任何步骤'
-  if (!config.workspace.trim()) return '还没有填写工作区（Git 目录）'
-  if (!config.model) return '还没有选择模型'
+  if (!steps.value.length) return '尚未录制步骤'
+  if (!config.workspace.trim()) return '未填写工作区（Git 目录）'
+  if (!config.model) return '未选择模型'
   return ''
 })
 const executeBlockReason = computed(() => {
-  if (!planData.value) return '还没有任务书'
-  if (!planTarget.value) return '任务书没有给出写入路径，请重新规划或手动指定'
-  if (planStale.value) return '录制步骤已变化，请重新规划'
+  if (!planData.value) return '尚未生成任务书'
+  if (!planTarget.value) return '任务书未给出写入路径，请重新规划'
+  if (planStale.value) return '步骤已变化，请重新规划'
   if (generating.value) return ''
   return ''
 })
@@ -2458,8 +2558,26 @@ function applySession(data) {
   // 拾取模式下，新出现的拾取元素会被草稿自动选中，然后关闭拾取。
   if (draft.value && draft.value.picking && data.picks && data.picks.length > draft.value.pickBaseline) {
     const latest = data.picks[data.picks.length - 1]
-    draft.value.target = latest.target.alias
+    if (draft.value.kind === 'slider') {
+      // 滑块没有目标元素，拾取只是为了拿到「验证码在哪」这段选择器。
+      draft.value.sliderSelector = sliderSelectorFrom(latest.target && latest.target.snap)
+      draft.value.sliderPicked = (latest.target && latest.target.alias) || '已拾取'
+    } else if (draft.value.kind === 'captcha') {
+      // 验证码同理：拾取只取位置，不存 target。两个拾取按钮靠 pickField 区分。
+      const selector = sliderSelectorFrom(latest.target && latest.target.snap)
+      const alias = (latest.target && latest.target.alias) || '已拾取'
+      if (draft.value.pickField === 'input') {
+        draft.value.captchaInputSelector = selector
+        draft.value.captchaPicked = '输入框：' + alias
+      } else {
+        draft.value.captchaSelector = selector
+        draft.value.captchaPicked = '验证码：' + alias
+      }
+    } else {
+      draft.value.target = latest.target.alias
+    }
     draft.value.picking = false
+    draft.value.pickField = ''
     if (data.pick) togglePick(false, true)
     // 停止后浏览器还开着，拾取靠轮询拿结果；拿到就收，别一直在后台拉。
     if (data.status !== 'recording' && data.status !== 'starting') stopPolling()
@@ -2622,8 +2740,8 @@ const locVerdict = computed(() => {
       no_target: ['这一步没有目标元素', '只有指向元素的步骤才带定位，断言和等待没有'],
       no_frame: ['看不到页面', '浏览器已经关了，或者这一步所在的标签页被关掉了'],
       no_candidate: ['录制时就没数到元素', '页面当时已经翻走，留下的候选在当前页面上都是 0 个'],
-      frame_lost: ['这一步的页面已经不在了', '所在的 frame 被销毁，没法在当前页面上校验'],
-      overlay_failed: ['定位到了，但画框失败', '元素还在，只是页面正在变化，重试一次通常就好']
+      frame_lost: ['这一步的页面已不存在', '所在 frame 已销毁，无法在当前页面校验'],
+      overlay_failed: ['定位成功，但画框失败', '元素存在，页面仍在变化；可重试一次']
     }
     const hit = reasons[data.reason] || ['无法校验', String(data.reason || '')]
     return { tone: 'is-bad', title: hit[0], sub: hit[1] }
@@ -3608,6 +3726,10 @@ function startEdit(step) {
     ElMessage.info('滑块参数在插入时设定，需要修改请删除这一步后重新插入')
     return
   }
+  if (step.type === 'captcha') {
+    ElMessage.info('验证码参数在插入时设定，需要修改请删除这一步后重新插入')
+    return
+  }
   const intent = step.intent || {}
   editing.value = {
     no: step.no,
@@ -3714,14 +3836,15 @@ function draftKindTypes(kind) {
   if (kind === 'ready') return ['page_ready']
   // 滑块没有「意图类型」可选：它就是一段固定流程，只有三个参数。
   if (kind === 'slider') return ['slider']
+  if (kind === 'captcha') return ['captcha']
   return ASSERT_TYPES
 }
 
 const draftTypes = computed(() => draft.value ? draftKindTypes(draft.value.kind) : [])
 const draftTitle = computed(() => ({ assert: '添加断言', sleep: '固定等待', ready: '等待加载',
-  slider: '添加滑块验证' })[draft.value?.kind] || '添加断言')
+  slider: '添加滑块验证', captcha: '添加验证码识别' })[draft.value?.kind] || '添加断言')
 const insertLabel = computed(() => ({ sleep: '插入固定等待', ready: '插入等待',
-  slider: '插入滑块步骤' })[draft.value?.kind] || '插入断言')
+  slider: '插入滑块步骤', captcha: '插入验证码步骤' })[draft.value?.kind] || '插入断言')
 
 // 三档的差别只在一句话里，选哪档要能立刻看懂在等什么。
 const readyNote = computed(() => {
@@ -3782,11 +3905,22 @@ function openDraft(kind, afterNo = null) {
     // 「等待加载」：默认就是用户嘴里说的「页面加载完」（load），超时 15 秒。
     state: 'load',
     readyTimeout: READY_TIMEOUT_DEFAULT,
-    // 滑块验证：容器留空 = 运行时按 canvas 尺寸自动识别。
+    // 滑块验证：留空 = 运行时按 canvas 尺寸自动识别；拾取后填的是「验证码在哪」。
     // 重试 2 次、单次 20 秒是实测够用的组合（一次约 30 秒）。
     sliderSelector: '',
     sliderAttempts: 2,
     sliderTimeout: 20,
+    sliderPicked: '',
+    // 验证码：两个位置都靠拾取，输入框留空时回放会从验证码附近往上找。
+    // 位数默认 0（不校验），因为字母码和算术题的位数不固定，写死会误判成识别失败。
+    captchaSelector: '',
+    captchaInputSelector: '',
+    captchaCharset: 'digits',
+    captchaLength: 0,
+    captchaAttempts: 2,
+    captchaPicked: '',
+    // 两个拾取按钮共用一个 picking 状态，用它区分这次点的是哪个。
+    pickField: '',
     // 高级默认收起，不勾就是立即断言。默认 30 秒比框架默认的 5 秒实用；
     // 刷新默认不勾——刷新会重置表单和登录态，只会让条件更难成立。
     allowWait: false,
@@ -4084,9 +4218,13 @@ function buildFormIntent(current) {
 }
 
 function insertFromForm() {
-  // 滑块不是 intent：它没有目标元素，也不是断言，走自己的接口。
+  // 滑块 / 验证码不是 intent：它们没有目标元素，也不是断言，走自己的接口。
   if (draft.value?.kind === 'slider') {
     insertSliderStep()
+    return
+  }
+  if (draft.value?.kind === 'captcha') {
+    insertCaptchaStep()
     return
   }
   let intent
@@ -4119,9 +4257,52 @@ async function insertSliderStep() {
   }
 }
 
-async function pickForDraft() {
+async function insertCaptchaStep() {
+  const current = draft.value
+  const selector = (current.captchaSelector || '').trim()
+  if (!selector) {
+    // 没有位置就没法识别。猜一个位置比报错更糟：会截到别的图，认出来的码填进去必错。
+    ElMessage.warning('请先点「拾取」在浏览器里点一下验证码图片')
+    return
+  }
+  current.inserting = true
+  try {
+    const { data } = await api.addRecordingCaptcha({
+      after_no: current.afterNo,
+      selector,
+      input_selector: (current.captchaInputSelector || '').trim(),
+      charset: current.captchaCharset,
+      length: current.captchaLength,
+      attempts: current.captchaAttempts,
+    })
+    applySession(data)
+    closeDraft()
+    ElMessage.success('已插入验证码识别步骤')
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    current.inserting = false
+  }
+}
+
+// 滑块拾取：优先用 id（短、稳），没有就退到录制时算好的绝对路径。
+// 绝对路径长一点，但不依赖 class 名；失效时只会退回自动识别，不会点错地方。
+function sliderSelectorFrom(snap) {  if (!snap) return ''
+  if (snap.id) {
+    try {
+      return '#' + CSS.escape(snap.id)
+    } catch {
+      return '#' + snap.id
+    }
+  }
+  return snap.css || ''
+}
+
+async function pickForDraft(field = '') {
   draft.value.pickBaseline = (session.value?.picks || []).length
   draft.value.picking = true
+  // 验证码有两个拾取入口，记住这次点的是哪个，结果回来才知道往哪填。
+  draft.value.pickField = field
   // 停止后浏览器仍然开着，拾取结果只能靠轮询拿回来（录制中本来就在轮询）。
   startPolling()
   await togglePick(true)
@@ -4209,6 +4390,18 @@ function stepDescription(step) {
       const attempts = cfg.attempts == null ? 2 : cfg.attempts
       const retry = attempts > 0 ? ` · 失败重试 ${attempts} 次` : ' · 不重试'
       return `过滑块验证（${selector || '自动识别容器'}${retry}）`
+    }
+    // 验证码：把「认什么」「几位」「输入框要不要自己找」写成一句。
+    case 'captcha': {
+      const cfg = step.captcha || {}
+      const kind = cfg.charset === 'alnum' ? '字母数字'
+        : (cfg.charset === 'any' ? '任意字符' : '数字')
+      const bits = [kind]
+      if (cfg.length) bits.push(`${cfg.length} 位`)
+      bits.push(String(cfg.input_selector || '').trim() ? '指定输入框' : '自动找输入框')
+      const attempts = cfg.attempts == null ? 2 : cfg.attempts
+      if (attempts > 0) bits.push(`失败重试 ${attempts} 次`)
+      return `识别验证码并填入（${bits.join(' · ')}）`
     }
     case 'assert':
     case 'wait': return intentDescription(step.intent, step.target)
@@ -4312,49 +4505,45 @@ function statusHintBase(step) {
   const status = effectiveStatus(step)
   const chosen = pickFor(config.framework, step.target?.candidates || [])
   if (status === 'unique' && chosen?.kind === 'role_bare') {
-    return '按 role 定位：页面上只有这一个同类元素。新增同类控件后会退化为「匹配 N 个取第 k 个」'
+    return 'role 定位，当前唯一；新增同类控件后按序号取'
   }
   if (status === 'unique' && ['row_scoped', 'rf_row_scoped'].includes(chosen?.kind)) {
-    return '按行锚定：先用这一行的业务字段锁定是哪一行，再在行内找目标。'
-      + '列表增删、换个排序都不会指错行——比「第 N 行的按钮」稳，也是人工维护这类页面时的写法'
+    return '按行锚定：先锁业务行，再在行内定位'
   }
   if (status === 'unique' && chosen?.kind === 'rf_id_loose') {
-    return '按 id 定位：这个 id 里带数字。它可能是业务单号（一直有效），也可能是页面渲染时自增的序号'
-      + '（重新加载就变了）。回放前请确认一次；如果这条元素还能按 name / aria / 文本定位，优先用那些'
+    return '按 id 定位，含数字；刷新可能变化，优先 name / aria'
   }
   if (status === 'page_gone') {
-    return '录制时这条定位是有效的；停止录制时页面已经跳到别的地址，没法在当前页面复核。生成会用录制时的定位，建议回放确认。'
+    return '页面已翻走，无法复核；按录制定位生成'
   }
   if (status === 'unique' && ['class_part', 'rf_class_part'].includes(chosen?.kind)) {
-    return '按 class 名定位：取的是 CSS Modules / BEM 类名里去掉构建哈希的那半截，'
-      + '改版重新打包也还在，且不依赖元素在第几个位置。它不是语义属性，页面改了类名仍会失效'
+    return '按 class 定位，去构建哈希；改类名会失效'
   }
-  if (status === 'unique') return '语义定位，页面上唯一命中'
-  if (status === 'fragile') return '结构定位：依赖页面层级，改版后可能失效'
+  if (status === 'unique') return '语义定位，唯一命中'
+  if (status === 'fragile') return '结构定位，改版可能失效'
   if (status === 'ambiguous') {
     return step.target?.page_gone
-      ? '录制时匹配到多个元素；停止时页面已经翻走，没法复核。生成会按录制时的序号取，请回放确认'
-      : '匹配到多个元素，生成时按录制时点的序号取'
+      ? '匹配多个元素；页面已翻走，回放确认'
+      : '匹配多个元素，按录制序号取'
   }
   if (status === 'unverified') {
     return step.target?.page_gone
-      ? '录制时就没数到这个元素（页面当时已经翻走），停止时也回不到那页；定位按录制快照取，生成不受影响，回放时确认'
-      : '这一步操作后元素就从页面上消失了（下拉/浮层收起、局部重渲染或跳转都算），没来得及数一次；定位按录制快照取，生成不受影响，回放时确认'
+      ? '页面已翻走且未复核；按录制定位生成'
+      : '元素已消失，未复核；按录制定位生成'
   }
-  if (status === 'stale') return '重新校验时还找得到，但已经不是你录制时点的那个元素'
+  if (status === 'stale') return '元素已变化，非录制时目标'
   if (status === 'suspect') {
-    return '这几条「唯一」的定位，命中的元素都不是你点的那个（是页面上另一处同名/同结构的元素）。'
-      + '把它写进脚本会点错地方，所以生成时不会采用——请点右侧准星重新框选，或手工改成正确的那条'
+    return '定位命中其他元素，生成不采用；请重新框选'
   }
   if (status === 'chosen') {
     const picked = step.target?.chosen || {}
     const hit = (step.target?.candidates || []).find(c => c.desc === picked.desc)
     const total = hit?.count
-    const caveat = step.target?.page_gone ? '；停止时页面已经翻走，未能复核' : ''
-    return `你确认过：页面上匹配到 ${total ?? '?'} 个，取第 ${(picked.index ?? 0) + 1} 个${caveat}`
+    const caveat = step.target?.page_gone ? '；页面已翻走，未复核' : ''
+    return `已确认：匹配 ${total ?? '?'} 个，取第 ${(picked.index ?? 0) + 1} 个${caveat}`
   }
   if (status === 'invalid') {
-    return '你选的序号，在停止录制时的页面上已经不存在了：生成出来会点不到，需要重新选'
+    return '序号已失效，需重新选择'
   }
   return ''
 }
@@ -4364,7 +4553,7 @@ function statusHintBase(step) {
 function statusHint(step) {
   const base = statusHintBase(step)
   return step.target?.vanished_after
-    ? base + '（这个元素点完就从页面上消失了，计数取自按下鼠标那一刻）'
+    ? base + '（元素点后消失，计数取按下时）'
     : base
 }
 
@@ -4876,6 +5065,8 @@ const replayExtra = computed(() => {
 })
 
 // 回放要起浏览器把录制重跑一遍，步骤多时十几秒，必须给进度反馈。
+// 注意：界面上的「快速校验」按钮已下线（见 rail-foot 的注释），这个函数目前没有
+// 调用方。后端接口保留着，恢复入口时直接把按钮那行放出来即可，不用改这里。
 async function runReplay() {
   if (replaying.value) return
   replaying.value = true
@@ -5774,6 +5965,9 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .slider-body { display:flex; flex-direction:column; gap:8px; }
 .slider-field { display:flex; align-items:center; gap:8px; }
 .slider-field .poll-label { flex:none; }
+.slider-field .el-input { flex:1; min-width:0; }
+/* 按钮和下拉不能被 flex 压缩：不加这句，窄栏下「拾取」会被挤掉一半。 */
+.slider-field .el-button, .slider-field .el-select { flex:none; }
 .slider-body .poll-row { margin-top:2px; }
 .sleep-label { font-size:13px; color:var(--ink-2); }
 .sleep-unit { font-size:13px; color:var(--muted); }

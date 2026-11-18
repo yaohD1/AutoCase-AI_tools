@@ -108,7 +108,7 @@
         <div v-if="selected.status === 'generated'" class="rec-commit">
           <div class="rec-commit-label">提交说明</div>
           <div class="rec-commit-row">
-            <el-input v-model="commitMessage" class="form-input" maxlength="500" placeholder="这次生成的简短说明" />
+            <el-input v-model="commitMessage" class="form-input" maxlength="500" placeholder="提交说明（可选）" />
             <el-button type="primary" :loading="committing" :disabled="selected.changed_since_generation" @click="commitSelected">
               提交到 Git
             </el-button>
