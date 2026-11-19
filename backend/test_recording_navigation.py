@@ -186,12 +186,13 @@ class NavigationRecordingTest(unittest.TestCase):
         self.assertEqual(self._types(session), ['goto', 'reload', 'click'])
         self.assertEqual([step['no'] for step in session.ir()], [1, 2, 3])
 
-    def test_reload_after_stop_is_not_recorded_but_the_step_can_be_added(self):
+    def test_reload_step_can_still_be_added_after_stop(self):
+        """停止即关浏览器之后，插刷新步骤仍然可用：它只是往列表里加一条。
+
+        真正的刷新发生在回放时；录制期刷不刷不该成为能否编辑步骤的前提。
+        """
         session = self._record()
         session.stop()
-        _in_recording_thread(session, lambda: session._test_page.reload())
-        self.assertTrue(_wait_for(lambda: len(session.ir()) == 1, timeout=2), self._types(session))
-        # 停止后插这一步只是编辑列表，不该再去动浏览器
         session.add_reload_step()
         self.assertEqual(self._types(session), ['goto', 'reload'])
 

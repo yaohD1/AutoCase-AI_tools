@@ -311,17 +311,26 @@ class RecordingSession(object):
     def __init__(self, base_url, headless=False, driver=None, panel_url=None,
                  panel_ratio=0.45, hud_panel=False, embed_url=None,
                  ask_daemon=None, ask_model=None, ask_config=None, workspace=None,
-                 framework=None, panel_float=False, panel_width=520):
+                 framework=None, panel_float=False, panel_width=520,
+                 restore_steps=None, draft_id=None, theme=None):
         self.id = uuid.uuid4().hex
         self.base_url = base_url
         # 这次录制要按哪个框架生成。以前它只活在前端 state 和面板 URL 里，后端每次请求
         # 都各自兜底成 playwright-ts——面板丢了参数时定位会静默换写法，界面上看不出来。
         self.framework = (framework or '').strip() or None
+        # 录制窗口（嵌入外壳 / 并排面板 / 回放窗口）都是全新的浏览器 profile，
+        # localStorage 里没有主窗口那份 ac-theme。主题只能随地址带过去，
+        # 否则这些窗口会退回系统偏好（Playwright 默认还是浅色），一片白。
+        self._theme = theme if theme in ('dark', 'light') else None
         # 工作区在录制开始时可能还没填（用户可以边录边配）。为空时动作库只在内存里，
         # 封装的调用照常工作，只是关掉窗口就没了——界面上会明说。
         self.workspace = str(workspace) if workspace else None
         self.status = 'starting'
         self.error = None
+        # 停止收尾的两个阶段，前端弹窗靠它们决定「继续转圈」还是「可以消失」：
+        # closing = 已经在关（不再接命令），close_done = 浏览器真的关完了。
+        self._closing = False
+        self._shutdown_done = False
         self._headless = headless
         # 录制期常驻的解析进程：起停都跟着录制走，失败只影响解析速度。
         # 测试里传 False 关掉，否则每个浏览器用例都会真起一个 opencode。
@@ -362,6 +371,9 @@ class RecordingSession(object):
         self._replay_context = None
         self._replay_page = None
         self._replay_closing = False
+        # 正在关闭：关窗要几百毫秒到几秒（Playwright 收 context + 面板进程），
+        # 这期间录制线程还活着但不再处理命令，接口要立刻回「录制已结束」而不是排进队列等超时。
+        self._closed = False
         # 被测窗口的 HWND 与「粘合」线程：拖其中一个，另一个跟着走。
         self._main_hwnd = 0
         self._glue = None
@@ -391,6 +403,11 @@ class RecordingSession(object):
         self._heal_history = []
         # 元素身份 → 别名。同一个元素复用同一个别名，不同元素撞名时加后缀（见 _alias_for）。
         self._alias_keys = {}
+        # 存档续录：这份会话是从哪条草稿恢复的，再次保存时覆盖同一条。
+        self._draft_id = draft_id
+        # 恢复后浏览器的第一次导航对应存档里的「打开页面」，不能再记一条 goto。
+        self._restored = False
+        self._restore(restore_steps or [])
         self._wired = set()
         self._last_url = {}
         # frame id → 当前 document 的身份（performance.timeOrigin）。同一个 document
@@ -434,7 +451,8 @@ class RecordingSession(object):
     def start_new(cls, base_url, headless=False, driver=None, panel_url=None,
                   panel_ratio=0.45, hud_panel=False, embed_url=None,
                   ask_daemon=None, ask_model=None, ask_config=None, workspace=None,
-                  framework=None, panel_float=False, panel_width=520):
+                  framework=None, panel_float=False, panel_width=520,
+                  restore_steps=None, draft_id=None, theme=None):
         with cls._current_lock:
             current = cls._current
             if current is not None and current.status in ('starting', 'recording'):
@@ -446,7 +464,8 @@ class RecordingSession(object):
                       panel_ratio=panel_ratio, hud_panel=hud_panel, embed_url=embed_url,
                       ask_daemon=ask_daemon, ask_model=ask_model, ask_config=ask_config,
                       workspace=workspace, framework=framework,
-                      panel_float=panel_float, panel_width=panel_width)
+                      panel_float=panel_float, panel_width=panel_width,
+                      restore_steps=restore_steps, draft_id=draft_id, theme=theme)
         with cls._current_lock:
             cls._current = session
         session._thread.start()
@@ -488,11 +507,26 @@ class RecordingSession(object):
         return self._call('replay_window_close', timeout=15)
 
     def stop(self):
-        """停止记录，但把浏览器留着：停止后仍可拾取元素、验证断言。"""
+        """停止记录，并把录制浏览器关掉（嵌入模式除外：那是用户的操作界面）。
+
+        停止后生成、回放、改步骤都不依赖那个窗口；定位复核已经在停止的那一刻
+        算完写进步骤，所以没有「留着窗口再修一下」的诉求。
+        """
+        # 停止即结束：浏览器已经关了、录制线程也退了，再点一次不该报「录制已结束」。
+        thread = getattr(self, '_thread', None)
+        if thread is None or not thread.is_alive() or getattr(self, '_closed', False):
+            return self.snapshot()
         return self._call('stop')
 
     def close_browser(self):
-        """关掉浏览器与面板窗口（录制结果保留）。"""
+        """关掉浏览器与面板窗口（录制结果保留）。
+
+        独立窗口布局下停止时就已经关了，这里再关一次要按幂等处理——
+        嵌入模式仍需要这个显式出口。
+        """
+        thread = getattr(self, '_thread', None)
+        if thread is None or not thread.is_alive() or getattr(self, '_closed', False):
+            return dict(self.snapshot(), browser_open=False)
         return self._call('close', timeout=CLOSE_TIMEOUT)
 
     def storage_state(self):
@@ -543,8 +577,16 @@ class RecordingSession(object):
         return self._call('set_chosen', no=no, desc=desc, index=index, timeout=COMMAND_TIMEOUT)
 
     def set_degraded(self, no):
-        """用户明确「这一步允许降级」：不再追问，生成时按最窄候选 + 录制时的序号写。"""
-        return self._call('degrade', no=no, timeout=COMMAND_TIMEOUT)
+        """用户明确「这一步允许降级」：不再追问，生成时按最窄候选 + 录制时的序号写。
+
+        纯内存操作，不碰页面。停止即关浏览器之后，用户仍然要能说「这一步就这样吧」——
+        否则带待确认定位的录制会卡在「改不了也生成不了」上。线程还活着时走命令通道，
+        是为了和录制线程里的步骤写入串行。
+        """
+        thread = getattr(self, '_thread', None)
+        if thread is not None and thread.is_alive() and not getattr(self, '_closed', False):
+            return self._call('degrade', no=no, timeout=COMMAND_TIMEOUT)
+        return self._degrade_now(no)
 
     def cancel(self):
         """内部中止：关浏览器但不重校验定位。界面上没有入口（只有「停止录制」），
@@ -584,8 +626,9 @@ class RecordingSession(object):
         return self._call('goto_back')
 
     def _call(self, name, timeout=COMMAND_TIMEOUT, **kwargs):
-        # 用线程是否存活判断，而不是状态：停止后浏览器还开着，命令照样要能发进去。
-        if not self._thread.is_alive():
+        # 用线程是否存活判断，而不是状态：停止后（嵌入模式）浏览器还开着，命令照样要能发进去。
+        # `_closed` 覆盖「正在关窗」这一段：线程还在，但已经没有循环去取命令了。
+        if getattr(self, '_closed', False) or not self._thread.is_alive():
             raise RecordingError('录制已结束')
         reply = queue.Queue(maxsize=1)
         self._commands.put((name, kwargs, reply))
@@ -652,6 +695,10 @@ class RecordingSession(object):
                 'panel_hidden': bool(getattr(self, '_panel_hidden', False)),
                 # 浏览器的生命周期比录制长：停止后仍开着，前端据此决定能否继续拾取 / 验证。
                 'browser_open': self._browser_open(),
+                # 停止收尾进度：closing 时前端显示转圈，close_done 时才收起弹窗。
+                # 两个值都走 getattr：测试 / 工具会绕过 __init__ 直接造会话。
+                'closing': bool(getattr(self, '_closing', False)),
+                'close_done': bool(getattr(self, '_shutdown_done', False)),
                 # 回放窗口是否开着：前端据此把按钮文案换成「切换到回放窗口」，避免点两次。
                 'replay_window': getattr(self, '_replay_page', None) is not None,
                 # 有没有抓到登录态：生成本身不依赖它，但「跑一遍」依赖。
@@ -661,10 +708,16 @@ class RecordingSession(object):
                 # 生成进度：主界面和录制面板是两个窗口，只靠各自的本地 loading
                 # 会出现「一边点完，另一边还能点」，所以状态放服务端一起返回。
                 'emit': progress.PROGRESS.snapshot(),
+                # 这份会话是从哪条存档恢复的 / 存过哪条：前端据此把按钮写成
+                # 「更新存档」，也避免同一段录制在列表里堆出好几条。
+                'draft_id': getattr(self, '_draft_id', None),
             }
 
     def _browser_open(self):
-        return (getattr(self, '_browser', None) is not None
+        # `_closed` 先判：关窗要几百毫秒到几秒，这期间 `_browser` 还没置空，
+        # 界面轮询会看到「已经回话说关了、快照又说开着」。
+        return (not getattr(self, '_closed', False)
+                and getattr(self, '_browser', None) is not None
                 and self.status in ('starting', 'recording', 'stopped', 'idle_timeout'))
 
     def _capture_storage_state(self):
@@ -771,6 +824,27 @@ class RecordingSession(object):
         if primary is not None:
             return ('locator', primary['desc'], id(frame))
         return ('path', snap.get('css') or '', snap.get('tag') or '', id(frame))
+
+    def _restore(self, steps):
+        """把存档的步骤灌回会话（续录）。
+
+        存档里没有 `_frame` / `_doc`——那是 Playwright 的页面对象，不能序列化。
+        代价是这些步骤在停止时不会参与定位复核（`_revalidate_all` 只处理带 frame
+        的步骤），保留录制时算出的定位；续录时页面往往已经换了一屏，这正合适。
+
+        别名要预占：`_alias_for` 靠 `_alias_keys` 判重，不预占的话续录的新元素会
+        撞上旧别名，生成时两个不同元素叫同一个名字。
+        """
+        if not steps:
+            return
+        self._steps = [copy.deepcopy(s) for s in steps]
+        self._renumber()
+        # 浏览器马上就会打开起始地址，那次导航对应存档里的第一步，标记一下别重复记。
+        self._restored = bool(self._steps)
+        for step in self._steps:
+            alias = (step.get('target') or {}).get('alias')
+            if alias:
+                self._alias_keys['restored:%s' % alias] = alias
 
     def _alias_for(self, target, key):
         """返回该元素在本次录制内唯一的别名。调用方需持有 self._lock。"""
@@ -1191,7 +1265,13 @@ class RecordingSession(object):
         刷新只走这条路，不做自动检测：自动检测分不清「SPA 启动时的同文档导航」
         和「用户真的刷了」，已经证明会多记。显式添加还有个好处是能补录——
         行内「+」可以让它落在任意一步之后。
+
+        停止即关浏览器之后仍然可用：这一步不读页面内容，只是往列表里加一条，
+        真正的刷新发生在回放时。录制线程还在时才需要走命令通道去实际刷新。
         """
+        thread = getattr(self, '_thread', None)
+        if thread is None or not thread.is_alive() or getattr(self, '_closed', False):
+            return self._add_reload(after_no)
         return self._call('reload', after_no=after_no)
 
     def add_slider_step(self, config=None, after_no=None):
@@ -1463,11 +1543,22 @@ class RecordingSession(object):
             self._touch()
             try:
                 if name == 'stop':
-                    # 停止是幂等的：浏览器还开着，再点一次不该报错。
                     if self.status == 'recording':
                         result = self._mark_stopped('stopped', revalidate=True)
-                        # 停止后浏览器还开着，用户可能补一条断言再解析，所以延迟杀；
-                        # 关浏览器 / 闲置超时会走 _shutdown，那里是立即杀。
+                        # 停止 = 结束：浏览器不再保留，生成 / 回放 / 改步骤都不需要它。
+                        # 嵌入模式例外：那个浏览器就是用户的操作界面（被测页在 iframe 里），
+                        # 关掉等于把人从正在看的页面上踢出去，所以仍然留着。
+                        if not self._embed:
+                            # 面板窗口先不关：前端正靠它显示「正在关闭录制窗口」的转圈。
+                            # 收尾（解析进程约 5s + 关浏览器）走完后，面板由 _shutdown 最后
+                            # 收掉，转圈随窗口一起消失；在此之前 snapshot 会回 closing=true，
+                            # 关完后回 close_done=true，主窗口据此收弹窗。
+                            self._closing = True
+                            reply.put((True, dict(result, browser_open=False,
+                                                 closing=True, close_done=False)))
+                            self._safe_shutdown()
+                            return True
+                        # 嵌入模式确实还需要它：延迟收解析池，用户可能补一条断言再解析。
                         self._stop_ask_pool(delay=ASK_STOP_DELAY_SECONDS)
                     else:
                         result = self.snapshot()
@@ -1477,7 +1568,7 @@ class RecordingSession(object):
                     self._capture_storage_state()
                     result = dict(self.snapshot(), browser_open=False)
                     reply.put((True, result))
-                    self._shutdown()
+                    self._safe_shutdown()
                     return True
                 elif name == 'cancel':
                     result = self._mark_stopped('cancelled', revalidate=False)
@@ -1530,11 +1621,15 @@ class RecordingSession(object):
             except Exception as exc:
                 reply.put((False, str(exc)))
             if name == 'cancel':
-                self._shutdown()
+                self._safe_shutdown()
                 return True
 
     def _mark_stopped(self, status, revalidate):
-        """结束记录：不再入库新步骤，但浏览器和面板都留着。"""
+        """结束记录：不再入库新步骤。
+
+        浏览器由调用方决定去留：用户点「停止」时会在拿到快照后调 `_shutdown`
+        （嵌入模式除外），其余路径（闲置超时 / 手关窗口 / 取消）本来就已经关了。
+        """
         self._process_inbox()
         # 先抓登录态，再重校验定位：重校验会跳页面，抓晚了拿到的可能不是录制时那份。
         self._capture_storage_state()
@@ -1549,10 +1644,31 @@ class RecordingSession(object):
         self._push_hud()
         return self.snapshot()
 
+    def _safe_shutdown(self):
+        """`_shutdown` 的兜底包装。
+
+        走到这里时结果已经回过请求方，再抛一次会让 `_drain_commands` 的 except
+        对同一个 reply 重复 put —— 队列只有一格，录制线程会永久卡在那里。
+        """
+        try:
+            self._shutdown()
+        except Exception:
+            pass
+
     def _shutdown(self):
-        """关面板窗口与浏览器；状态保持不变（录到的结果仍然有效）。"""
+        """关面板窗口与浏览器；状态保持不变（录到的结果仍然有效）。
+
+        任何一步失败都不能往外抛：调用方（`_drain_commands`）已经把结果回过请求方了，
+        再抛一次会走它的 except 分支对同一个 reply 再 put 一次——队列只有一格，会死锁。
+        """
+        # 先立旗子：关窗期间线程还活着，但已经没有循环取命令了，接口不能傻等。
+        self._closed = True
+        self._closing = True
         # 解析进程跟着浏览器一起收：浏览器都关了，没人会再插断言。
-        self._stop_ask_pool()
+        try:
+            self._stop_ask_pool()
+        except Exception:
+            pass
         try:
             for page in list(self._context.pages) if self._context is not None else []:
                 try:
@@ -1580,8 +1696,14 @@ class RecordingSession(object):
         except Exception:
             pass
         # 无壳面板是独立进程，粘合线程也要收掉，否则钩子会一直挂在已销毁的窗口上。
-        self._stop_glue()
-        self._cleanup_panel_app()
+        try:
+            self._stop_glue()
+        except Exception:
+            pass
+        try:
+            self._cleanup_panel_app()
+        except Exception:
+            pass
         self._panel_page = None
         self._panel_context = None
         try:
@@ -1589,7 +1711,12 @@ class RecordingSession(object):
                 self._browser.close()
         except Exception:
             pass
+        # 无论 close() 成没成，引用都要断掉：snapshot 靠它判断 browser_open，
+        # 留着就变成「接口说关了、界面说还开着」。
         self._browser = None
+        # 到这一步面板和被测浏览器都已经收完（面板由上面的 cleanup 关掉），
+        # 前端轮询看到它就可以把「正在关闭」的弹窗收掉了。
+        self._shutdown_done = True
 
     def _touch(self):
         self._last_activity = time.time()
@@ -1678,11 +1805,16 @@ class RecordingSession(object):
         parts = urlparse(base)
         if not parts.scheme or not parts.netloc:
             return None
-        query = urlencode({
+        params = {
             'framework': framework or self.framework or '',
             # window=1：回放页据此知道自己是「被管理窗口」，退出走 close 而不是路由跳转。
             'window': '1',
-        })
+        }
+        # 测试 / 工具会绕过 __init__ 造会话，主题按缺省处理（不带参数）。
+        theme = getattr(self, '_theme', None)
+        if theme:
+            params['theme'] = theme
+        query = urlencode(params)
         return '%s://%s/recording/replay?%s' % (parts.scheme, parts.netloc, query)
 
     def _open_replay_window_now(self, framework):
@@ -1846,6 +1978,34 @@ class RecordingSession(object):
                 exited_at = None
             time.sleep(0.2)
         return 0
+
+    def _close_panel_now(self):
+        """立刻收掉编排面板窗口，被测浏览器仍然留着。
+
+        停止时用户已经确认结束，面板再停在「已停止」上只是让人干等：关一扇
+        `--app` 窗口要先杀一个独立浏览器进程、再删一份临时 profile，而定位复核
+        和关浏览器都排在这后面。复核用的是被测页面（`_context`），面板是另一个
+        进程 / context，先关不影响结果。
+
+        幂等：`_cleanup_panel_app` 用完即把句柄与进程置空，`_shutdown` 再走一遍
+        不会重复杀；兜底形态的面板 context 这里直接关掉并断引用。
+        """
+        try:
+            # 先停粘合线程：它还在按面板窗口句柄定时摆位，窗口没了再摆只会报错。
+            self._stop_glue()
+        except Exception:
+            pass
+        try:
+            self._cleanup_panel_app()
+        except Exception:
+            pass
+        if self._panel_context is not None:
+            try:
+                self._panel_context.close()
+            except Exception:
+                pass
+            self._panel_context = None
+            self._panel_page = None
 
     def _cleanup_panel_app(self):
         """收掉 --app 面板窗口和它的临时 profile。
@@ -2625,6 +2785,17 @@ class RecordingSession(object):
         # 停止 / 暂停期间浏览器还开着，用户照样会点，但这些动作不该入库。
         if self.status != 'recording' or self._paused:
             return
+        # 续录：浏览器打开的就是存档第一步那个地址，这次导航已经记过了。
+        # 不吞掉的话，步骤列表开头会出现两条一样的「打开页面」。
+        insert_head = False
+        if getattr(self, '_restored', False):
+            self._restored = False
+            if self._steps and self._steps[0].get('type') == 'goto':
+                self._schedule_hud()
+                return
+            # 存档的第一步不是「打开页面」（从中间开始录 / 老存档）：
+            # 补的这条要插到最前面，追加到末尾会变成「先点后开页」。
+            insert_head = True
         with self._lock:
             prev = self._steps[-1] if self._steps else None
             # 新标签页的第一次跳转只补全 url，不单独记一步。
@@ -2651,8 +2822,12 @@ class RecordingSession(object):
                 return
             else:
                 step_type = 'goto'
-            self._steps.append(ir.make_step(step_type, no=0, url=url,
-                                            page_index=self._page_index(page)))
+            step = ir.make_step(step_type, no=0, url=url,
+                                page_index=self._page_index(page))
+            if insert_head:
+                self._steps.insert(0, step)
+            else:
+                self._steps.append(step)
             self._renumber()
         # 导航后文档是新的，浮层得按当前步骤重画一次。
         self._schedule_hud()

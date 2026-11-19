@@ -26,18 +26,20 @@
         <div class="rec-list-scroll">
           <button
             v-for="item in records"
-            :key="item.id"
+            :key="item.key"
             type="button"
-            :class="['rec-item', { 'is-active': selected && selected.id === item.id }]"
-            :title="item.target_path"
-            @click="openRecord(item.id)"
+            :class="['rec-item', { 'is-active': selected && selected.key === item.key }]"
+            :title="item.kind === 'draft' ? item.base_url : item.target_path"
+            @click="openRecord(item)"
           >
-            <span class="rec-name">{{ baseName(item.target_path) }}</span>
-            <span :class="['chip', recordStatusTone(item.status)]">{{ recordStatusLabel(item.status) }}</span>
-            <span class="rec-path">{{ dirName(item.target_path) }}</span>
-            <span class="rec-time">{{ formatDate(item.created_at) }}</span>
+            <span class="rec-name">{{ item.kind === 'draft' ? (item.title || '未命名录制') : baseName(item.target_path) }}</span>
+            <span :class="['chip', item.kind === 'draft' ? 'is-warn' : recordStatusTone(item.status)]">
+              {{ item.kind === 'draft' ? '录制存档' : recordStatusLabel(item.status) }}
+            </span>
+            <span class="rec-path">{{ item.kind === 'draft' ? `${item.step_count} 步 · ${shortUrl(item.base_url)}` : dirName(item.target_path) }}</span>
+            <span class="rec-time">{{ formatDate(item.updated_at || item.created_at) }}</span>
           </button>
-          <div v-if="!records.length && !loading" class="rec-empty">还没有生成记录</div>
+          <div v-if="!records.length && !loading" class="rec-empty">还没有记录</div>
         </div>
       </div>
 
@@ -45,32 +47,69 @@
       <div v-if="selected" class="rec-detail">
         <div class="rec-detail-head">
           <div class="rec-detail-main">
-            <div class="rec-title">{{ baseName(selected.target_path) }}</div>
-            <div class="rec-path is-full" :title="selected.target_path">{{ dirName(selected.target_path) }}</div>
+            <div class="rec-title">{{ selected.kind === 'draft' ? (selected.title || '未命名录制') : baseName(selected.target_path) }}</div>
+            <div class="rec-path is-full" :title="selected.kind === 'draft' ? selected.base_url : selected.target_path">
+              {{ selected.kind === 'draft' ? selected.base_url : dirName(selected.target_path) }}
+            </div>
           </div>
           <div class="rec-detail-actions">
-            <span :class="['chip', recordStatusTone(selected.status)]">{{ recordStatusLabel(selected.status) }}</span>
-            <button
-              v-if="selected.status === 'generated' || selected.status === 'committed'"
-              type="button"
-              class="list-act is-danger"
-              :disabled="reverting"
-              @click="revertSelected"
-            >{{ selected.status === 'generated' ? '撤销写入' : '回滚提交' }}</button>
+            <template v-if="selected.kind === 'draft'">
+              <span class="chip is-warn">录制存档</span>
+              <button type="button" class="list-act is-danger" :disabled="deletingDraft" @click="deleteDraft">删除</button>
+              <el-button type="primary" size="small" :loading="resuming" :disabled="!selected.step_count" @click="resumeDraft">
+                继续录制
+              </el-button>
+            </template>
+            <template v-else>
+              <span :class="['chip', recordStatusTone(selected.status)]">{{ recordStatusLabel(selected.status) }}</span>
+              <button
+                v-if="selected.status === 'generated' || selected.status === 'committed'"
+                type="button"
+                class="list-act is-danger"
+                :disabled="reverting"
+                @click="revertSelected"
+              >{{ selected.status === 'generated' ? '撤销写入' : '回滚提交' }}</button>
+            </template>
           </div>
         </div>
 
         <div class="rec-meta">
           <span>{{ frameworkName(selected.framework) }}</span>
           <span class="rec-sep">·</span>
-          <span>模型 {{ selected.model || '—' }}</span>
-          <span class="rec-sep">·</span>
-          <span>{{ formatDate(selected.created_at) }}</span>
-          <span v-if="(selected.steps || []).length" class="rec-sep">·</span>
-          <span v-if="(selected.steps || []).length">{{ selected.steps.length }} 个步骤</span>
+          <template v-if="selected.kind === 'draft'">
+            <span>{{ selected.step_count }} 个步骤</span>
+            <span class="rec-sep">·</span>
+            <span>更新于 {{ formatDate(selected.updated_at) }}</span>
+          </template>
+          <template v-else>
+            <span>模型 {{ selected.model || '—' }}</span>
+            <span class="rec-sep">·</span>
+            <span>{{ formatDate(selected.created_at) }}</span>
+            <span v-if="(selected.steps || []).length" class="rec-sep">·</span>
+            <span v-if="(selected.steps || []).length">{{ selected.steps.length }} 个步骤</span>
+          </template>
         </div>
 
         <div class="rec-scroll">
+          <!-- 草稿：只渲染步骤清单。没有文件可预览、没有提交可做，把生成记录那套搬过来只会误导。 -->
+          <template v-if="selected.kind === 'draft'">
+            <div class="rec-note">
+              这是一次未完成的录制。点「继续录制」会重新打开浏览器并恢复这些步骤，需要重新登录一次（存档不保存登录态）。
+            </div>
+            <div v-if="(selected.steps || []).length" class="rec-block">
+              <div class="rec-label">已保存的步骤</div>
+              <div class="rec-steps">
+                <div v-for="(step, index) in selected.steps" :key="step.no" class="rec-step">
+                  <span class="rec-step-no">{{ index + 1 }}</span>
+                  <span class="rec-step-kind">{{ stepKindLabel(step.type) }}</span>
+                  <span class="rec-step-text">{{ step.text || step.value || (step.target && step.target.alias) || '' }}</span>
+                </div>
+              </div>
+            </div>
+            <div v-else class="rec-empty">这条存档里没有步骤</div>
+          </template>
+
+          <template v-else>
           <div v-if="selected.changed_since_generation && selected.status === 'generated'" class="rec-note is-warn">
             文件在生成后已被改动或删除，提交和撤销都会被拒绝。请先核对文件内容。
           </div>
@@ -102,10 +141,11 @@
             <div class="rec-label">生成 Agent 的说明</div>
             <div class="rec-reply">{{ selected.reply }}</div>
           </div>
+          </template>
         </div>
 
         <!-- 提交盒：只有未提交时出现，永远是页面里唯一的蓝色主行动 -->
-        <div v-if="selected.status === 'generated'" class="rec-commit">
+        <div v-if="selected.kind !== 'draft' && selected.status === 'generated'" class="rec-commit">
           <div class="rec-commit-label">提交说明</div>
           <div class="rec-commit-row">
             <el-input v-model="commitMessage" class="form-input" maxlength="500" placeholder="提交说明（可选）" />
@@ -123,10 +163,14 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import api from '../api'
+import { useTheme } from '../composables/useTheme'
+
+// 续录会另起一个浏览器窗口，主题得跟着当前这个窗口走，否则面板会变回浅色。
+const { theme: appTheme } = useTheme()
 
 const FRAMEWORKS = [
   { value: 'robot-selenium', label: 'Robot Framework（SeleniumLibrary）' },
@@ -134,7 +178,8 @@ const FRAMEWORKS = [
 ]
 const STEP_LABELS = {
   goto: '打开页面', click: '点击', fill: '输入', select: '选择', new_page: '新标签页',
-  assert: '断言', wait: '等待', sleep: '固定等待'
+  assert: '断言', wait: '等待', sleep: '固定等待', press: '按键', reload: '刷新页面',
+  slider: '滑块验证', captcha: '验证码', pick: '拾取元素'
 }
 
 const records = ref([])
@@ -143,22 +188,35 @@ const selected = ref(null)
 const commitMessage = ref('')
 const committing = ref(false)
 const reverting = ref(false)
+const resuming = ref(false)
+const deletingDraft = ref(false)
 // 从录制页带 ?id= 跳过来时优先选中那一条
 const route = useRoute()
-const wantedId = ref(typeof route.query.id === 'string' ? route.query.id : '')
+const router = useRouter()
+const wantedId = ref(typeof route.query.id === 'string' ? `generation:${route.query.id}` : '')
 
-const pendingCount = computed(() => records.value.filter(item => item.status === 'generated').length)
+// 未提交只算生成记录：录制存档还没有文件，谈不上提交。
+const pendingCount = computed(() => records.value.filter(item => item.kind !== 'draft' && item.status === 'generated').length)
 
 onMounted(load)
 
 async function load() {
   loading.value = true
   try {
-    const { data } = await api.listRecordingGenerations()
-    records.value = data.generations || []
+    // 两个来源合成一个列表：录制存档（没录完的）和生成记录（已写文件的）。
+    // 排序按最后一次动过的时间：刚存过的存档应该排在最上面。
+    const [gens, draftRows] = await Promise.all([
+      api.listRecordingGenerations(),
+      api.listRecordingDrafts()
+    ])
+    const merged = [
+      ...(gens.data.generations || []).map(row => ({ ...row, kind: 'generation', key: `generation:${row.id}` })),
+      ...(draftRows.data.drafts || []).map(row => ({ ...row, kind: 'draft', key: `draft:${row.id}` }))
+    ].sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')))
+    records.value = merged
     // 默认选中最新一条：避免右半屏永远是「选择一条记录」的空态。
-    const target = records.value.find(item => item.id === wantedId.value) || records.value[0]
-    if (target && (!selected.value || selected.value.id !== target.id)) await openRecord(target.id)
+    const target = merged.find(item => item.key === wantedId.value) || merged[0]
+    if (target && (!selected.value || selected.value.key !== target.key)) await openRecord(target)
     if (!target) selected.value = null
   } catch (error) {
     ElMessage.error(errorText(error))
@@ -168,17 +226,75 @@ async function load() {
 }
 
 async function reload() {
-  if (selected.value) wantedId.value = selected.value.id
+  if (selected.value) wantedId.value = selected.value.key
   await load()
 }
 
-async function openRecord(id) {
+async function openRecord(item) {
   try {
-    const { data } = await api.getRecordingGeneration(id)
-    selected.value = data
+    if (item.kind === 'draft') {
+      const { data } = await api.getRecordingDraft(item.id)
+      selected.value = { ...data, kind: 'draft', key: `draft:${data.id}` }
+      return
+    }
+    const { data } = await api.getRecordingGeneration(item.id)
+    selected.value = { ...data, kind: 'generation', key: `generation:${data.id}` }
     commitMessage.value = `录制生成：${data.title || data.target_path}`
   } catch (error) {
     ElMessage.error(errorText(error))
+  }
+}
+
+// 继续录制：按存档重开一次录制，浏览器从起始地址打开、步骤原样恢复。
+// 存档不带登录态，这里要提前说清楚，否则用户会以为打开就是登录后的页面。
+async function resumeDraft() {
+  const draft = selected.value
+  try {
+    await ElMessageBox.confirm(
+      `将从 ${draft.base_url} 重新打开浏览器，并恢复 ${draft.step_count} 个步骤。\n存档不保存登录态，需要在浏览器里重新登录一次。`,
+      '继续录制',
+      { confirmButtonText: '继续录制', cancelButtonText: '取消', type: 'info' }
+    )
+  } catch {
+    return
+  }
+  resuming.value = true
+  try {
+    await api.resumeRecordingDraft(draft.id, { theme: appTheme.value })
+    ElMessage.success('已打开录制浏览器，步骤已恢复')
+    router.push('/recording')
+  } catch (error) {
+    if (error && error.response && error.response.status === 409) {
+      ElMessage.warning('已有正在进行的录制，请先停止再继续')
+    } else {
+      ElMessage.error(errorText(error))
+    }
+  } finally {
+    resuming.value = false
+  }
+}
+
+async function deleteDraft() {
+  try {
+    await ElMessageBox.confirm(
+      '删除后这份存档就没了，已保存的步骤不能恢复。确定吗？',
+      '删除录制存档',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  deletingDraft.value = true
+  try {
+    await api.deleteRecordingDraft(selected.value.id)
+    ElMessage.success('已删除')
+    selected.value = null
+    wantedId.value = ''
+    await load()
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    deletingDraft.value = false
   }
 }
 
@@ -196,7 +312,7 @@ async function commitSelected() {
   try {
     await api.commitRecordingGeneration(selected.value.id, commitMessage.value)
     ElMessage.success('已提交')
-    await openRecord(selected.value.id)
+    await openRecord({ kind: 'generation', id: selected.value.id })
     await load()
   } catch (error) {
     ElMessage.error(errorText(error))
@@ -220,7 +336,7 @@ async function revertSelected() {
   try {
     await api.revertRecordingGeneration(selected.value.id)
     ElMessage.success('已撤销')
-    await openRecord(selected.value.id)
+    await openRecord({ kind: 'generation', id: selected.value.id })
     await load()
   } catch (error) {
     ElMessage.error(errorText(error))
@@ -255,6 +371,15 @@ function dirName(path) {
   const text = String(path || '')
   const cut = text.lastIndexOf('/')
   return cut >= 0 ? `${text.slice(0, cut)}/` : '仓库根目录'
+}
+
+// 存档没有目标文件，第二行写「几步 · 哪个站点」，比一串完整 URL 好认
+function shortUrl(value) {
+  try {
+    return new URL(value).host || String(value || '')
+  } catch {
+    return String(value || '')
+  }
 }
 
 function formatDate(value) {

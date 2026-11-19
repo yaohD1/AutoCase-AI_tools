@@ -399,6 +399,22 @@ batchDeleteTestcases(ids) {
   revertRecordingGeneration(id) {
     return api.post(`/automation/recording/generations/${id}/revert`)
   },
+  // 录制存档：把没录完的步骤存下来，下次接着录（浏览器和录制状态都不动）
+  saveRecordingDraft(payload) {
+    return api.post('/automation/recording/drafts', payload)
+  },
+  listRecordingDrafts() {
+    return api.get('/automation/recording/drafts')
+  },
+  getRecordingDraft(id) {
+    return api.get(`/automation/recording/drafts/${id}`)
+  },
+  deleteRecordingDraft(id) {
+    return api.delete(`/automation/recording/drafts/${id}`)
+  },
+  resumeRecordingDraft(id, payload = {}) {
+    return api.post(`/automation/recording/drafts/${id}/resume`, payload, { timeout: 120000 })
+  },
   // 目录浏览（只读）：工作区路径相对 AUTOMATION_WORKSPACE_ROOT，目标文件路径相对工作区
   browseAutomationDirs(path = '') {
     return api.get('/automation/browse', { params: { path } })

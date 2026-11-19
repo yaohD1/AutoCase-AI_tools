@@ -54,10 +54,10 @@ class Config:
     OPENCODE_SERVE_PORT = _port_env('OPENCODE_SERVE_PORT', 0)
     OPENCODE_SERVE_STARTUP_TIMEOUT = _positive_int_env('OPENCODE_SERVE_STARTUP_TIMEOUT', 60, 5)
 
-    # 录制布局：embed = 被测页面以 iframe 嵌在 AutoCase 前端里（单窗口，左侧完整）；
-    # split = 两个并排窗口（旧方案，目标站禁止 iframe 时可用）。
-    RECORDING_LAYOUT = (os.environ.get('RECORDING_LAYOUT') or 'embed').strip().lower()
-    # 编排面板/外壳页地址（前端录制页）；embed 模式会带上 embed=1&target=...
+    # 录制布局：split = 两个并排窗口（唯一布局）。
+    # embed（iframe 单窗口）已下线：路由不再读取这个值，保留只为兼容旧配置。
+    RECORDING_LAYOUT = (os.environ.get('RECORDING_LAYOUT') or 'split').strip().lower()
+    # 编排面板地址（前端录制页）；并排模式会带上 panel=1。
     RECORDING_PANEL_URL = os.environ.get('RECORDING_PANEL_URL') or 'http://localhost:5173/recording'
     # 面板占屏幕宽度的比例（只在悬浮模式摆不动、退回 CDP 兜底分屏时才用）。
     RECORDING_PANEL_RATIO = _ratio_env('RECORDING_PANEL_RATIO', 0.45, 0.25, 0.7)

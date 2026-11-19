@@ -2,6 +2,7 @@ import http.server
 import os
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from urllib.parse import parse_qs, urlparse
@@ -99,7 +100,7 @@ class RecordingRoutesTest(unittest.TestCase):
         with mock.patch.object(RecordingSession, 'start_new', return_value=_FakeSession()) as start:
             r = self.client.post(START, json=body)
         self.assertEqual(r.status_code, 201, r.get_json())
-        query = parse_qs(urlparse(start.call_args[1]['embed_url']).query)
+        query = parse_qs(urlparse(start.call_args[1]['panel_url']).query)
         self.assertEqual(query['target_path'], ['tests/login.robot'])
         self.assertEqual(query['title'], ['登录成功'])
         self.assertEqual(query['python'], ['D:/proj/.venv/Scripts/python.exe'])
@@ -114,7 +115,7 @@ class RecordingRoutesTest(unittest.TestCase):
         with mock.patch.object(RecordingSession, 'start_new', return_value=_FakeSession()) as start:
             r = self.client.post(START, json={'base_url': _BASE, 'target_path': '   ', 'title': ''})
         self.assertEqual(r.status_code, 201, r.get_json())
-        query = parse_qs(urlparse(start.call_args[1]['embed_url']).query)
+        query = parse_qs(urlparse(start.call_args[1]['panel_url']).query)
         self.assertNotIn('target_path', query)
         self.assertNotIn('title', query)
 
@@ -129,25 +130,42 @@ class RecordingRoutesTest(unittest.TestCase):
 
         stopped = self._stop().get_json()
         self.assertEqual(stopped['status'], 'stopped')
-        # 停止只结束记录，浏览器留着：后面还要拾取元素、验证断言。
-        self.assertTrue(stopped['browser_open'])
+        # 停止 = 结束：统一并排后不再有「浏览器留给拾取」的特例，窗口一并关掉。
+        self.assertFalse(stopped['browser_open'])
         self.assertEqual(self._stop().status_code, 200)
 
-    def test_browser_lives_through_stop_until_closed(self):
-        self._start()
-        self._stop()
-        picked = self.client.post('/api/automation/recording/pick', json={'on': True})
-        self.assertEqual(picked.status_code, 200, picked.get_json())
-        self.assertTrue(picked.get_json()['pick'])
+    def test_stop_closes_browser_and_rejects_later_actions(self):
+        """停止 = 结束：录制浏览器关掉，后续拾取 / 验证都没有页面可读。
 
-        closed = self.client.post('/api/automation/recording/close')
-        self.assertEqual(closed.status_code, 200, closed.get_json())
-        self.assertEqual(closed.get_json()['status'], 'stopped')
-        self.assertFalse(closed.get_json()['browser_open'])
-        # 关掉之后不能再操作，也不能再验证
+        生成、回放、改步骤都不依赖那个窗口，定位复核也已经在停止那一刻算完。
+        """
+        self._start()
+        stopped = self._stop().get_json()
+        self.assertEqual(stopped['status'], 'stopped')
+        self.assertFalse(stopped['browser_open'])
+        # 浏览器一关，拾取与验证就没有页面可读了
         self.assertEqual(self.client.post('/api/automation/recording/pick', json={'on': True}).status_code, 409)
         self.assertEqual(
             self._verify({'type': 'page_text_contains', 'value': '登录成功'}).status_code, 409)
+        # 关闭是幂等的，也仍然是 stopped
+        self.assertEqual(self.client.post('/api/automation/recording/close').status_code, 200)
+
+    def test_stop_exposes_close_progress(self):
+        """停止弹窗靠 closing / close_done 决定什么时候收掉转圈。"""
+        self._start()
+        stopped = self._stop().get_json()
+        self.assertTrue(stopped['closing'])
+        self.assertFalse(stopped['close_done'])
+
+        current = {}
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            current = self.client.get('/api/automation/recording/current').get_json()
+            if current.get('close_done'):
+                break
+            time.sleep(0.05)
+        self.assertTrue(current.get('close_done'))
+        self.assertFalse(current.get('browser_open'))
 
     def test_verify_reads_the_current_page(self):
         self._start()
@@ -165,12 +183,12 @@ class RecordingRoutesTest(unittest.TestCase):
         self.assertTrue(url.get_json()['ok'])
         self._stop()
 
-    def test_verify_still_works_after_stop(self):
+    def test_verify_rejected_after_stop(self):
+        # 统一并排后停止就关浏览器：没有页面可读，必须明确报 409 而不是给个假结果。
         self._start()
         self._stop()
         r = self._verify({'type': 'page_text_contains', 'value': '登录成功'})
-        self.assertEqual(r.status_code, 200, r.get_json())
-        self.assertTrue(r.get_json()['ok'])
+        self.assertEqual(r.status_code, 409)
 
     def test_verify_rejects_unknown_target(self):
         self._start()

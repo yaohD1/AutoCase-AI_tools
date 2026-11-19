@@ -1,13 +1,14 @@
-"""插入前验证：「当前页面状态」与「停止后仍可拾取」的真实浏览器用例。
+"""插入前验证：「当前页面状态」与「停止后能否继续操作」的真实浏览器用例。
 
-这两件事互相支撑：断言要能在插入前验证，就必须有一个活着的页面；
-而停止录制如果直接关浏览器，页面就没了。所以这里把两者放在一起测。
+断言要能在插入前验证，就必须有一个活着的页面。停止即关浏览器之后，验证与拾取
+都只在录制 / 暂停阶段可用——这里把「停止后确实不可用」也钉住，免得以后又退回
+「停止后页面还留着」的旧假设。
 """
 import http.server
 import threading
 import unittest
 
-from app.services.recording.session import RecordingSession
+from app.services.recording.session import RecordingError, RecordingSession
 
 PAGE = (
     '<!doctype html><html><head><meta charset="utf-8"></head><body>'
@@ -167,29 +168,26 @@ class VerifyOnLivePageTest(unittest.TestCase):
         self.assertFalse(missing['ok'])
         self.assertIn('没有这段内容', missing['detail'])
 
-    def test_verify_still_works_after_stop(self):
+    def test_verify_needs_live_page_after_stop(self):
+        """停止即关浏览器：之后没有页面可读，验证要明确报错而不是给个假结论。"""
         session = self._record()
         session.stop()
-        hit = session.verify_intent(_intent('text_contains', '提交', '提交'))
-        self.assertTrue(hit['ok'], hit)
+        with self.assertRaises(RecordingError):
+            session.verify_intent(_intent('text_contains', '提交', '提交'))
 
-    def test_clicks_after_stop_are_not_recorded_but_picks_are(self):
+    def test_stop_closes_browser_so_inspection_is_gone(self):
+        """停止后浏览器已关：普通点击不会变成步骤，拾取也没有页面可拾。
+
+        「停止 = 结束」的前提是这些事在暂停阶段做完；停止之后只剩数据可改。
+        """
         session = self._record()
         before = len(session.ir())
         alias_before = session.aliases()
         session.stop()
-        # 停止后普通点击不该变成步骤……
-        _in_recording_thread(session, lambda: session._test_page.get_by_role('button', name='取消').click())
+        with self.assertRaises(RecordingError):
+            session.set_pick(True)
         self.assertEqual(len(session.ir()), before)
-        # ……但拾取仍然可以，因为断言要用它。
-        session.set_pick(True)
-        _in_recording_thread(session, lambda: session._test_page.get_by_text('登录成功').click())
-        self.assertTrue(_wait_for(lambda: len(session.aliases()) > len(alias_before)), session.aliases())
-        session.set_pick(False)
-        new_alias = session.aliases()[-1]
-        self.assertEqual(len(session.ir()), before)
-        hit = session.verify_intent(_intent('text_contains', new_alias, '登录成功'))
-        self.assertTrue(hit['ok'], hit)
+        self.assertEqual(session.aliases(), alias_before)
 
 
 class AliasOnLivePageTest(unittest.TestCase):

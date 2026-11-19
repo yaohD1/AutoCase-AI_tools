@@ -6,7 +6,7 @@
 
 1. 预检能认出拒绝嵌入（X-Frame-Options / CSP），不认得的头一律放行；
 2. 预检失败（连不上、超时）不许挡住正常录制；
-3. 路由在命中时确实换成独立窗口布局，并把原因带回前端。
+3. 嵌入模式已下线：开始录制不再调用预检，统一走并排窗口。
 """
 import http.server
 import threading
@@ -110,8 +110,8 @@ class FrameBlockReasonTest(unittest.TestCase):
             'http://127.0.0.1:1/', timeout=1))
 
 
-class StartRouteFallbackTest(unittest.TestCase):
-    """路由命中拒绝嵌入时，必须换成独立窗口，并把原因带回前端。"""
+class StartRouteAlwaysSplitTest(unittest.TestCase):
+    """iframe 嵌入已下线：不再探测站点，开始录制一律走并排。"""
 
     def setUp(self):
         from app import create_app
@@ -119,32 +119,28 @@ class StartRouteFallbackTest(unittest.TestCase):
         self.app.config['TESTING'] = True
         self.client = self.app.test_client()
 
-    def _start(self, blocked):
+    def _start(self):
         fake = mock.Mock()
         fake.snapshot.return_value = {'id': 's1', 'status': 'recording', 'steps': []}
-        target = 'app.routes.recording.embedding.frame_block_reason'
-        with mock.patch(target, return_value=blocked), \
+        probe = 'app.services.recording.embedding.frame_block_reason'
+        with mock.patch(probe, return_value='X-Frame-Options: SAMEORIGIN') as probe_mock, \
                 mock.patch('app.routes.recording.RecordingSession.start_new', return_value=fake) as start:
             response = self.client.post('/api/automation/recording/start',
                                         json={'base_url': 'https://192.168.123.135'})
-        return response, start
+        return response, start, probe_mock
 
-    def test_blocked_site_switches_to_split(self):
-        response, start = self._start('X-Frame-Options: SAMEORIGIN')
+    def test_uses_split_even_when_site_can_be_embedded(self):
+        response, start, _ = self._start()
         self.assertEqual(response.status_code, 201)
-        data = response.get_json()
-        self.assertIn('两个并排窗口', data['notice'])
-        self.assertIn('把手', data['notice'])
-        self.assertIn('SAMEORIGIN', data['notice'])
+        self.assertNotIn('notice', response.get_json())
         kwargs = start.call_args.kwargs
         self.assertIsNone(kwargs['embed_url'])
         self.assertIsNotNone(kwargs['panel_url'])
 
-    def test_normal_site_keeps_embed(self):
-        response, start = self._start(None)
-        self.assertEqual(response.status_code, 201)
-        self.assertNotIn('notice', response.get_json())
-        self.assertIsNotNone(start.call_args.kwargs['embed_url'])
+    def test_does_not_probe_iframe_support(self):
+        """预检本身也省了：能嵌不能嵌都不影响布局，没必要先发一轮 HTTP。"""
+        _, _, probe = self._start()
+        probe.assert_not_called()
 
 
 if __name__ == '__main__':

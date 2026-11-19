@@ -1,5 +1,8 @@
 import json
+import queue
+import threading
 import unittest
+from unittest.mock import MagicMock
 
 from app.services.recording import intent, ir
 from app.services.recording.locators import (
@@ -378,6 +381,111 @@ class FrameworkTest(unittest.TestCase):
         self.assertIsNone(RecordingSession('http://example.test/').snapshot()['framework'])
         self.assertIsNone(RecordingSession('http://example.test/',
                                            framework='   ').snapshot()['framework'])
+
+
+class DegradeAfterStopTest(unittest.TestCase):
+    """停止即关浏览器之后，`set_degraded` 还得能用。
+
+    否则带「待确认定位」的录制会卡死：浏览器关了没法重新框选，降级又调不动，
+    生成一直被拦着。这条路径是纯内存操作，不碰页面，所以线程退了也能走。
+    """
+
+    def _session(self, steps=None):
+        session = RecordingSession.__new__(RecordingSession)
+        session._thread = None          # 录制线程已退出（停止即结束）
+        session._lock = threading.Lock()
+        session._steps = steps if steps is not None else [
+            {'no': 1, 'type': 'click', 'target': {'alias': '保存按钮'}}]
+        session.snapshot = lambda: {'steps': session._steps, 'status': 'stopped'}
+        return session
+
+    def test_thread_gone_still_marks_degraded(self):
+        session = self._session()
+        session.set_degraded(1)
+        self.assertTrue(session._steps[0]['target']['degraded'])
+
+    def test_unknown_step_still_reports(self):
+        session = self._session()
+        with self.assertRaises(RecordingError):
+            session.set_degraded(9)
+
+    def test_step_without_target_is_refused(self):
+        """没有目标元素的步骤没得降级，要说清楚而不是静默标一个空对象。"""
+        session = self._session([{'no': 1, 'type': 'goto'}])
+        with self.assertRaises(RecordingError):
+            session.set_degraded(1)
+
+    def test_stop_is_idempotent_after_thread_exit(self):
+        """停止后浏览器已关、线程已退：再点一次停止要回当前快照，而不是报「录制已结束」。"""
+        session = self._session()
+        self.assertEqual(session.stop()['status'], 'stopped')
+        self.assertFalse(session.close_browser()['browser_open'])
+
+
+class StopKeepsPanelForSpinnerTest(unittest.TestCase):
+    """停止时面板不先关：它是「正在关闭」转圈所在的窗口。
+
+    收尾（解析进程约 5 秒 + 关浏览器）期间面板要留着，等 `_shutdown` 最后
+    把它收掉——转圈随窗口一起消失，用户不会盯着一块「已停止」的界面干等。
+    """
+
+    def _session(self, embed=False):
+        session = RecordingSession.__new__(RecordingSession)
+        session.status = 'recording'
+        session._embed = embed
+        session._touch = lambda: None
+        session.snapshot = lambda: {'status': 'stopped', 'steps': []}
+        return session
+
+    def test_panel_stays_until_shutdown(self):
+        session = self._session()
+        order = []
+        session._close_panel_now = lambda: order.append('panel')
+        session._mark_stopped = lambda status, revalidate: (order.append('mark'), {'status': status})[1]
+        session._safe_shutdown = lambda: order.append('shutdown')
+        reply = queue.Queue(maxsize=1)
+        session._commands = queue.Queue()
+        session._commands.put(('stop', {}, reply))
+
+        self.assertTrue(session._drain_commands())
+        # 面板交给 _shutdown 收，这里不能再提前关——提前关掉转圈就没了。
+        self.assertEqual(order, ['mark', 'shutdown'])
+        ok, value = reply.get(timeout=1)
+        self.assertTrue(ok)
+        self.assertTrue(value['closing'])
+        self.assertFalse(value['close_done'])
+        self.assertFalse(value['browser_open'])
+
+    def test_embed_keeps_its_window(self):
+        """嵌入模式的面板就是用户的操作界面，停止不能把人从正在看的页面上踢走。"""
+        session = self._session(embed=True)
+        order = []
+        session._close_panel_now = lambda: order.append('panel')
+        session._mark_stopped = lambda status, revalidate: (order.append('mark'), {'status': status})[1]
+        session._stop_ask_pool = lambda delay=0: order.append('ask')
+        session._commands = queue.Queue()
+        session._commands.put(('stop', {}, queue.Queue(maxsize=1)))
+
+        session._drain_commands()
+        self.assertNotIn('panel', order)
+        self.assertIn('mark', order)
+
+    def test_close_panel_now_is_idempotent(self):
+        session = RecordingSession.__new__(RecordingSession)
+        order = []
+        session._stop_glue = lambda: order.append('glue')
+        session._cleanup_panel_app = lambda: order.append('panel')
+        context = MagicMock()
+        session._panel_context = context
+        session._panel_page = 'page'
+
+        session._close_panel_now()
+        session._close_panel_now()
+        self.assertEqual(order, ['glue', 'panel', 'glue', 'panel'])
+        # 兜底形态的面板 context 关完要断引用，否则 snapshot 会报「面板还开着」。
+        self.assertEqual(context.close.call_count, 1)
+        self.assertIsNone(session._panel_context)
+        self.assertIsNone(session._panel_page)
 
 
 if __name__ == '__main__':

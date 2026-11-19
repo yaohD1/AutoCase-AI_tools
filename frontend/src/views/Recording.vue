@@ -190,7 +190,7 @@
               <el-icon><VideoPlay v-if="paused" /><VideoPause v-else /></el-icon>
             </button>
             <button v-if="isRecording" type="button" class="panel-icon is-stop" :disabled="stopping"
-                    title="停止录制，步骤保留；浏览器不会关" @click="stopRecording">
+                    title="停止录制并关闭录制窗口（步骤保留）" @click="stopRecording">
               <span class="rec-stop" aria-hidden="true"></span>
             </button>
             <el-dropdown trigger="click" placement="bottom-end" @command="onPanelMenu">
@@ -478,7 +478,9 @@
             </div>
           </div>
 
-          <!-- 首屏的主行动放在配置末尾：它用的是上面这些设置，不该长在另一张卡里 -->
+          <!-- 首屏的主行动放在配置末尾：它用的是上面这些设置，不该长在另一张卡里。
+               存档入口不在这里：配置抽屉要滚到底才看得见，等于没有（用户实测找不到），
+               已经挪到「录制步骤」标题行右侧。 -->
           <div v-if="!isRecording && !steps.length && !compactMode" class="cfg-foot">
             <el-button type="primary" class="cfg-start" :loading="starting" @click="startFromConfig">开始录制</el-button>
           </div>
@@ -493,6 +495,27 @@
           <div class="section-header">
             <span class="card-title">录制步骤</span>
             <div class="steps-head-right">
+              <!-- 存档入口放标题行：录不完的脚本先存一份，下次从「生成记录」里续录。
+                   图标按钮不占高度，但入口必须一直在视线里——放进配置抽屉底部时没人找得到。 -->
+              <button
+                v-if="steps.length"
+                type="button"
+                :class="['steps-save', { 'is-saved': session && session.draft_id }]"
+                :disabled="savingDraft"
+                :title="draftTip"
+                @click="saveDraft"
+              >
+                <span v-if="savingDraft" class="steps-save-spin" aria-hidden="true"></span>
+                <!-- Element Plus 图标库里没有软盘，这里手写一个 24 栅格的 save 图形：
+                     外框 + 顶部标签口 + 底部磁盘面，14px 下仍然认得出是「保存」。 -->
+                <svg v-else class="steps-save-glyph" viewBox="0 0 24 24" width="14" height="14"
+                     fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                  <path d="M17 21v-8H7v8" />
+                  <path d="M7 3v5h8" />
+                </svg>
+              </button>
               <span :class="['state-pill', 'state-' + (session ? session.status : 'idle')]">{{ stateLabel }}</span>
             </div>
           </div>
@@ -548,7 +571,7 @@
             <el-button v-if="!isRecording && (steps.length || compactMode)" class="lean-wide" type="primary" :icon="VideoCamera" :loading="booting" @click="onStartClick">开始</el-button>
             <!-- 停止用实心红 + 白色方块，这是录制的通用记号；暂停/继续用浅色描边，避免两个重色按钮打架。
                  条件必须写全：上面那个「开始」在首屏是隐藏的，用 v-else 会让「停止」接在隐藏分支上。 -->
-            <el-button v-else-if="isRecording && !panelFloat" type="danger" :loading="stopping" title="停止录制，步骤保留；浏览器不会关" @click="stopRecording">
+            <el-button v-else-if="isRecording && !panelFloat" type="danger" :loading="stopping" title="停止录制并关闭录制窗口（步骤保留）" @click="stopRecording">
               <span class="rec-stop" aria-hidden="true"></span>停止
             </el-button>
             <el-button
@@ -562,7 +585,7 @@
             >
               {{ paused ? '继续' : '暂停' }}
             </el-button>
-            <!-- 停止后浏览器不关，所以拾取与验证仍然可用；关掉窗口才真正结束 -->
+            <!-- 停止后浏览器就关了；拾取与验证是否可用看 browser_open（嵌入模式仍开着）。 -->
             <el-button
               v-if="!panelFloat"
               :type="picking ? 'warning' : 'default'"
@@ -1320,13 +1343,40 @@
 
       <!-- 生成：面板模式下录制中就藏起来，停止或暂停后再出现（录制中空间留给步骤；
            暂停时步骤不再增长，正好可以回放/生成）。 -->
-      <aside v-if="session && (!compactMode || isStopped || paused)" class="side-rail">
-        <div class="rail-head">
-          <span class="card-title">准备与生成</span>
-          <span class="rail-steps">{{ steps.length }} 步</span>
+      <aside v-if="session && (!compactMode || isStopped || paused)" :class="['side-rail', { 'is-line': compactMode }]">
+        <!-- 面板模式：这一块压成一行——左边状态、右边两颗按钮，标题和说明都不占位置。
+             它下面就是步骤区，留 260px 给三行字等于让人看不清步骤（用户实测反馈）。 -->
+        <div :class="['rail-head', { 'is-line': compactMode }]">
+          <template v-if="compactMode">
+            <span class="rail-line-state">
+              <span :class="['check-dot', blockers.length ? '' : 'ok']"></span>
+              {{ paused ? '暂停中' : (isStopped ? '已停止' : '录制中') }} · <b>{{ steps.length }}</b> 步
+              <span v-if="blockers.length" class="rail-line-warn">{{ blockers.length }} 处待确认</span>
+            </span>
+            <span class="rail-line-acts">
+              <el-button size="small" :disabled="!canReplay"
+                         :title="canReplay ? '打开独立回放窗口' : '先暂停录制'"
+                         @click="openDebugReplay">调试回放</el-button>
+              <el-button v-if="planState" size="small" type="primary" @click="openPlanSheet">打开任务书</el-button>
+              <el-button v-else size="small" type="primary" :loading="generating"
+                         :disabled="!canPlan" @click="runPlan(false)">生成任务书</el-button>
+            </span>
+          </template>
+          <template v-else>
+            <span class="card-title">准备与生成</span>
+            <span class="rail-steps">{{ steps.length }} 步</span>
+          </template>
         </div>
 
         <div class="rail-scroll">
+          <!-- 面板里状态已经在上面那一行了，这行是给主窗口右侧栏用的 -->
+          <div v-if="compactMode && isStopped" class="rail-check-line">
+            <button type="button" class="rail-check-toggle" @click="checksOpen = !checksOpen">
+              <span :class="['check-dot', blockers.length ? '' : 'ok']"></span>
+              <span class="rail-check-text">{{ checksSummary }}</span>
+              <span class="rail-check-act">{{ checksOpen ? '收起' : '检查项' }}</span>
+            </button>
+          </div>
 
         <!-- 配置收进抽屉后，栏里留三条最常核对的：从哪开始、按什么框架、写到哪。
              点一下就地打开抽屉，不用回页头找按钮。 -->
@@ -1346,7 +1396,7 @@
           <span class="rb-edit">改</span>
         </button>
 
-        <div v-if="isStopped" class="checklist">
+        <div v-if="isStopped" v-show="!compactMode || checksOpen" class="checklist">
           <div :class="['check', { ok: steps.length > 0 }]">
             <span class="check-dot"></span>已录制 {{ steps.length }} 步
           </div>
@@ -1357,11 +1407,14 @@
             <span class="check-dot"></span>
             <span class="check-text">
               {{ blockers.length
-                ? `第 ${blockers.join('、')} 步定位待确认，选定后可生成`
+                ? (browserOpen
+                    ? `第 ${blockers.join('、')} 步定位待确认，选定后可生成`
+                    : `第 ${blockers.join('、')} 步定位待确认 · 浏览器已关闭，按录制时定位生成`)
                 : (pageGoneCount ? '当前页面步骤均有唯一定位' : '所有步骤均有唯一定位') }}
             </span>
-            <!-- 页面跑掉的步骤当场框不出来，停在这里还能一条条回去看 -->
-            <el-button v-if="reviewCount" text size="small" class="check-action" @click="startLocReview">
+            <!-- 页面跑掉的步骤当场框不出来，停在这里还能一条条回去看；
+                 浏览器已经关了就没有「回去看」这回事，按钮不出现。 -->
+            <el-button v-if="reviewCount && browserOpen" text size="small" class="check-action" @click="startLocReview">
               {{ reviewCount }} 步待确认 · 逐条确认
             </el-button>
           </div>
@@ -1381,8 +1434,8 @@
             </span>
           </div>
         </div>
-        <!-- 没停录制时把 4 行检查压成一行，别占掉半屏 -->
-        <div v-else class="gen-compact">
+        <!-- 没停录制时把 4 行检查压成一行，别占掉半屏；面板里连这一行也省了 -->
+        <div v-else v-show="!compactMode" class="gen-compact">
           {{ paused ? '暂停中' : '录制中' }} · 已录 <b>{{ steps.length }}</b> 步 ·
           {{ paused ? '可直接生成任务书' : '停止后可生成' }}
           <span v-if="blockers.length" class="gen-compact-bad">· {{ blockers.length }} 处定位待确认</span>
@@ -1466,11 +1519,14 @@
 
         </div>
 
-        <div class="rail-foot">
+        <!-- 面板里这一栏大多数时候是空的（按钮都上移了）：没有回放明细、也不在生成中，
+             就整块不渲染，别留一段空白 padding 把步骤区往下推。 -->
+        <div v-if="!compactMode || generating || replayResult" class="rail-foot">
         <!-- 回放校验：跑的是内存里的录制 IR，不是生成的脚本，所以暂停或停止后就能跑，
              不需要先经过「生成」。按钮放在这里，不要再塞回生成结果卡片里。 -->
         <div v-if="steps.length" class="replay-block">
-          <div class="replay-row">
+          <!-- 面板里回放按钮已经挪到上面那一行，这里只留回放结果的明细 -->
+          <div v-if="!compactMode" class="replay-row">
             <el-button size="small" type="primary" :disabled="!canReplay"
                        :title="canReplay ? '打开独立回放窗口' : '先暂停录制'"
                        @click="openDebugReplay">调试回放</el-button>
@@ -1480,7 +1536,8 @@
                  要恢复就把下面这行取消注释。 -->
             <!-- <el-button size="small" :loading="replaying" @click="runReplay">快速校验</el-button> -->
             <span class="field-hint">
-              {{ canReplay ? '独立窗口回放，录制页不动' : '录制中 · 先暂停才能回放' }}
+              {{ !canReplay ? '录制中 · 先暂停才能回放'
+                : (browserOpen ? '独立窗口回放，录制页不动' : '浏览器已关闭 · 在当前页打开') }}
             </span>
           </div>
           <div v-if="replayStale" class="replay-stale">
@@ -1539,7 +1596,7 @@
         <!-- 写入的唯一入口在任务书里（「按此执行」）。这里只负责出任务书，
              避免又出现一条绕过规划、直接从零写的路。 -->
         <el-button
-          v-else-if="!planState && !shownPlanError"
+          v-else-if="!compactMode && !planState && !shownPlanError"
           class="generate-btn"
           type="primary"
           :disabled="!canPlan"
@@ -1549,7 +1606,7 @@
         </el-button>
         <!-- 任务书只有这一个入口：卡片是 flex:none，永远贴在面板底部，不用滚。
              正文在浮层里读（见下方 Teleport），这里只交代「写到哪、几步」。 -->
-        <div v-else class="plan-ready">
+        <div v-else-if="!compactMode" class="plan-ready">
           <span :class="['check-dot', shownPlanError || planStale ? '' : 'ok']"></span>
           <div class="plan-ready-main">
             <div class="plan-ready-title">
@@ -1573,13 +1630,13 @@
             {{ shownPlanError && !planData ? '看错误' : '打开任务书' }}
           </el-button>
         </div>
-        <div v-if="!generating && !planState && !canPlan && generateBlockReason" class="gen-block-reason">
+        <div v-if="!compactMode && !generating && !planState && !canPlan && generateBlockReason" class="gen-block-reason">
           <span class="gen-block-dot"></span>{{ generateBlockReason }}
         </div>
-        <div v-else-if="!generating && !planState" class="field-hint">
+        <div v-else-if="!compactMode && !generating && !planState" class="field-hint">
           任务书仅只读；确认后写入<template v-if="paused && isRecording"> · 继续录需重新规划</template>
         </div>
-        <div v-else-if="!generating" class="field-hint">
+        <div v-else-if="!compactMode && !generating" class="field-hint">
           写入仅在任务书内触发；步骤变更需重新规划
         </div>
 
@@ -1954,6 +2011,43 @@
         @loaded="onRootLoaded"
         @select="onPathSelected"
       />
+
+      <!-- 停止：确认和「正在关闭」放在同一个弹窗里，点完不让它消失，
+           改成转圈，直到被测浏览器真的关完 / 面板窗口自己消失。 -->
+      <el-dialog
+        v-model="stopDialog.visible"
+        :show-close="!stopDialog.closing"
+        :close-on-click-modal="false"
+        :close-on-press-escape="!stopDialog.closing"
+        width="400px"
+        align-center
+        class="stop-dialog"
+        append-to-body
+      >
+        <div v-if="!stopDialog.closing" class="stop-copy">
+          <p class="stop-title">{{ stopDialog.title }}</p>
+          <p class="stop-text">{{ stopDialog.message }}</p>
+        </div>
+        <div v-else class="stop-loading" role="status" aria-live="polite">
+          <span class="stop-ring" aria-hidden="true"></span>
+          <div class="stop-loading-copy">
+            <p class="stop-title">{{ stopDialog.timedOut ? '关闭时间较长' : '正在关闭录制窗口' }}</p>
+            <p class="stop-text">
+              {{ stopDialog.timedOut ? '窗口没有自动关闭，请手动关闭这个窗口。' : '已停止录制，正在关闭被测浏览器…' }}
+            </p>
+          </div>
+        </div>
+        <template #footer>
+          <template v-if="!stopDialog.closing">
+            <el-button @click="stopDialog.visible = false">继续录制</el-button>
+            <el-button type="danger" @click="confirmStop">{{ stopDialog.confirm }}</el-button>
+          </template>
+          <div v-else class="stop-foot">
+            <span v-if="!stopDialog.timedOut">请稍候，窗口会自动关闭</span>
+            <span v-else>可以直接点窗口右上角的 ×</span>
+          </div>
+        </template>
+      </el-dialog>
     </div>
   </div>
 </template>
@@ -1966,6 +2060,11 @@ import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Docume
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
+import { useTheme } from '../composables/useTheme'
+
+// 面板 / 嵌入外壳是独立的浏览器窗口，拿不到主窗口的 localStorage —— 开始录制时
+// 得把当前主题一起送过去，否则那边只能按系统偏好猜，深色会变浅色。
+const { theme: appTheme } = useTheme()
 
 // 与后端保持一致的常量（backend/app/services/recording/intent.py、locators.py）
 // short 用于配置区的分段控制器：两个取值要在一行里放下，全称太长会把分段挤成两行。
@@ -2194,6 +2293,16 @@ applyPanelQuery()
 const session = ref(null)
 const starting = ref(false)
 const stopping = ref(false)
+// 停止弹窗：确认 → 原地转圈 → 收尾完成 / 窗口消失。closing 时不允许关闭。
+const stopDialog = reactive({
+  visible: false,
+  closing: false,
+  timedOut: false,
+  title: '',
+  message: '',
+  confirm: ''
+})
+let stopDialogTimer = null
 const closingBrowser = ref(false)
 // 插入「刷新页面」用的是命令通道（后端要真的刷一次浏览器），和断言草稿分开计数。
 const addingReload = ref(false)
@@ -2381,6 +2490,16 @@ const fragileCount = computed(() => steps.value.filter(s => s.target && effectiv
 const suspectCount = computed(() => steps.value.filter(s => s.target && effectiveStatus(s) === 'suspect').length)
 // 录制时在登录页、停止时已经跳到聊天页的步骤：没法在当前页面复核，但不该报成不唯一。
 const pageGoneCount = computed(() => steps.value.filter(s => s.target && s.target.page_gone).length)
+
+// 面板里那串检查项默认收成一行：先说最要紧的那一条，点开才看全。
+const checksOpen = ref(false)
+const checksSummary = computed(() => {
+  if (blockers.value.length) return `${blockers.value.length} 处定位待确认`
+  if (suspectCount.value) return `${suspectCount.value} 步定位指向其他元素`
+  if (fragileCount.value) return `${fragileCount.value} 步为结构定位`
+  if (pageGoneCount.value) return `${pageGoneCount.value} 步页面已翻走`
+  return '所有步骤均有唯一定位'
+})
 
 // 录完之后还能逐条过一遍的步骤：当场没来得及选的、页面跑掉没框出来的。
 // 判据和录制中那套一致，只是额外把 page_gone / unverified 也算进来——
@@ -3389,7 +3508,9 @@ async function startRecording() {
       python: (config.python || '').trim(),
       // 并排窗口的宽度跟嵌入模式那块面板取同一个值（localStorage 记忆）。
       // 这里带的是「当前实际宽度」：收起行时就是 420，展开时是记忆值。
-      panel_width: panelWidth.value
+      panel_width: panelWidth.value,
+      // 录制窗口是独立浏览器 profile：主题不传过去，面板一定会掉回浅色。
+      theme: appTheme.value
     })
     draft.value = null
     applySession(data)
@@ -3405,20 +3526,150 @@ async function startRecording() {
   }
 }
 
-async function stopRecording() {
+// ---- 录制存档：录不完先存下来，下次从生成记录里续录 ----
+const savingDraft = ref(false)
+const draftSaved = ref(null)
+
+function draftTime(value) {
+  if (!value) return ''
+  const d = new Date(value)
+  const pad = n => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+// 图标按钮没有文字，说明全在 title 里：没存过说清存到哪、存过说清这是更新。
+const draftTip = computed(() => {
+  if (savingDraft.value) return '正在保存…'
+  if (!session.value || !session.value.draft_id) {
+    return '保存步骤：存到「生成记录」，下次可以继续录制'
+  }
+  const when = draftSaved.value ? draftTime(draftSaved.value.updated_at) : ''
+  const count = draftSaved.value ? draftSaved.value.step_count : steps.value.length
+  return `更新存档${count ? ` · ${count} 步` : ''}${when ? ` · ${when}` : ''}`
+})
+
+// 保存只是一次快照：浏览器、暂停状态、录制状态都不动，用户可以接着录。
+// 同一条会话再存一次是更新，不会在记录里堆副本（draft_id 由后端记在会话上）。
+async function saveDraft() {
+  if (savingDraft.value || !steps.value.length) return
+  savingDraft.value = true
+  try {
+    const { data } = await api.saveRecordingDraft({
+      title: config.title.trim(),
+      workspace: config.workspace.trim(),
+      framework: config.framework,
+      target_path: config.targetPath.trim(),
+      model: config.model,
+      python: (config.python || '').trim()
+    })
+    draftSaved.value = data.draft
+    if (session.value) session.value = { ...session.value, draft_id: data.draft.id }
+    ElMessage.success(`已存档 ${data.draft.step_count} 步 · 下次在「生成记录」里继续录制`)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    savingDraft.value = false
+  }
+}
+
+// 停止是一次不可逆的收尾：面板会关、录制浏览器会关。先问一句，免得手滑点掉
+// 一个正在录的会话。文案按当前形态区分——嵌入模式那个浏览器就是操作界面，不能关。
+function stopConfirmText() {
+  const total = steps.value.length
+  const kept = total ? `已录制的 ${total} 个步骤会保留。` : ''
+  if (panelMode.value) {
+    return {
+      title: '停止录制并关闭面板',
+      message: `${kept}停止后面板窗口与录制浏览器一并关闭，回到 AutoCase 主窗口即可继续生成任务书。`,
+      confirm: '停止并关闭'
+    }
+  }
+  if (embedMode.value) {
+    return {
+      title: '停止录制',
+      message: `${kept}浏览器保持打开，可以继续拾取元素或验证断言。`,
+      confirm: '停止录制'
+    }
+  }
+  return {
+    title: '停止录制',
+    message: `${kept}停止后录制浏览器与录制面板会关闭，本页可以继续生成任务书。`,
+    confirm: '停止录制'
+  }
+}
+
+function stopRecording() {
+  if (stopping.value || stopDialog.visible) return
+  const ask = stopConfirmText()
+  stopDialog.title = ask.title
+  stopDialog.message = ask.message
+  stopDialog.confirm = ask.confirm
+  stopDialog.closing = false
+  stopDialog.timedOut = false
+  stopDialog.visible = true
+}
+
+async function confirmStop() {
+  if (stopDialog.closing) return
+  stopDialog.closing = true
+  stopDialog.timedOut = false
   stopping.value = true
+  // 面板窗口要等收尾真正结束才由后端关掉；20 秒还没消失才提示手动关。
+  clearTimeout(stopDialogTimer)
+  if (panelMode.value) {
+    stopDialogTimer = setTimeout(() => { stopDialog.timedOut = true }, 20000)
+  }
   try {
     const { data } = await api.stopRecording()
     if (draft.value && draft.value.picking) draft.value.picking = false
     applySession(data)
     if (data.browser_open) {
-      ElMessage.success('已停止录制；浏览器保持打开，可以继续拾取元素、验证断言')
+      // 兜底：正常并排不会走到这里，但嵌入模式仍然需要把弹窗收掉。
+      stopDialog.visible = false
+      ElMessage.success('已停止录制 · 浏览器保持打开，可继续拾取或验证断言')
+      return
+    }
+    if (panelMode.value) {
+      // 当前窗口就是面板：转圈转到后端把它关掉为止，不主动收弹窗。
+      return
+    }
+    const done = await waitRecordingClosed()
+    if (done) {
+      // 轮询用的是独立请求，这里要把 close_done 写回页面状态：
+      // 否则弹窗收掉后，整页遮罩还会以为「正在关闭」而留下来。
+      if (session.value) {
+        session.value = { ...session.value, closing: true, close_done: true, browser_open: false }
+      }
+      stopDialog.visible = false
+      ElMessage.success('已停止录制 · 录制窗口已关闭，可以继续生成')
+    } else {
+      stopDialog.timedOut = true
     }
   } catch (error) {
+    // 面板正在被关：请求被窗口销毁打断，界面马上就没了，不当失败处理。
+    if (panelMode.value && (error?.code === 'ERR_NETWORK' || error?.response?.status === 404)) return
+    clearTimeout(stopDialogTimer)
+    stopDialog.closing = false
     ElMessage.error(errorText(error))
   } finally {
     stopping.value = false
   }
+}
+
+// 主窗口发起的停止：轮询到后端把浏览器真的关完（close_done）再收弹窗。
+async function waitRecordingClosed(timeout = 20000) {
+  const started = Date.now()
+  while (Date.now() - started < timeout && stopDialog.visible) {
+    await new Promise(resolve => setTimeout(resolve, 300))
+    try {
+      const { data } = await api.getRecordingCurrent()
+      if (data.close_done) return true
+    } catch (error) {
+      // 会话被清掉 / 面板已销毁，都说明这次录制结束得差不多了。
+      if (error?.response?.status === 404) return true
+    }
+  }
+  return false
 }
 
 async function togglePick(on, quiet = false) {
@@ -4330,7 +4581,7 @@ async function pickForDraft(field = '') {
   draft.value.picking = true
   // 验证码有两个拾取入口，记住这次点的是哪个，结果回来才知道往哪填。
   draft.value.pickField = field
-  // 停止后浏览器仍然开着，拾取结果只能靠轮询拿回来（录制中本来就在轮询）。
+  // 嵌入模式下停止后浏览器仍然开着，拾取结果只能靠轮询拿回来（录制中本来就在轮询）。
   startPolling()
   await togglePick(true)
 }
@@ -4948,6 +5199,29 @@ async function executePlan(overwrite) {
   if (!planData.value || !planTarget.value || planStale.value || generating.value) return
   // 待确认不再是「提醒一下再放行」：直接把那几步排队弹出来，选完或明确降级之后才能写。
   if (blockers.value.length) {
+    if (!browserOpen.value) {
+      // 浏览器已随「停止」关掉，没法重新框选。这时唯一出路是明确说「按录制时记的定位写」，
+      // 否则这份录制会卡在「改不了也生成不了」——停止即结束的前提是这里能走通。
+      const nos = blockers.value
+      try {
+        await ElMessageBox.confirm(
+          `还有 ${nos.length} 步（第 ${nos.join('、')} 步）定位待确认。浏览器已关闭，没法重新框选；`
+          + '按录制时记下的定位生成，生成后请回放确认。',
+          '按录制时定位生成',
+          { confirmButtonText: '按录制时定位生成', cancelButtonText: '取消', type: 'warning' })
+      } catch {
+        return
+      }
+      try {
+        for (const no of nos) await api.degradeRecordingTarget(no)
+        await loadCurrent()
+      } catch (error) {
+        ElMessage.error(errorText(error))
+        return
+      }
+      // 降级之后重新走一遍：这时 blockers 已经清空，会直接进生成。
+      return executePlan(overwrite)
+    }
     ElMessage.warning(`还有 ${blockers.value.length} 步定位待确认，先选完再生成`)
     startLocReview()
     return
@@ -5177,6 +5451,7 @@ onDeactivated(() => {
 onUnmounted(() => {
   stopPolling()
   stopEventStream()
+  clearTimeout(stopDialogTimer)
   clearTimeout(memoryTimer)
   clearInterval(tickTimer)
   window.removeEventListener('resize', clampPanelWidth)
@@ -5306,6 +5581,29 @@ watch(steps, (list) => {
    之前列表自己滚、草稿另算，窄栏里草稿会被卡片裁掉。 */
 .is-panel .steps-card :deep(.el-card__body) { flex:1; min-height:0; display:flex; flex-direction:column; overflow-y:auto; }
 .is-panel .side-rail { flex:none; border-radius:10px; }
+/* 面板里的「准备与生成」压成一行：状态在左、两颗按钮在右。
+   原来是标题 + 状态行 + 回放说明 + 全宽主按钮 + 脚注，占掉 260px；
+   步骤区只剩一两行可看（用户实测反馈）。 */
+.rail-head.is-line { padding:8px 10px; border-bottom:0; }
+.rail-line-state {
+  display:flex; align-items:center; gap:6px; min-width:0;
+  font-size:12px; color:var(--ink-2); white-space:nowrap;
+}
+.rail-line-state b { font-weight:600; color:var(--ink); font-variant-numeric:tabular-nums; }
+.rail-line-warn { font-size:11px; color:var(--warn); }
+.rail-line-acts { display:flex; align-items:center; gap:6px; flex:none; }
+.rail-line-acts :deep(.el-button) { padding:5px 10px; font-size:12px; }
+/* 检查项收成一行：默认只说最要紧的一条，点开才铺开 4–6 行。 */
+.rail-check-line { padding:0; }
+.rail-check-toggle {
+  display:flex; align-items:center; gap:6px; width:100%; padding:6px 8px;
+  border:1px solid var(--line-soft); border-radius:8px; background:var(--bg-sunken);
+  font-size:11.5px; color:var(--ink-2); cursor:pointer; text-align:left;
+}
+.rail-check-toggle:hover { background:var(--bg-hover); }
+.rail-check-text { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rail-check-act { flex:none; color:var(--muted); }
+.is-panel .side-rail.is-line .rail-scroll { padding:0 10px 10px; }
 .is-panel .rail-head { padding:10px 14px; }
 .is-panel .rail-scroll { padding:12px; }
 .is-panel .rail-foot { padding:10px 12px 12px; }
@@ -5337,6 +5635,24 @@ h1 { margin:0; color:var(--ink); font-size:22px; font-weight:600; letter-spacing
 .panel-card :deep(.el-card__body) { padding:14px 16px; }
 .section-header { display:flex; justify-content:space-between; align-items:center; gap:12px; }
 .steps-head-right { display:flex; align-items:center; gap:8px; flex:none; }
+/* 存档按钮：24px 方框，和状态胶囊同一行，不额外占高度。
+   已存过时描边和图标一起转成主色——用户扫一眼就知道「这条已经在记录里了」。 */
+.steps-save {
+  width:24px; height:24px; padding:0; flex:none;
+  display:inline-flex; align-items:center; justify-content:center;
+  border:1px solid var(--line-ctl); border-radius:6px;
+  background:var(--bg-card); color:var(--ink-2); cursor:pointer;
+  transition:border-color .14s ease, color .14s ease, background .14s ease;
+}
+.steps-save:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
+.steps-save:disabled { cursor:default; opacity:.6; }
+.steps-save.is-saved { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
+.steps-save-glyph { display:block; flex:none; }
+.steps-save-spin {
+  width:12px; height:12px; border-radius:50%;
+  border:1.5px solid var(--line-ctl); border-top-color:var(--accent);
+  animation:closing-spin .8s linear infinite;
+}
 .card-title { position:relative; padding-left:12px; font-size:15px; font-weight:700; color:var(--ink); }
 .card-title::before { content:''; position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:15px; border-radius:3px; background:linear-gradient(180deg,var(--accent),var(--accent)); }
 .field-hint { color:var(--muted); font-size:12px; line-height:1.5; margin-top:6px; }
@@ -5555,6 +5871,9 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 抽屉里标题已经在外层，卡自己的头重复一遍；卡片边框也去掉，铺满抽屉宽度。 */
 .cfg-shell:not(.is-inline) .config-card { flex:1; min-height:0; overflow-y:auto; margin:0; border:0; border-radius:0; box-shadow:none; }
 .cfg-shell:not(.is-inline) .config-card :deep(.el-card__header) { display:none; }
+/* 抽屉里的配置比一屏长：卡片本来是滚动容器，但 body 被 flex:1 钉死高度，
+   内容溢出后没有可滚区域——用户实测「滚动条划不动」。让 body 自己滚并允许收缩。 */
+.cfg-shell:not(.is-inline) .config-card :deep(.el-card__body) { min-height:0; overflow-y:auto; }
 .gen-result-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px; }
 .gen-result-actions .field-hint { margin-top:0; }
 /* 回放校验：和生成无关，停止录制后就摆在这里，别让它看起来像生成的附属动作。 */
@@ -6395,4 +6714,32 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .gd-value { font-size:11.5px; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .gd-from { font-size:11px; color:var(--faint); text-align:right; }
 .gd-preview { margin-top:10px; font-size:11.5px; color:var(--muted); }
+
+/* 停止弹窗：确认态和转圈态共用同一个框，切换只做一次轻微上浮淡入。
+   弹窗是 append-to-body 的，Element 自己的 header/body 内边距要用全局选择器压。 */
+:global(.stop-dialog) {
+  border-radius:12px;
+  border:1px solid var(--line-ctl);
+  box-shadow:0 18px 48px rgba(0, 0, 0, .28);
+}
+:global(.stop-dialog .el-dialog__header) { display:none; }
+:global(.stop-dialog .el-dialog__body) { padding:20px 22px 4px; }
+:global(.stop-dialog .el-dialog__footer) { padding:0 22px 18px; }
+.stop-copy, .stop-loading { animation:stop-swap .16s ease-out; }
+@keyframes stop-swap {
+  from { opacity:0; transform:translateY(3px); }
+  to { opacity:1; transform:none; }
+}
+.stop-title { margin:0; font-size:15px; font-weight:500; color:var(--ink); }
+.stop-text { margin:6px 0 0; font-size:12.5px; line-height:1.65; color:var(--muted); }
+.stop-loading { display:flex; align-items:center; gap:12px; }
+.stop-ring {
+  width:22px; height:22px; flex:none; border-radius:50%;
+  border:2px solid var(--line-ctl); border-top-color:var(--accent);
+  animation:closing-spin .75s linear infinite;
+}
+.stop-loading-copy { min-width:0; }
+.stop-foot { font-size:12px; color:var(--faint); text-align:right; }
+
+@keyframes closing-spin { to { transform:rotate(360deg); } }
 </style>

@@ -15,7 +15,7 @@ from app.services.automation_generator import AutomationScriptGenerator
 from app.services.opencode_runner import OpenCodeRunner
 from app.models import db
 from app.models.recording_generation import RecordingGeneration
-from app.services.recording import debug, detect, embedding, emit, guard, records, replay
+from app.services.recording import debug, detect, drafts, emit, guard, records, replay
 from app.services.recording import emit_session, intent, memory, progress, verify
 from app.services.recording.ask_pool import AskUnavailable
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
@@ -81,25 +81,16 @@ def start_recording():
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return _error('base_url 必须是 http 或 https 地址', 400)
     headless = bool(current_app.config.get('RECORDING_HEADLESS', os.environ.get('RECORDING_HEADLESS') == '1'))
-    layout = (current_app.config.get('RECORDING_LAYOUT') or 'embed').strip().lower()
-    notice = None
-    if layout == 'embed':
-        # 站点写了 X-Frame-Options / CSP frame-ancestors 时，iframe 只会得到一张
-        # 「拒绝了我们的连接请求」错误页，而且用户还能在错误页上点出步骤来。
-        # 与其让他对着错误页调试，不如直接换成独立窗口布局。
-        blocked = embedding.frame_block_reason(
-            base_url, shell_origin=current_app.config.get('RECORDING_PANEL_URL'))
-        if blocked:
-            layout = 'split'
-            notice = ('被测系统禁止被 iframe 嵌入（%s），已改用两个并排窗口：'
-                      '被测页面在左、编排面板在右（面板可收起，收起后屏幕右缘留一条把手）。'
-                      % blocked)
+    # 统一并排：iframe 嵌入已下线，不再探测目标站能不能嵌。
+    # 「能嵌的站」和「不能嵌的站」不该有两种录法；被测页面永远是独立顶层窗口，
+    # 可以最大化、拖到副屏，DevTools / 弹窗 / 上传也都按正常页面走。
+    # 嵌入模式的代码还留在会话里（回滚用），这里不再触发。
     try:
         session = RecordingSession.start_new(
             base_url,
             headless=headless,
-            embed_url=_embed_url(body, base_url) if layout == 'embed' else None,
-            panel_url=_panel_url(body, base_url) if layout == 'split' else None,
+            embed_url=None,
+            panel_url=_panel_url(body, base_url),
             panel_ratio=current_app.config.get('RECORDING_PANEL_RATIO', 0.45),
             panel_float=bool(current_app.config.get('RECORDING_PANEL_FLOAT', False)),
             # 宽度跟着前端走：嵌入模式那块面板当前用多宽（localStorage 记忆值），
@@ -114,6 +105,8 @@ def start_recording():
             # 这次录制要按哪个框架生成：之后所有定位 / 规划 / 生成都以它为兜底，
             # 不再各自默认 playwright-ts（面板丢了参数也不会静默换写法）。
             framework=(body.get('framework') or '').strip() or None,
+            # 主窗口当前的深浅色：录制窗口是独立 profile，只能按地址带过去。
+            theme=(body.get('theme') or '').strip().lower() or None,
         )
     except RecordingBusy as exc:
         return _error(str(exc), 409)
@@ -127,9 +120,6 @@ def start_recording():
     # 规划和写手都不用再现场读项目。学不成不影响录制，所以整段吞掉。
     _prime_project_memory(body)
     data = session.snapshot()
-    if notice:
-        # 布局被自动换掉必须让用户知道，否则他会奇怪为什么弹出两个窗口。
-        data['notice'] = notice
     return jsonify(data), 201
 
 
@@ -160,6 +150,7 @@ def _embed_url(body, base_url):
     """嵌入模式：外壳页把被测系统放进 iframe，左边页面、右边编排。"""
     params = {'embed': '1', 'target': base_url}
     params.update(_prefill(body))
+    params.update(_theme_param(body))
     return _frontend_url(params)
 
 
@@ -167,7 +158,19 @@ def _panel_url(body, base_url):
     """并排模式：额外开一个面板窗口。"""
     params = {'panel': '1', 'base_url': base_url}
     params.update(_prefill(body))
+    params.update(_theme_param(body))
     return _frontend_url(params)
+
+
+def _theme_param(body):
+    """把主窗口当前主题带给录制窗口。
+
+    嵌入外壳、并排面板、回放窗口都由后端另起浏览器打开，profile 是全新的，
+    localStorage 里没有 ac-theme。不带这一项，它们只能按系统偏好猜（Playwright
+    默认浅色），用户在主窗口选好的深色到了录制窗口就丢了。
+    """
+    value = (body.get('theme') or '').strip().lower()
+    return {'theme': value} if value in ('dark', 'light') else {}
 
 
 def _panel_width(body):
@@ -1176,6 +1179,112 @@ def debug_replay_stream():
     resp.headers['Cache-Control'] = 'no-store'
     resp.headers['X-Accel-Buffering'] = 'no'
     return resp
+
+
+@recording_bp.route('/automation/recording/drafts', methods=['POST'])
+def save_recording_draft():
+    """把当前会话存成一条录制存档（草稿）。
+
+    同一条会话再次保存时覆盖原来那条：用户边录边存，列表里不该堆出一串副本。
+    浏览器、录制状态都不动——保存只是一次快照。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    config = body.get('config') if isinstance(body.get('config'), dict) else body
+    try:
+        draft = drafts.save(session, config=config, title=body.get('title') or config.get('title'))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('保存录制存档失败：%s', exc)
+        return _error('保存录制存档失败：%s' % exc, 500)
+    return jsonify({'draft': draft.to_dict()}), 200
+
+
+@recording_bp.route('/automation/recording/drafts', methods=['GET'])
+def list_recording_drafts():
+    rows = drafts.list_all()
+    return jsonify({'drafts': [row.to_dict() for row in rows]}), 200
+
+
+@recording_bp.route('/automation/recording/drafts/<draft_id>', methods=['GET'])
+def get_recording_draft(draft_id):
+    draft = drafts.get(draft_id)
+    if draft is None:
+        return _error('没有这条录制存档', 404)
+    return jsonify(draft.to_dict(with_steps=True)), 200
+
+
+@recording_bp.route('/automation/recording/drafts/<draft_id>', methods=['DELETE'])
+def delete_recording_draft(draft_id):
+    draft = drafts.get(draft_id)
+    if draft is None:
+        return _error('没有这条录制存档', 404)
+    drafts.delete(draft)
+    return jsonify({'deleted': True}), 200
+
+
+@recording_bp.route('/automation/recording/drafts/<draft_id>/resume', methods=['POST'])
+def resume_recording_draft(draft_id):
+    """按存档重新开一次录制：浏览器从起始地址打开，步骤列表原样恢复。
+
+    不恢复登录态：新浏览器实例没有上次的 cookie，用户需要自己登录一次。
+    旧步骤不参与停止时的定位复核（它们没有页面引用），保留录制时的定位结果。
+    """
+    draft = drafts.get(draft_id)
+    if draft is None:
+        return _error('没有这条录制存档', 404)
+    steps = drafts.steps_of(draft)
+    if not steps:
+        return _error('这条存档里没有步骤，无法继续录制', 400)
+    base_url = (draft.base_url or '').strip()
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return _error('存档里的起始地址无效：%s' % base_url, 400)
+
+    payload = request.get_json(silent=True) or {}
+    body = {
+        'base_url': base_url,
+        'title': draft.title or '',
+        'workspace': draft.workspace or '',
+        'framework': draft.framework or '',
+        'target_path': draft.target_path or '',
+        'model': draft.model or '',
+        'python': draft.python or '',
+        # 续录是从生成记录页发起的：主题也跟着当前这个窗口走，别让面板又变回浅色。
+        'theme': payload.get('theme') or '',
+    }
+    headless = bool(current_app.config.get('RECORDING_HEADLESS', os.environ.get('RECORDING_HEADLESS') == '1'))
+    # 与开始录制一致：统一并排，续录也不会回到 iframe 外壳。
+    try:
+        session = RecordingSession.start_new(
+            base_url,
+            headless=headless,
+            embed_url=None,
+            panel_url=_panel_url(body, base_url),
+            panel_ratio=current_app.config.get('RECORDING_PANEL_RATIO', 0.45),
+            panel_float=bool(current_app.config.get('RECORDING_PANEL_FLOAT', False)),
+            panel_width=current_app.config.get('RECORDING_PANEL_WIDTH', 520),
+            hud_panel=bool(current_app.config.get('RECORDING_HUD_PANEL', False)),
+            ask_model=body.get('model'),
+            ask_config=_opencode_config(),
+            workspace=_recording_workspace(body),
+            framework=body.get('framework') or None,
+            restore_steps=steps,
+            draft_id=draft.id,
+            theme=(body.get('theme') or '').strip().lower() or None,
+        )
+    except RecordingBusy as exc:
+        return _error(str(exc), 409)
+    except RecordingError as exc:
+        return _error('无法继续录制：%s' % exc, 500)
+    # 新录制 = 新的生成任务：上一次的进度、规划上下文都不该继承。
+    progress.PROGRESS.reset()
+    emit_session.REGISTRY.close_all()
+    _prime_project_memory(body)
+    drafts.touch(draft)
+    data = session.snapshot()
+    return jsonify(data), 201
 
 
 @recording_bp.route('/automation/recording/generations', methods=['GET'])

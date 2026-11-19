@@ -13,6 +13,14 @@
     (function () {
       try {
         var saved = localStorage.getItem('ac-theme')
+        // 录制窗口（嵌入外壳 / 并排面板 / 回放）都是后端另起的浏览器，profile 全新，
+        // localStorage 里没有主窗口选的 ac-theme。主题由主窗口经地址带过来，这里优先认它，
+        // 并写回本窗口 —— 之后刷新、路由跳转都不用再带参数。
+        var fromUrl = new URLSearchParams(window.location.search).get('theme')
+        if (fromUrl === 'dark' || fromUrl === 'light') {
+          saved = fromUrl
+          try { localStorage.setItem('ac-theme', fromUrl) } catch (e) {}
+        }
         var dark = saved ? saved === 'dark'
           : window.matchMedia('(prefers-color-scheme: dark)').matches
         if (dark) {

@@ -14,7 +14,7 @@ import time
 import unittest
 
 from app.services.recording import emit, locators
-from app.services.recording.session import RecordingSession
+from app.services.recording.session import RecordingError, RecordingSession
 
 TABLE_PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>设备</title></head><body>
 <h1>设备列表</h1>
@@ -294,12 +294,15 @@ class ChosenTest(_Base):
         self.assertEqual(result['desc'], desc)
         self.assertEqual(result['active'], 2)
 
-    def test_highlight_after_stop_still_works(self):
+    def test_highlight_needs_the_recording_browser(self):
+        """停止即关浏览器：没有页面可画框，要明确报错而不是静默成功。
+
+        框选属于「看现场」的动作，只在录制 / 暂停阶段有意义；停止后只剩数据。
+        """
         session, no, desc = self._prepare()
         session.stop()
-        result = session.highlight(no, framework='playwright-ts')
-        self.assertTrue(result['ok'])
-        self.assertEqual(result['count'], 3)
+        with self.assertRaises(RecordingError):
+            session.highlight(no, framework='playwright-ts')
 
 
 class EmitUsesChoiceTest(unittest.TestCase):

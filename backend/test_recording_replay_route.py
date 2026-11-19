@@ -143,11 +143,13 @@ class ReplayWindowRouteTest(unittest.TestCase):
 class ReplayUrlTest(unittest.TestCase):
     """回放页地址必须和录制页同源，且带上 window=1 让页面知道自己是受管窗口。"""
 
-    def _session(self, panel_url='', embed_url=None):
+    def _session(self, panel_url='', embed_url=None, theme=None):
         session = RecordingSession.__new__(RecordingSession)
         session._panel_url = panel_url
         session._embed_url = embed_url
         session.framework = 'robot-selenium'
+        if theme:
+            session._theme = theme
         return session
 
     def test_uses_panel_origin_and_drops_its_query(self):
@@ -165,6 +167,38 @@ class ReplayUrlTest(unittest.TestCase):
 
     def test_no_frontend_url(self):
         self.assertIsNone(self._session()._replay_url('playwright-ts'))
+
+    def test_carries_theme_of_recording_window(self):
+        """回放窗口也是全新 profile：主题不带上就会退回浅色。"""
+        session = self._session(panel_url='http://localhost:5173/recording?panel=1', theme='dark')
+        self.assertIn('theme=dark', session._replay_url('playwright-ts'))
+
+    def test_omits_theme_when_unknown(self):
+        session = self._session(panel_url='http://localhost:5173/recording?panel=1')
+        self.assertNotIn('theme=', session._replay_url('playwright-ts'))
+
+
+class RecordingUrlThemeTest(unittest.TestCase):
+    """面板 / 嵌入外壳都由后端另起浏览器，主题只能写在地址里。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = create_app()
+
+    def _url(self, builder, theme):
+        from app.routes.recording import _embed_url, _panel_url
+        with self.app.app_context():
+            func = _panel_url if builder == 'panel' else _embed_url
+            return func({'theme': theme}, 'http://x/login')
+
+    def test_panel_carries_theme(self):
+        self.assertIn('theme=dark', self._url('panel', 'dark'))
+
+    def test_embed_carries_theme(self):
+        self.assertIn('theme=light', self._url('embed', 'light'))
+
+    def test_invalid_theme_is_dropped(self):
+        self.assertNotIn('theme=', self._url('panel', 'purple'))
 
 
 if __name__ == '__main__':
