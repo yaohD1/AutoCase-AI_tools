@@ -6,12 +6,12 @@
 import logging
 from pathlib import Path
 
-from flask import Blueprint, current_app, jsonify, request, send_file
+from flask import Blueprint, Response, current_app, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 
 from app.models import db
 from app.models.test_run import TestRun
-from app.services.recording import runner
+from app.services.recording import report_html, runner
 
 testrun_bp = Blueprint('testrun', __name__)
 logger = logging.getLogger(__name__)
@@ -122,3 +122,22 @@ def get_artifact(run_id):
     # secure_filename 会把中文名清空，这里只用来挡下载头里的异常字符，实际读取仍走校验过的绝对路径。
     name = secure_filename(path.name) or 'artifact%s' % path.suffix
     return send_file(str(path), as_attachment=False, download_name=name)
+
+
+@testrun_bp.route('/automation/testrun/runs/<run_id>/export', methods=['GET'])
+def export_run(run_id):
+    """导出自包含 HTML：截图内联，双击即可看，不依赖项目自身报告。"""
+    run = db.session.get(TestRun, run_id)
+    if run is None:
+        return jsonify({'error': '运行记录不存在'}), 404
+    if run.status == 'running':
+        return jsonify({'error': '运行还没结束，先等它跑完再导出'}), 409
+    try:
+        text = report_html.render(run)
+    except Exception as exc:  # noqa: BLE001 - 导出失败不该把 500 变成白屏
+        logger.exception('导出报告失败')
+        return jsonify({'error': '导出报告失败：%s' % exc}), 500
+    stamp = run.started_at.strftime('%Y%m%d-%H%M%S') if run.started_at else run_id[:8]
+    response = Response(text, mimetype='text/html')
+    response.headers['Content-Disposition'] = 'attachment; filename="autocase-report-%s.html"' % stamp
+    return response

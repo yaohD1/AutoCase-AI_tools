@@ -39,6 +39,13 @@ _ACTIVE = {}
 _ACTIVE_LOCK = threading.Lock()
 
 MAX_TAIL = 6000
+# 算作「失败」的状态。只用来统计失败条数和判断批次状态，
+# 步骤树不按状态裁剪：执行过的每一条都存，见 _pw_jsonl_row / _rf_collect。
+FAILED_STATUSES = ('failed', 'timedOut', 'interrupted', 'error')
+# 结果 JSON 的体积兜底。步骤树改成「执行就存」之后，一次几百条的全量跑能堆到十几 MB；
+# 库里的列吃得下，但接口和浏览器都不想接。真撞上了只留失败用例的步骤，
+# 省掉的条数记进 env.steps_trimmed，报告里会写明。
+RESULTS_BUDGET = 8 * 1024 * 1024
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 # Robot 控制台一行：`用例名(补空格) | PASS |`，长名字会被截断成 `...`，
 # 所以这里只用来数进度，真正的结果以 output.xml 为准。
@@ -46,6 +53,12 @@ RF_LINE = re.compile(r'^(?P<name>.*?)\s+\|\s+(?P<status>PASS|FAIL|SKIP)\s+\|$')
 # Playwright 控制台一行：`  ok 1 [chromium] › tests\a.spec.ts:6:7 › 标题 (2.5s)`
 PW_LINE = re.compile(r'^\s+(?:ok|×|✘|✗|-)\s+\d+\s+\[[^\]]+\]\s+›'
                      r'|\s+(?:ok|×|✘|✗|-)\s+\d+\s+\[[^\]]+\]\s+›')
+
+# AutoCase 自带的 Playwright reporter。放在这里而不是项目里：项目不用装包、
+# 不用改 playwright.config，换一个项目也照样能用。它比 `--reporter=json` 多给
+# 一棵 result.steps（每步耗时），报告里的「卡在哪一步」就靠它。
+PW_REPORTER = Path(__file__).resolve().with_name('pw_reporter.js')
+PW_REPORTER_MARK = '##AC##'
 
 # Robot 项目里除了 venv 还有 tools（chromedriver），它自己的 run_case.bat 就是这么加 PATH 的。
 RF_EXTRA_PATH = ('tools', 'venv/Scripts', '.venv/Scripts')
@@ -241,6 +254,117 @@ def _pw_cases(root):
     return cases
 
 
+def _pw_exec(cmd, root, handle, budget, on_progress, extra_env=None):
+    """跑一组 Playwright，返回 stdout 全文。进度按行回调，几行算一条由调用方决定。"""
+    env = _env_for(root)
+    env.update(extra_env or {})
+    proc = subprocess.Popen(cmd, cwd=str(root), env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, encoding='utf-8',
+                            errors='replace', bufsize=1)
+    handle.attach(proc)
+    stalled = []
+    timer = _watchdog(proc, budget, stalled)
+
+    buffer = []
+    done = 0
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        buffer.append(line)
+        # 自带 reporter 发 `##AC##`；退回官方 reporter 时是 list 的 `ok 1 [chromium] ›`
+        if PW_REPORTER_MARK in line or PW_LINE.search(line):
+            done += 1
+            on_progress(done)
+    proc.wait()
+    timer.cancel()
+    handle.detach()
+
+    text = ''.join(buffer)
+    if stalled:
+        text += '\n[执行超时，已中止]\n'
+    handle.log_tail = _tail(text)
+    return text
+
+
+def _pw_read_jsonl(path, artifacts):
+    """读自带 reporter 的 JSONL。返回 (rows, env)；同一用例的多次重试只留最后一次。"""
+    if not path.exists():
+        return [], {}
+    env = {}
+    rows = {}
+    for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if item.get('type') == 'env':
+            env = item
+            continue
+        row = _pw_jsonl_row(item, artifacts, env.get('root_dir'))
+        key = (row['file'], row['line'], row['title'], row['project'])
+        # onTestEnd 每次重试都会回调一次，最后一次才是最终状态
+        if key not in rows or row['retry'] >= rows[key]['retry']:
+            rows[key] = row
+    return list(rows.values()), env
+
+
+def _pw_jsonl_row(item, artifacts, root_dir):
+    file = _posix(item.get('file') or '')
+    base = _posix(root_dir or '').rstrip('/')
+    # reporter 的 file 是绝对路径，列表里用的是相对 rootDir 的路径，要对齐才能回填 id
+    if base and file.startswith(base + '/'):
+        file = file[len(base) + 1:]
+
+    shots, extras = [], []
+    for attachment in item.get('attachments') or []:
+        rel = _under(attachment.get('path') or '', artifacts)
+        if rel is None:
+            continue
+        extras.append({'name': attachment.get('name') or '', 'path': rel,
+                       'type': attachment.get('type') or ''})
+        if (attachment.get('type') or '').startswith('image/'):
+            shots.append(rel)
+
+    error = _clean(item.get('error') or '')[:1500]
+    err_loc = item.get('error_location') or {}
+    where = ''
+    if err_loc.get('file'):
+        where = '%s:%s' % (_posix(err_loc.get('file')), err_loc.get('line') or 0)
+        if err_loc.get('column'):
+            where += ':%s' % err_loc['column']
+    status = item.get('status') or 'skipped'
+    return {
+        'id': '',
+        'file': file,
+        'line': item.get('line') or 0,
+        'title': item.get('title') or '',
+        'project': item.get('project') or '',
+        'status': status,
+        'duration_ms': int(item.get('duration_ms') or 0),
+        'start_time': item.get('start_time') or '',
+        'error': error,
+        'where': where,
+        'tags': item.get('tags') or [],
+        'annotations': item.get('annotations') or [],
+        'screenshots': shots,
+        'artifacts': extras,
+        'retry': int(item.get('retry') or 0),
+        'worker': item.get('worker'),
+        # 执行过就留步骤树：回看「走了哪几步、卡在哪一步、哪一步最慢」不只用得上失败用例
+        'steps': item.get('steps') or [],
+        'env_error': any(mark in (error or '') for mark in ENV_ERROR_MARKS),
+    }
+
+
+def _pw_reporter_broken(text):
+    """自带 reporter 没加载起来时的特征。老版本 Playwright 或者路径被策略挡住会这样。"""
+    marks = ('Cannot find module', 'ERR_MODULE_NOT_FOUND', 'No tests found',
+             'Invalid reporter', 'reporter was not found')
+    return any(mark in (text or '') for mark in marks)
+
+
 def _pw_run(root, handle, selected, artifacts, report):
     """按 project 分组跑：同一个文件可能属于多个 project，混在一起会跑重。"""
     prefix = _pw_prefix(root)
@@ -249,57 +373,54 @@ def _pw_run(root, handle, selected, artifacts, report):
         groups.setdefault(case.get('project') or '', []).append(case)
 
     results = []
+    env = {}
     for index, (project, items) in enumerate(groups.items()):
         if handle.stopped:
             break
         out_dir = artifacts / ('pw-%d' % index)
         out_dir.mkdir(parents=True, exist_ok=True)
-        json_path = artifacts / ('pw-%d.json' % index)
         args = ['%s:%s' % (item['run_path'], item['line']) for item in items]
-        cmd = prefix + args + ['--reporter=list,json', '--output', str(out_dir)]
+        label = '（%s）' % project if project else ''
+        budget = max(300, 90 * len(items))
+
+        def progress(done, _label=label):
+            report('已执行 %d / %d 条%s' % (len(results) + done, len(selected), _label),
+                   len(results) + done, len(selected))
+
+        report('正在执行 %d 条用例%s' % (len(items), label), len(results), len(selected))
+
+        # 先用 AutoCase 自带的 reporter：只有它能拿到 result.steps（每步耗时）。
+        jsonl = artifacts / ('pw-%d.jsonl' % index)
+        cmd = prefix + args + ['--reporter', str(PW_REPORTER), '--output', str(out_dir)]
         if project:
             cmd += ['--project', project]
+        text = _pw_exec(cmd, root, handle, budget, progress,
+                        extra_env={'AUTOCASE_PW_OUT': str(jsonl)})
+        rows, found_env = _pw_read_jsonl(jsonl, artifacts)
+        if found_env:
+            env = found_env
 
-        env = _env_for(root)
-        env['PLAYWRIGHT_JSON_OUTPUT_NAME'] = str(json_path)
-        report('正在执行 %d 条用例%s' % (len(items), '（%s）' % project if project else ''),
-               len(results), len(selected))
+        if not rows:
+            # 自带 reporter 没产出：老版本 Playwright 或加载被挡。退回官方 JSON reporter，
+            # 少一份步骤明细，但结果不能丢。
+            if not _pw_reporter_broken(text):
+                raise RunnerError('Playwright 没有产出结果：%s' % _tail(text)[-500:])
+            json_path = artifacts / ('pw-%d.json' % index)
+            text = _pw_exec(prefix + args + ['--reporter=list,json', '--output', str(out_dir)],
+                            root, handle, budget, progress,
+                            extra_env={'PLAYWRIGHT_JSON_OUTPUT_NAME': str(json_path)})
+            data = None
+            if json_path.exists():
+                data = _json_blob(json_path.read_text(encoding='utf-8', errors='replace'))
+            if data is None:
+                data = _json_blob(text)
+            if data is None:
+                raise RunnerError('Playwright 没能启动或没有产出报告：%s' % _tail(text)[-500:])
+            rows = _pw_collect(data, artifacts)
+            env = env or {'framework': 'playwright', 'version': (data.get('config') or {}).get('version') or ''}
+        results.extend(rows)
 
-        proc = subprocess.Popen(cmd, cwd=str(root), env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, encoding='utf-8',
-                                errors='replace', bufsize=1)
-        handle.attach(proc)
-        stalled = []
-        timer = _watchdog(proc, max(300, 90 * len(items)), stalled)
-
-        buffer = []
-        done = 0
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            buffer.append(line)
-            if PW_LINE.search(line) or re.match(r'^\s+(ok|×|✘|✗|-)\s+\d+\s+\[', line):
-                done += 1
-                report('已执行 %d / %d 条' % (len(results) + done, len(selected)),
-                       len(results) + done, len(selected))
-        proc.wait()
-        timer.cancel()
-        handle.detach()
-
-        text = ''.join(buffer)
-        if stalled:
-            text += '\n[执行超时，已中止]\n'
-        handle.log_tail = _tail(text)
-        data = None
-        if json_path.exists():
-            data = _json_blob(json_path.read_text(encoding='utf-8', errors='replace'))
-        if data is None:
-            data = _json_blob(text)
-        if data is None:
-            # 没拿到 JSON：多半是配置坏了 / 用例一条都没匹配到，把原文留下来当证据。
-            raise RunnerError('Playwright 没能启动或没有产出报告：%s' % _tail(text)[-500:])
-        results.extend(_pw_collect(data, artifacts))
-
-    return results
+    return results, env
 
 
 def _pw_collect(data, artifacts):
@@ -448,6 +569,7 @@ def _rf_run(root, handle, selected, artifacts, report):
         jobs.append(([file], [item['title'] for item in items]))
 
     results = []
+    env = {}
     done = 0
     for index, (files, names) in enumerate(jobs):
         if handle.stopped:
@@ -484,9 +606,11 @@ def _rf_run(root, handle, selected, artifacts, report):
         if stalled:
             text += '\n[执行超时，已中止]\n'
         handle.log_tail = _tail(text)
-        results.extend(_rf_collect(out_dir, artifacts))
+        rows, found_env = _rf_collect(out_dir, artifacts, root)
+        env = env or found_env
+        results.extend(rows)
 
-    return results
+    return results, env
 
 
 def _rf_stamp(value):
@@ -498,55 +622,115 @@ def _rf_stamp(value):
         return None
 
 
-def _rf_collect(out_dir, artifacts):
+def _rf_steps(test):
+    """把 Robot 的 keyword 树拍平。这是 RF 报告里最有价值的一块：
+    每个 keyword 都有库名、状态、起止时间，能直接看出「时间花在哪一步、失败在哪一步」。"""
+    rows = []
+    limit = 200
+
+    def walk(node, depth):
+        for kw in node.findall('kw'):
+            if len(rows) >= limit:
+                return
+            status = kw.find('status')
+            raw = (status.get('status') if status is not None else '') or ''
+            start = _rf_stamp(status.get('starttime')) if status is not None else None
+            end = _rf_stamp(status.get('endtime')) if status is not None else None
+            rows.append({
+                'title': kw.get('name') or '',
+                'category': kw.get('library') or '',
+                'duration_ms': int(max(0, (end - start) * 1000)) if start and end else 0,
+                'status': 'passed' if raw == 'PASS' else ('skipped' if raw == 'SKIP' else 'failed'),
+                'error': '',
+                'depth': depth,
+            })
+            walk(kw, depth + 1)
+
+    walk(test, 0)
+    return rows
+
+
+def _rf_env(root):
+    raw = root.get('generator') or ''
+    # 形如 `Robot 3.1.2 (Python 3.9.13 on win32)`
+    match = re.match(r'(.+?)\s+([\d][\w.]*)\s*\((.*?)\)', raw)
+    if match:
+        return {'framework': 'robot-selenium', 'tool': match.group(1).strip(),
+                'version': match.group(2), 'runtime': match.group(3).strip(),
+                'generator': raw}
+    return {'framework': 'robot-selenium', 'version': '', 'runtime': '', 'generator': raw}
+
+
+def _rf_collect(out_dir, artifacts, workspace=None):
     xml_path = Path(out_dir) / 'output.xml'
     if not xml_path.exists():
-        return []
+        return [], {}
     try:
         root = ET.parse(str(xml_path)).getroot()
     except ET.ParseError:
-        return []
+        return [], {}
 
     rows = []
-    for test in root.iter('test'):
-        status = test.find('status')
-        raw = (status.get('status') if status is not None else '') or ''
-        start = _rf_stamp(status.get('starttime')) if status is not None else None
-        end = _rf_stamp(status.get('endtime')) if status is not None else None
-        duration = int(max(0, (end - start) * 1000)) if start and end else 0
+    # 按 suite 遍历而不是 iter('test')：只有这样才能拿到用例所属文件的 source，
+    # 报告里的用例名匹配失败时还有文件可以兜底。
+    for suite in root.iter('suite'):
+        source = suite.get('source') or ''
+        rel_file = _rel(source, workspace) if (source and workspace) else _posix(source)
+        for test in suite.findall('test'):
+            status = test.find('status')
+            raw = (status.get('status') if status is not None else '') or ''
+            start = _rf_stamp(status.get('starttime')) if status is not None else None
+            end = _rf_stamp(status.get('endtime')) if status is not None else None
+            duration = int(max(0, (end - start) * 1000)) if start and end else 0
+            state = 'passed' if raw == 'PASS' else ('skipped' if raw == 'SKIP' else 'failed')
 
-        messages = [(m.get('level'), _clean(m.text)) for m in test.iter('msg')]
-        error = ''
-        for level, text in messages:
-            if level == 'FAIL' and text:
-                error = text[:1500]
-                break
+            messages = [(m.get('level'), _clean(m.text)) for m in test.iter('msg')]
+            error = ''
+            for level, text in messages:
+                if level == 'FAIL' and text:
+                    error = text[:1500]
+                    break
 
-        # 用例自己 Capture Page Screenshot 的产物：msg 里有 href="xxx.png"，按文件名归属。
-        shots = []
-        for _level, text in messages:
-            for name in re.findall(r'href="([^"]+\.(?:png|jpg|jpeg))"', text or '', re.I):
-                candidate = Path(out_dir) / name
-                if candidate.exists():
-                    rel = _under(candidate, artifacts)
-                    if rel and rel not in shots:
-                        shots.append(rel)
+            # 用例自己 Capture Page Screenshot 的产物：msg 里有 href="xxx.png"，按文件名归属。
+            shots = []
+            for _level, text in messages:
+                for name in re.findall(r'href="([^"]+\.(?:png|jpg|jpeg))"', text or '', re.I):
+                    candidate = Path(out_dir) / name
+                    if candidate.exists():
+                        rel = _under(candidate, artifacts)
+                        if rel and rel not in shots:
+                            shots.append(rel)
 
-        rows.append({
-            'id': '',
-            'file': '',
-            'line': 0,
-            'title': test.get('name') or '',
-            'project': '',
-            'status': 'passed' if raw == 'PASS' else ('skipped' if raw == 'SKIP' else 'failed'),
-            'duration_ms': duration,
-            'error': error,
-            'screenshots': shots,
-            'artifacts': [],
-            'retry': 0,
-            'env_error': False,
-        })
-    return rows
+            doc = test.find('doc')
+            # Robot 3.x 把标签放在 <tags><tag>..</tag></tags> 里，
+            # 老格式才是 <test> 下直接挂 <tag>；两种都收。
+            tags = [tag.text for tag in test.findall('tags/tag') if tag.text]
+            if not tags:
+                tags = [tag.text for tag in test.findall('tag') if tag.text]
+            rows.append({
+                'id': '',
+                'file': rel_file,
+                'line': 0,
+                'title': test.get('name') or '',
+                'project': '',
+                'status': state,
+                'duration_ms': duration,
+                'start_time': (status.get('starttime') if status is not None else '') or '',
+                'error': error,
+                'where': '',
+                'tags': tags,
+                'annotations': [],
+                'doc': _clean(doc.text)[:300] if doc is not None and doc.text else '',
+                'screenshots': shots,
+                'artifacts': [],
+                'retry': 0,
+                'worker': None,
+                # 跟 Playwright 一样：跑过的用例一律留步骤，不只失败的那几条
+                'steps': _rf_steps(test),
+                'env_error': False,
+            })
+
+    return rows, _rf_env(root)
 
 
 # ---------------------------------------------------------------- 统一入口
@@ -701,12 +885,12 @@ def _execute(app, run_id, handle, cases):
         try:
             selected = [cases[case_id] for case_id in run.selection() if case_id in cases]
             if run.framework == 'robot-selenium':
-                rows = _rf_run(Path(run.workspace), handle, selected, artifacts, handle.report)
+                rows, env = _rf_run(Path(run.workspace), handle, selected, artifacts, handle.report)
                 rows = _label(rows, selected, by_name=True)
             else:
-                rows = _pw_run(Path(run.workspace), handle, selected, artifacts, handle.report)
+                rows, env = _pw_run(Path(run.workspace), handle, selected, artifacts, handle.report)
                 rows = _label(rows, selected, by_name=False)
-            _persist(run, rows, started, handle)
+            _persist(run, rows, started, handle, env)
         except RunnerError as exc:
             run.status = 'stopped' if handle.stopped else 'error'
             run.error = str(exc)
@@ -725,13 +909,40 @@ def _execute(app, run_id, handle, cases):
             _prune()
 
 
-def _persist(run, rows, started, handle):
-    run.results_json = json.dumps(rows, ensure_ascii=False)
+def _dump_results(env, rows):
+    return json.dumps({'env': env, 'rows': rows}, ensure_ascii=False)
+
+
+def _trim_steps(rows):
+    """把通过用例的步骤清掉，只留失败的。返回清掉了多少条。
+
+    只在结果超过 RESULTS_BUDGET 时兜底调用：正常选几十条跑远到不了这个量级。
+    """
+    dropped = 0
+    for row in rows:
+        if row.get('steps') and row['status'] not in FAILED_STATUSES:
+            row['steps'] = []
+            dropped += 1
+    return dropped
+
+
+def _persist(run, rows, started, handle, env=None):
+    # results_json 从「一个数组」扩成 {env, rows}：报告头部要展示「什么环境跑出来的」，
+    # 但 test_runs 表已经是既有的，加列不会自动迁移，只能塞进这个 JSON 列。
+    # 读取侧兼容旧的纯数组格式，见 TestRun.results()。
+    env = dict(env or {})
+    text = _dump_results(env, rows)
+    if len(text.encode('utf-8')) > RESULTS_BUDGET:
+        env['steps_trimmed'] = _trim_steps(rows)
+        text = _dump_results(env, rows)
+    run.results_json = text
     run.total = len(rows)
     run.passed = sum(1 for row in rows if row['status'] == 'passed')
-    run.failed = sum(1 for row in rows if row['status'] in ('failed', 'timedOut', 'interrupted', 'error'))
+    run.failed = sum(1 for row in rows if row['status'] in FAILED_STATUSES)
     run.skipped = sum(1 for row in rows if row['status'] == 'skipped')
-    run.flaky = sum(1 for row in rows if row['status'] == 'flaky')
+    # 重试过才通过的才算 flaky。Playwright 的 status 永远不会有 'flaky' 这个值，
+    # 之前按 status 数，所以这一栏一直是 0。
+    run.flaky = sum(1 for row in rows if row['status'] == 'passed' and row.get('retry'))
     run.duration_ms = int((time.time() - started) * 1000)
     run.finished_at = datetime.utcnow()
     if handle.stopped:

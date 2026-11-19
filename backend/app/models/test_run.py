@@ -34,11 +34,22 @@ class TestRun(db.Model):
     started_at = db.Column(db.DateTime, default=datetime.utcnow)
     finished_at = db.Column(db.DateTime)
 
-    def results(self):
+    def _payload(self):
+        """results_json 有两种形态：早期是纯数组，现在为了带环境信息变成 {env, rows}。"""
         try:
-            return json.loads(self.results_json or '[]')
+            data = json.loads(self.results_json or '[]')
         except ValueError:
-            return []
+            return {}
+        if isinstance(data, list):
+            return {'env': {}, 'rows': data}
+        return data if isinstance(data, dict) else {}
+
+    def results(self):
+        return self._payload().get('rows') or []
+
+    def env(self):
+        """跑这次用的框架版本 / 运行时 / project，报告头部要展示。"""
+        return self._payload().get('env') or {}
 
     def selection(self):
         try:
@@ -66,6 +77,7 @@ class TestRun(db.Model):
     def to_dict(self, with_results=True):
         data = self.summary()
         data['selection'] = self.selection()
+        data['env'] = self.env()
         if with_results:
             data['results'] = self.results()
             data['log_tail'] = self.log_tail

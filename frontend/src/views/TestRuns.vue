@@ -170,6 +170,19 @@
               />
             </el-select>
             <el-button v-if="run.status === 'running'" size="small" @click="stopRun">停止</el-button>
+            <el-button
+              v-else
+              size="small"
+              :icon="Download"
+              :disabled="!run.results?.length"
+              @click="exportReport"
+            >导出报告</el-button>
+          </div>
+
+          <!-- 这份报告是什么版本、什么运行时跑出来的。换台机器复现问题时第一个要看它 -->
+          <div v-if="envLine" class="run-env">{{ envLine }}</div>
+          <div v-if="run.env?.steps_trimmed" class="run-env-note">
+            结果体积超过上限，已省略 {{ run.env.steps_trimmed }} 条通过用例的执行步骤；失败用例的步骤都还在。
           </div>
 
           <div v-if="run.status === 'running'" class="run-progress">
@@ -195,6 +208,11 @@
               <span class="run-metric-label">跳过</span>
               <span class="run-metric-value">{{ run.skipped }}</span>
             </div>
+            <!-- 重试后才通过的条数：这一栏比「失败」更能说明用例本身的稳定性 -->
+            <div class="run-metric">
+              <span class="run-metric-label">不稳定</span>
+              <span :class="['run-metric-value', { 'is-warn': run.flaky }]">{{ run.flaky }}</span>
+            </div>
             <div class="run-metric">
               <span class="run-metric-label">耗时</span>
               <span class="run-metric-value">{{ run.duration_ms ? seconds(run.duration_ms) : '—' }}</span>
@@ -203,55 +221,156 @@
 
           <div v-if="run.error" class="run-error">{{ run.error }}</div>
 
-          <div class="run-results">
-            <div v-if="!run.results?.length && run.status !== 'running'" class="run-empty-line">
-              这次没有执行到任何用例。
-            </div>
-            <template v-for="row in run.results || []" :key="row.id || (row.file + row.title)">
-              <div :class="['run-case', 'is-' + row.status]">
-                <button type="button" class="run-case-head" @click="toggleCaseCard(row)">
-                  <span :class="['run-dot', 'is-' + row.status]"></span>
-                  <span class="run-case-title">{{ row.title }}</span>
-                  <span v-if="row.retry" class="run-retry">重试 {{ row.retry }}</span>
-                  <span class="run-case-cost">{{ row.duration_ms ? seconds(row.duration_ms) : '' }}</span>
-                </button>
-                <div class="run-case-file">{{ row.file || '—' }}<template v-if="row.project"> · {{ row.project }}</template></div>
-                <div v-if="!isOpen(row) && row.error" class="run-case-preview">{{ firstLine(row.error) }}</div>
+          <!-- 筛选条：状态 + 分组开关。用例上百条时，先筛掉通过的一批比往下翻更快 -->
+          <div v-if="run.results?.length" class="run-filters">
+            <button
+              v-for="tab in statusTabs"
+              :key="tab.value"
+              type="button"
+              :class="['run-filter', { 'is-active': statusFilter === tab.value }]"
+              @click="statusFilter = tab.value"
+            >{{ tab.label }}<span v-if="tab.count" class="run-filter-count">{{ tab.count }}</span></button>
+            <span class="run-filter-spacer"></span>
+            <button
+              type="button"
+              :class="['run-filter', { 'is-active': groupByFile }]"
+              :title="groupByFile ? '当前按文件分组，点一下平铺' : '当前平铺，点一下按文件分组'"
+              @click="toggleGroupMode"
+            >按文件分组</button>
+          </div>
 
-                <div v-if="isOpen(row)" class="run-case-body">
-                  <div v-if="row.env_error" class="run-hint is-warn">
-                    目标站点不可达，这条失败可能出在环境上，不一定是脚本的问题。
-                  </div>
-                  <pre v-if="row.error" class="run-case-error">{{ row.error }}</pre>
-                  <div v-else class="run-hint">这条用例没有输出错误信息。</div>
-                  <div v-if="row.screenshots?.length" class="run-shots">
-                    <template v-for="shot in row.screenshots" :key="shot">
+          <div v-if="availableTags.length" class="run-tagbar">
+            <span class="run-tagbar-label">标签</span>
+            <button
+              v-for="tag in availableTags"
+              :key="tag"
+              type="button"
+              :class="['run-tag', { 'is-active': tagFilter.has(tag) }]"
+              @click="toggleTag(tag)"
+            >{{ tag }}</button>
+            <button v-if="tagFilter.size" type="button" class="run-tag is-clear" @click="tagFilter.clear()">清除</button>
+          </div>
+
+          <div class="run-results">
+            <div v-if="!visibleResults.length" class="run-empty-line">
+              {{ run.results?.length ? '当前筛选条件下没有用例。' : '这次没有执行到任何用例。' }}
+            </div>
+
+            <template v-for="group in groupedResults" :key="group.key">
+              <button
+                v-if="group.file"
+                type="button"
+                class="run-group-head"
+                :title="group.file"
+                @click="toggleGroup(group.key)"
+              >
+                <span :class="['run-group-caret', { 'is-open': !collapsedGroups.has(group.key) }]">›</span>
+                <span class="run-group-name">{{ group.file }}</span>
+                <span class="run-group-count">{{ group.items.length }}</span>
+                <span v-if="group.failed" class="run-group-bad">{{ group.failed }} 失败</span>
+              </button>
+
+              <template v-if="!collapsedGroups.has(group.key)">
+                <div
+                  v-for="row in group.items"
+                  :key="row.id || (row.file + row.title)"
+                  :class="['run-case', 'is-' + row.status]"
+                >
+                  <button type="button" class="run-case-head" @click="toggleCaseCard(row)">
+                    <span :class="['run-dot', 'is-' + row.status]"></span>
+                    <span class="run-case-title">{{ row.title }}</span>
+                    <span v-if="row.retry" class="run-retry">重试 {{ row.retry }}</span>
+                    <span
+                      v-if="row.steps?.length"
+                      class="run-step-count"
+                      :title="`共 ${row.steps.length} 步明细`"
+                    >{{ stepRootCount(row) }} 步</span>
+                    <span class="run-case-cost">{{ row.duration_ms ? seconds(row.duration_ms) : '' }}</span>
+                  </button>
+                  <div v-if="reportMeta(row)" class="run-case-file">{{ reportMeta(row) }}</div>
+                  <div v-if="!isOpen(row) && row.error" class="run-case-preview">{{ firstLine(row.error) }}</div>
+
+                  <div v-if="isOpen(row)" class="run-case-body">
+                    <div v-if="row.env_error" class="run-hint is-warn">
+                      目标站点不可达，这条失败可能出在环境上，不一定是脚本的问题。
+                    </div>
+                    <div v-if="row.where" class="run-hint">
+                      失败位置 <span class="run-where">{{ row.where }}</span>
+                    </div>
+                    <pre v-if="row.error" class="run-case-error">{{ row.error }}</pre>
+                    <div v-else-if="row.steps?.length" class="run-hint">这条用例没报错，下面是它跑过的每一步。</div>
+                    <div v-else class="run-hint">这条用例没有输出错误信息。</div>
+
+                    <!-- 执行步骤：原始 keyword 树是代码级的（一百步里大半是 Call Method 这种胶水），
+                         默认只铺顶层，点开才往下钻；失败那条路径自动展开 -->
+                    <div v-if="row.steps?.length" class="run-steps">
+                      <div class="run-steps-head">
+                        <span>执行步骤</span>
+                        <span class="run-steps-hint">{{ stepSummary(row) }}</span>
+                        <button
+                          v-if="hasExpandableSteps(row)"
+                          type="button"
+                          class="run-steps-fold"
+                          @click="toggleAllSteps(row)"
+                        >{{ stepsAllOpen(row) ? '收起全部' : '展开全部' }}</button>
+                        <button
+                          v-if="hasQuietSteps(row)"
+                          type="button"
+                          class="run-steps-fold"
+                          @click="toggleQuietSteps(row)"
+                        >{{ showQuiet.has(caseKey(row)) ? '隐藏琐碎步骤' : '显示琐碎步骤' }}</button>
+                      </div>
+                      <div
+                        v-for="step in visibleSteps(row)"
+                        :key="step.idx"
+                        :title="step.error || ''"
+                        :class="['run-step', {
+                          'is-bad': step.status === 'failed',
+                          'is-quiet': step.category === 'hook' || step.category === 'fixture'
+                        }]"
+                      >
+                        <span
+                          :class="['run-step-caret', { 'is-open': expandedSteps.has(stepKey(row, step.idx)) }]"
+                          :style="{ marginLeft: (step.depth || 0) * 13 + 'px' }"
+                          @click.stop="toggleStep(row, step)"
+                        >{{ step.children?.length ? '›' : '' }}</span>
+                        <span class="run-step-title">{{ step.title }}</span>
+                        <span v-if="step.category" class="run-step-cat">{{ step.category }}</span>
+                        <span :class="['run-step-cost', { 'is-slow': isSlowStep(step, row) }]">
+                          {{ msText(step.duration_ms) }}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div v-if="row.screenshots?.length" class="run-shots">
+                      <template v-for="shot in row.screenshots" :key="shot">
+                        <a
+                          v-if="!brokenShots.has(shot)"
+                          :href="artifactUrl(shot)"
+                          target="_blank"
+                          rel="noopener"
+                          class="run-shot"
+                        >
+                          <img :src="artifactUrl(shot)" :alt="shot" loading="lazy" @error="markShotBroken(shot)" />
+                        </a>
+                        <!-- 产物只保留最近 20 次：旧运行点开时截图可能已经被清掉了，
+                             不要留一个破图标在那儿。 -->
+                        <span v-else class="run-shot is-missing">截图已清理</span>
+                      </template>
+                    </div>
+                    <div v-if="row.artifacts?.length" class="run-artifacts">
                       <a
-                        v-if="!brokenShots.has(shot)"
-                        :href="artifactUrl(shot)"
+                        v-for="item in row.artifacts.filter(entry => entry.type !== 'image/png')"
+                        :key="item.path"
+                        :href="artifactUrl(item.path)"
                         target="_blank"
                         rel="noopener"
-                        class="run-shot"
-                      >
-                        <img :src="artifactUrl(shot)" :alt="shot" loading="lazy" @error="markShotBroken(shot)" />
-                      </a>
-                      <!-- 产物只保留最近 20 次：旧运行点开时截图可能已经被清掉了，
-                           不要留一个破图标在那儿。 -->
-                      <span v-else class="run-shot is-missing">截图已清理</span>
-                    </template>
-                  </div>
-                  <div v-if="row.artifacts?.length" class="run-artifacts">
-                    <a
-                      v-for="item in row.artifacts.filter(entry => entry.type !== 'image/png')"
-                      :key="item.path"
-                      :href="artifactUrl(item.path)"
-                      target="_blank"
-                      rel="noopener"
-                      class="list-act"
-                    >{{ item.name || item.path }}</a>
+                        class="list-act"
+                      >{{ item.name || item.path }}</a>
+                    </div>
                   </div>
                 </div>
-              </div>
+              </template>
             </template>
           </div>
         </template>
@@ -279,7 +398,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Refresh, Search } from '@element-plus/icons-vue'
+import { Download, Refresh, Search } from '@element-plus/icons-vue'
 import api from '../api'
 
 const STORAGE_KEY = 'autocase.recording.config'
@@ -298,12 +417,25 @@ const selected = reactive(new Set())
 const expandedFiles = reactive(new Set())
 const opened = reactive(new Set())
 const brokenShots = reactive(new Set())
+// 步骤树的展开状态（key = 用例 + 该步在 steps 里的下标）与「显示琐碎步骤」开关。
+// RF 的 keyword 树是代码级的：一个登录用例能有一百步，全铺出来没法看。
+const expandedSteps = reactive(new Set())
+const showQuiet = reactive(new Set())
 
 const activeFolder = ref('')
 const expandedDirs = reactive(new Set())
 const run = ref(null)
 const history = ref([])
 let pollTimer = null
+
+// 报告区的筛选状态。换一次运行就重置——上一批的标签在下一批里往往不存在，
+// 留着会把新结果筛成空列表，看起来像「没跑出来」。
+const statusFilter = ref('all')
+const groupByFile = ref(true)
+const collapsedGroups = reactive(new Set())
+const tagFilter = reactive(new Set())
+
+const FAILED_STATES = ['failed', 'timedOut', 'interrupted', 'error']
 
 const frameworkLabel = computed(() => ({
   'playwright-ts': 'Playwright TypeScript',
@@ -317,6 +449,63 @@ const percent = computed(() => {
   const progress = run.value?.progress
   if (!progress || !progress.total) return 8
   return Math.min(100, Math.round((progress.done / progress.total) * 100))
+})
+
+// 环境一行：版本 + 运行时 + project。换台机器复现失败时，第一眼看的就是这个。
+const envLine = computed(() => {
+  const env = run.value?.env || {}
+  const bits = []
+  if (env.tool || env.version) bits.push(`${env.tool || 'Playwright'} ${env.version || ''}`.trim())
+  if (env.runtime) bits.push(env.runtime)
+  if ((env.projects || []).length) bits.push(`projects ${env.projects.join(', ')}`)
+  return bits.join(' · ')
+})
+
+const statusTabs = computed(() => {
+  const rows = run.value?.results || []
+  const count = list => rows.filter(row => list.includes(row.status)).length
+  return [
+    { value: 'all', label: '全部', count: rows.length },
+    { value: 'failed', label: '失败', count: count(FAILED_STATES) },
+    { value: 'passed', label: '通过', count: count(['passed']) },
+    { value: 'skipped', label: '跳过', count: count(['skipped']) }
+  ]
+})
+
+const availableTags = computed(() => {
+  const tags = new Set()
+  for (const row of run.value?.results || []) {
+    for (const tag of row.tags || []) tags.add(String(tag))
+  }
+  return [...tags].sort()
+})
+
+const visibleResults = computed(() => {
+  const rows = run.value?.results || []
+  return rows.filter(row => {
+    if (statusFilter.value === 'failed' && !FAILED_STATES.includes(row.status)) return false
+    if (statusFilter.value === 'passed' && row.status !== 'passed') return false
+    if (statusFilter.value === 'skipped' && row.status !== 'skipped') return false
+    if (tagFilter.size && !(row.tags || []).some(tag => tagFilter.has(String(tag)))) return false
+    return true
+  })
+})
+
+// 分组后组内失败排前面：一个文件里十几条用例，先看到红的那几条。
+const groupedResults = computed(() => {
+  const rows = visibleResults.value
+  if (!groupByFile.value) return [{ key: '__all', file: '', items: rows, failed: 0 }]
+  const groups = new Map()
+  for (const row of rows) {
+    const key = row.file || '（未归属文件）'
+    if (!groups.has(key)) groups.set(key, { key, file: key, items: [], failed: 0 })
+    const group = groups.get(key)
+    group.items.push(row)
+    if (FAILED_STATES.includes(row.status)) group.failed += 1
+  }
+  const rank = row => (FAILED_STATES.includes(row.status) ? 0 : (row.status === 'skipped' ? 1 : 2))
+  for (const group of groups.values()) group.items.sort((a, b) => rank(a) - rank(b))
+  return [...groups.values()]
 })
 
 const caseIndex = computed(() => {
@@ -572,6 +761,178 @@ function firstLine(text) {
   return String(text || '').split('\n').find(line => line.trim()) || ''
 }
 
+// 报告行的元信息。分组视图下文件名已经在组头上，这里不重复；平铺时才补回来。
+function reportMeta(row) {
+  const bits = []
+  if (!groupByFile.value && row.file) bits.push(row.file)
+  if (row.project) bits.push(`project ${row.project}`)
+  if ((row.tags || []).length) bits.push(row.tags.join(' / '))
+  return bits.join(' · ')
+}
+
+// 步骤多是毫秒级，用通用格式化会全变成 0.0s
+function msText(value) {
+  const millis = Number(value || 0)
+  return millis < 1000 ? `${millis}ms` : `${(millis / 1000).toFixed(1)}s`
+}
+
+// 单步耗时占这条用例最慢一步的 60% 以上且超过 200ms → 标黄。
+// 「Go To 花了 7 秒、其余几步加起来 0.3 秒」这种一眼就能看出来。
+function isSlowStep(step, row) {
+  let max = 0
+  for (const item of row.steps || []) max = Math.max(max, item.duration_ms || 0)
+  const cost = step.duration_ms || 0
+  return cost > 200 && cost >= max * 0.6
+}
+
+/* ---------------------------------------------------------------- 步骤树
+   RF 的 keyword 树、Playwright 的 step 树都是代码级嵌套：一个登录用例能拍出
+   一百步，其中大半是 Call Method / Evaluate 这种 0ms 胶水。这里按 depth 还原成树，
+   默认只铺顶层，点开才往下钻；0ms 的叶子默认藏掉，失败的永远显示。 */
+
+const QUIET_STEP_MS = 10
+const stepTreeCache = new WeakMap()
+
+function caseKey(row) {
+  return row.id || `${row.file}|${row.title}`
+}
+
+function stepKey(row, index) {
+  return `${caseKey(row)}:${index}`
+}
+
+// 只数顶层不建树：用例列表每行都要用，508 条 × 上百步也不能在渲染里卡住
+function stepRootCount(row) {
+  let count = 0
+  for (const step of row.steps || []) if (!step.depth) count += 1
+  return count
+}
+
+function hasExpandableSteps(row) {
+  return (row.steps || []).some(step => (step.depth || 0) > 0)
+}
+
+function hasQuietSteps(row) {
+  return (row.steps || []).some(step => step.status === 'passed' && (step.duration_ms || 0) < QUIET_STEP_MS)
+}
+
+function stepTree(row) {
+  const steps = row.steps || []
+  const cached = stepTreeCache.get(row)
+  if (cached && cached.src === steps) return cached.tree
+  const roots = []
+  const stack = []
+  steps.forEach((step, idx) => {
+    const node = { ...step, idx, children: [] }
+    const depth = Math.max(0, step.depth || 0)
+    const parent = depth > 0 ? stack[depth - 1] : null
+    if (parent) parent.children.push(node)
+    else roots.push(node)
+    stack[depth] = node
+    stack.length = depth + 1
+  })
+  stepTreeCache.set(row, { src: steps, tree: roots })
+  return roots
+}
+
+// 0ms 且没有子节点的通过步骤默认不显示；有子节点的必须留着，否则整棵子树被藏没
+function isQuietLeaf(node, row) {
+  if (showQuiet.has(caseKey(row))) return false
+  return node.status === 'passed' && (node.duration_ms || 0) < QUIET_STEP_MS && !node.children.length
+}
+
+function visibleSteps(row) {
+  const out = []
+  const walk = nodes => {
+    for (const node of nodes) {
+      if (isQuietLeaf(node, row)) continue
+      out.push(node)
+      if (node.children.length && expandedSteps.has(stepKey(row, node.idx))) walk(node.children)
+    }
+  }
+  walk(stepTree(row))
+  return out
+}
+
+function toggleStep(row, node) {
+  if (!node.children.length) return
+  const key = stepKey(row, node.idx)
+  if (expandedSteps.has(key)) expandedSteps.delete(key)
+  else expandedSteps.add(key)
+}
+
+function walkStepNodes(row, visit) {
+  const walk = nodes => {
+    for (const node of nodes) {
+      visit(node)
+      if (node.children.length) walk(node.children)
+    }
+  }
+  walk(stepTree(row))
+}
+
+function stepsAllOpen(row) {
+  const roots = stepTree(row).filter(node => node.children.length)
+  return roots.length > 0 && roots.every(node => expandedSteps.has(stepKey(row, node.idx)))
+}
+
+function toggleAllSteps(row) {
+  const open = !stepsAllOpen(row)
+  walkStepNodes(row, node => {
+    if (!node.children.length) return
+    const key = stepKey(row, node.idx)
+    if (open) expandedSteps.add(key)
+    else expandedSteps.delete(key)
+  })
+}
+
+function toggleQuietSteps(row) {
+  const key = caseKey(row)
+  if (showQuiet.has(key)) showQuiet.delete(key)
+  else showQuiet.add(key)
+}
+
+function stepSummary(row) {
+  const total = (row.steps || []).length
+  const roots = stepRootCount(row)
+  if (roots >= total) return `共 ${total} 步，最慢的一步已标黄`
+  return `${roots} 个顶层步骤 · 共 ${total} 步明细`
+}
+
+// 失败那条路径自动展开：点开用例就看到挂在哪个关键字里，不用一层层扒。
+function seedFailedSteps(row) {
+  const walk = (nodes, trail) => {
+    for (const node of nodes) {
+      if (node.status === 'failed') {
+        for (const idx of trail) expandedSteps.add(stepKey(row, idx))
+      }
+      if (node.children.length) walk(node.children, [...trail, node.idx])
+    }
+  }
+  walk(stepTree(row), [])
+}
+
+function toggleTag(tag) {
+  if (tagFilter.has(tag)) tagFilter.delete(tag)
+  else tagFilter.add(tag)
+}
+
+function toggleGroup(key) {
+  if (collapsedGroups.has(key)) collapsedGroups.delete(key)
+  else collapsedGroups.add(key)
+}
+
+function toggleGroupMode() {
+  groupByFile.value = !groupByFile.value
+  collapsedGroups.clear()
+}
+
+function exportReport() {
+  if (!run.value) return
+  // 接口带 Content-Disposition: attachment，浏览器会直接下载，页面不会跳走
+  window.location.href = api.testRunExportUrl(run.value.id)
+}
+
 function markShotBroken(path) {
   brokenShots.add(path)
 }
@@ -583,7 +944,10 @@ function isOpen(row) {
 function toggleCaseCard(row) {
   const key = row.id || row.title
   if (opened.has(key)) opened.delete(key)
-  else opened.add(key)
+  else {
+    opened.add(key)
+    if (row.steps?.length) seedFailedSteps(row)
+  }
 }
 
 // 失败少的时候直接把错误摊开——否则用户只看到一行红，还得再点一下才知道为什么。
@@ -591,7 +955,10 @@ function toggleCaseCard(row) {
 function autoOpenFailures(data) {
   const failed = (data.results || []).filter(row => ['failed', 'timedOut', 'interrupted', 'error'].includes(row.status))
   if (!failed.length || failed.length > 3) return
-  for (const row of failed) opened.add(row.id || row.title)
+  for (const row of failed) {
+    opened.add(row.id || row.title)
+    if (row.steps?.length) seedFailedSteps(row)
+  }
 }
 
 function artifactUrl(path) {
@@ -650,6 +1017,10 @@ async function showRun(id) {
   try {
     const { data } = await api.getTestRun(id)
     run.value = data
+    // 换了运行就重置筛选：上一批的标签往往不在下一批里，留着会把结果筛成空列表。
+    statusFilter.value = 'all'
+    tagFilter.clear()
+    collapsedGroups.clear()
     if (data.status === 'running') {
       schedulePoll()
     } else {
@@ -997,7 +1368,7 @@ function errorText(error) {
 .run-metrics {
   flex: none;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
   margin: 12px 0;
 }
@@ -1013,6 +1384,174 @@ function errorText(error) {
 .run-metric-value { font-size: 19px; line-height: 1.3; color: var(--ink); font-variant-numeric: tabular-nums; }
 .run-metric-value.is-ok { color: var(--ok); }
 .run-metric-value.is-bad { color: var(--danger); }
+.run-metric-value.is-warn { color: var(--warn); }
+
+/* 环境一行：压在统计卡上方，字号刻意比正文小一档，不跟结果抢注意力 */
+.run-env {
+  flex: none;
+  margin-top: 10px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  background: var(--bg-sunken);
+  color: var(--ink-2);
+  font-size: 11.5px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+/* 结果过大的兜底提示：说明报告里少了什么，别让人以为步骤凭空没了 */
+.run-env-note {
+  flex: none;
+  margin-top: -4px;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--warn);
+  line-height: 1.6;
+}
+
+/* 筛选条：一排按钮而不是下拉，常用项一次点中 */
+.run-filters { flex: none; display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.run-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--line-ctl);
+  border-radius: 7px;
+  background: var(--bg-card);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color .14s ease, color .14s ease, background .14s ease;
+}
+.run-filter:hover { border-color: var(--accent); color: var(--accent); }
+.run-filter.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.run-filter-count { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.run-filter.is-active .run-filter-count { color: var(--accent); }
+.run-filter-spacer { flex: 1; }
+
+.run-tagbar { flex: none; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.run-tagbar-label { font-size: 11px; color: var(--faint); }
+.run-tag {
+  height: 21px;
+  padding: 0 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.run-tag:hover { border-color: var(--accent); color: var(--accent); }
+.run-tag.is-active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.run-tag.is-clear { border-style: dashed; }
+
+/* 文件分组头：一行承担「哪个文件、几条、几条失败」，点一下收起 */
+.run-group-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  text-align: left;
+}
+.run-group-head:hover { color: var(--ink-2); }
+.run-group-caret {
+  flex: none;
+  width: 10px;
+  font-size: 11px;
+  color: var(--faint);
+  transition: transform .14s ease;
+}
+.run-group-caret.is-open { transform: rotate(90deg); }
+.run-group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.run-group-count { flex: none; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.run-group-bad { flex: none; font-size: 10.5px; color: var(--danger); }
+
+/* 步骤树：缩进表达层级，耗时分列右对齐；最慢的一步标黄 */
+.run-steps {
+  margin-top: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  overflow: hidden;
+  /* 失败卡片整块是淡红底，步骤区要铺自己的底色：
+     否则每一行都泡在红里，层级和最慢步都看不出来。 */
+  background: var(--bg-card);
+  /* 一条用例可能有上百步：限高让卡片保持可读，靠内部滚动看剩下的 */
+  max-height: 340px;
+  overflow-y: auto;
+}
+.run-steps-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-sunken);
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.run-steps-hint { font-size: 10.5px; color: var(--faint); }
+.run-steps-fold {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.run-steps-fold:first-of-type { margin-left: auto; }
+.run-steps-fold + .run-steps-fold { margin-left: 10px; }
+.run-steps-fold:hover { text-decoration: underline; }
+/* 折叠三角：没有子步骤的位置留空占位，同层标题才对齐；缩进靠 marginLeft 跟着层级走 */
+.run-step-caret {
+  flex: none;
+  width: 11px;
+  text-align: center;
+  color: var(--faint);
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.12s ease;
+}
+.run-step-caret.is-open { transform: rotate(90deg); }
+.run-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 10px;
+  border-top: 1px solid var(--line-soft);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.run-step.is-bad { background: var(--danger-soft); color: var(--danger); }
+/* Browser launch / fixture 这类框架内部步骤淡化掉：
+   真正关心的「点了哪个元素、等哪个断言」才需要跳出来。 */
+.run-step.is-quiet { color: var(--faint); }
+.run-step-title { flex: 0 1 auto; min-width: 0; word-break: break-word; }
+/* 库名紧跟步骤名（靠左），耗时单独靠右：两个都挤到右边会读成一句话 */
+.run-step-cat { flex: none; margin-right: auto; font-size: 10px; color: var(--faint); }
+.run-step-cost { flex: none; margin-left: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.run-step-cost.is-slow { color: var(--warn); font-weight: 600; }
+.run-where { font-family: ui-monospace, Consolas, monospace; color: var(--accent); word-break: break-all; }
 
 .run-error {
   flex: none;
@@ -1065,6 +1604,8 @@ function errorText(error) {
   white-space: nowrap;
 }
 .run-retry { flex: none; font-size: 11px; color: var(--warn); }
+/* 步骤数：告诉用户这一条点开有执行树可看（跑过的都存了） */
+.run-step-count { flex: none; font-size: 11px; color: var(--faint); }
 .run-case-cost { flex: none; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .run-case-file {
   margin: 2px 0 0 16px;

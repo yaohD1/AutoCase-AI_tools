@@ -226,6 +226,10 @@ batchDeleteTestcases(ids) {
   testRunArtifactUrl(id, path) {
     return `/api/automation/testrun/runs/${id}/artifact?path=${encodeURIComponent(path)}`
   },
+  // 自包含 HTML（截图内联）：直接当下载链接用，不走 axios
+  testRunExportUrl(id) {
+    return `/api/automation/testrun/runs/${id}/export`
+  },
 
   // 自动化工具（录制生成，与「自动化脚本」的 generation 完全独立）
   getRecordingCurrent() {
