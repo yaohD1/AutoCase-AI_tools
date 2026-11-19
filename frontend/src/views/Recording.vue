@@ -235,6 +235,7 @@
         <el-button :icon="Setting" :type="configReady ? 'default' : 'primary'" @click="configOpen = true">
           配置
         </el-button>
+        <el-button :icon="VideoPlay" :disabled="!config.workspace.trim()" @click="goTestRuns">执行测试</el-button>
         <el-button :icon="Tickets" @click="$router.push('/recording/records')">生成记录</el-button>
         <el-button @click="$router.push('/')">返回首页</el-button>
       </div>
@@ -2367,6 +2368,13 @@ let tickTimer = null
 // ---- 配置持久化（仅浏览器本地便捷设置，不含敏感信息）----
 // targetPath 故意不持久化：它跟具体项目绑定，留着上一次的值等于替用户把路径锁死，
 // 下次换个项目还是那个路径，又回到「用户盲填、模型不敢改」的老问题。每次默认留空。
+// 执行测试是自动化工具的下一步：生成完代码不用再去项目里敲命令，
+// 这里把当前工作区带过去，进去就能挑用例。
+function goTestRuns() {
+  const workspace = config.workspace.trim()
+  router.push({ path: '/recording/runs', query: workspace ? { workspace } : {} })
+}
+
 function loadConfig() {
   // frameworkSource 记录「这个框架是谁定的」：'user' = 用户自己点过 / 面板 URL 明确带过来的；
   // 'auto' = 还没人选过，允许工作区检测预填。没有它的话，检测结果会把用户的选择一路覆盖

@@ -9,6 +9,7 @@ import AutomationRecords from '../views/AutomationRecords.vue'
 import Recording from '../views/Recording.vue'
 import ReplayDebug from '../views/ReplayDebug.vue'
 import RecordingRecords from '../views/RecordingRecords.vue'
+import TestRuns from '../views/TestRuns.vue'
 
 const routes = [
   {
@@ -60,6 +61,11 @@ const routes = [
     path: '/recording/records',
     name: 'RecordingRecords',
     component: RecordingRecords
+  },
+  {
+    path: '/recording/runs',
+    name: 'TestRuns',
+    component: TestRuns
   },
   // 未知路径回首页。没有这一条时，地址打错只留下一条顶栏和空白内容区，
   // 看起来像整站挂了；改成跳首页，至少还能继续用。

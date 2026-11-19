@@ -201,6 +201,32 @@ batchDeleteTestcases(ids) {
      return api.delete(`/knowledge/files/${id}`)
    },
 
+  // 执行测试：在目标项目自己的环境里跑勾选的用例
+  listTestCases(workspace, refresh = false) {
+    return api.get('/automation/testrun/cases', {
+      params: { workspace, refresh: refresh ? 1 : undefined },
+      // 枚举要起一次 Playwright / robot 的进程，500 条用例的 RF 项目约 3 秒，
+      // 留足余量，别让前端在慢机器上先超时。
+      timeout: 240000
+    })
+  },
+  listTestRuns(workspace, limit = 20) {
+    return api.get('/automation/testrun/runs', { params: { workspace, limit } })
+  },
+  startTestRun(payload) {
+    return api.post('/automation/testrun/runs', payload, { timeout: 120000 })
+  },
+  getTestRun(id) {
+    return api.get(`/automation/testrun/runs/${id}`)
+  },
+  stopTestRun(id) {
+    return api.post(`/automation/testrun/runs/${id}/stop`)
+  },
+  // 产物（失败截图）直接走 URL：<img src> 用不了 axios 的 baseURL，这里补上 /api 前缀
+  testRunArtifactUrl(id, path) {
+    return `/api/automation/testrun/runs/${id}/artifact?path=${encodeURIComponent(path)}`
+  },
+
   // 自动化工具（录制生成，与「自动化脚本」的 generation 完全独立）
   getRecordingCurrent() {
     return api.get('/automation/recording/current')

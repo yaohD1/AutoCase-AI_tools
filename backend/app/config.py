@@ -41,6 +41,12 @@ class Config:
     UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'storage', 'uploads')
     EXPORT_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'storage', 'exports')
     AUTOMATION_CONTROL_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'storage', 'automation_controls')
+    # 执行测试的产物（失败截图 / trace / output.xml）。放在仓库外的 storage 里，
+    # 目标项目自己的 test-results 就不会被写脏。
+    TEST_RUN_FOLDER = os.environ.get('TEST_RUN_FOLDER') or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'storage', 'test-runs')
+    # 只保留最近 N 次运行的产物：失败一条 129KB，RF 截图约 1MB/张，不设上限很快就几个 G。
+    TEST_RUN_KEEP = _positive_int_env('TEST_RUN_KEEP', 20, 1)
     AUTOMATION_WORKSPACE_ROOT = os.environ.get('AUTOMATION_WORKSPACE_ROOT') or os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'storage', 'automation_workspaces'
     )

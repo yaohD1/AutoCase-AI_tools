@@ -26,6 +26,8 @@ wheels/
 .env
 storage/uploads/*
 storage/exports/*
+# 执行测试的产物（失败截图 / trace / output.xml）：跟着运行记录走，不进仓库
+storage/test-runs/*
 !storage/uploads/.gitkeep
 !storage/exports/.gitkeep
 

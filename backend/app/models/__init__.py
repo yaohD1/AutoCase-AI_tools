@@ -8,10 +8,11 @@ from app.models.knowledge_file import KnowledgeFile
 from app.models.automation import AutomationConfig, AutomationGeneration
 from app.models.recording_generation import RecordingGeneration
 from app.models.recording_draft import RecordingDraft
+from app.models.test_run import TestRun
 from app.models.project_memory import ProjectMemory
 
 __all__ = [
     'db', 'Project', 'TestCase', 'Image', 'Sprint',
     'PendingModule', 'KnowledgeFile', 'AutomationConfig', 'AutomationGeneration',
-    'RecordingGeneration', 'RecordingDraft', 'ProjectMemory'
+    'RecordingGeneration', 'RecordingDraft', 'TestRun', 'ProjectMemory'
 ]
