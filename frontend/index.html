@@ -54,9 +54,16 @@
     #ac-boot {
       --boot-bg: #f5f7fa;
       --boot-line: rgba(19, 22, 28, .22);
+      /* 方框和字标周边的线分开：横线可以很淡，方框必须立得住，
+         否则和实心的 N、右侧文字比，整个图标像没画完 */
+      --boot-frame: rgba(19, 22, 28, .44);
+      --boot-track: #0071e3;
       --boot-edge: rgba(19, 22, 28, .12);
       --boot-ink: #3c4048;
       --boot-dot: #0071e3;
+      /* 描边时的冷光。浅色底下蓝雾本来就不显，.5 几乎看不见，抬到 .62；
+         再高文字边缘会糊成一圈脏边 */
+      --boot-glow: rgba(0, 113, 227, .62);
       position: fixed;
       inset: 0;
       z-index: 4000;
@@ -84,9 +91,12 @@
     html[data-theme="dark"] #ac-boot {
       --boot-bg: #12161d;
       --boot-line: rgba(255, 255, 255, .2);
+      --boot-frame: rgba(255, 255, 255, .46);
+      --boot-track: #0a84ff;
       --boot-edge: rgba(255, 255, 255, .12);
       --boot-ink: #c9d1dd;
       --boot-dot: #0a84ff;
+      --boot-glow: rgba(10, 132, 255, .78);
     }
 
     .boot-in {
@@ -95,36 +105,99 @@
       align-items: center;
       animation: boot-in .42s cubic-bezier(.2, .7, .3, 1) both;
     }
-    .boot-mark {
+
+    /* 开屏标识：方框 + N + 蓝点，右边是 AutoCase 字形。
+       文字用的是 Inter Medium 的字形轮廓（fonttools 导出的 path），不是 <text> ——
+       幕布出现时字体包还没下载，用 <text> 会在动画中途从雅黑跳成 Inter。
+       整块 307px 宽（1440 屏占 21%）：40px 的原尺寸在满屏里太小，四周空得发慌。 */
+    .boot-lock {
       display: flex;
       align-items: center;
-      justify-content: center;
-      width: 40px;
-      height: 40px;
-      border: 1px solid var(--boot-line);
+      gap: 19px;
+      /* 冷光描边：笔画带一圈蓝晕，收笔后 0.4s 褪干净（见 boot-glow）。
+         时长 3.22s = 作画 2.82s + 收尾 0.4s，比作画长一点，否则辉光会硬切。 */
+      animation: boot-glow 3.22s cubic-bezier(.4, 0, .2, 1) both;
     }
-    /* 那颗蓝点慢慢呼吸：加载慢的时候（冷启动的 Vite、首屏接口）画面不至于死着 */
-    .boot-mark i {
-      width: 10px;
-      height: 10px;
-      background: var(--boot-dot);
-      animation: boot-breathe 2.2s ease-in-out .2s infinite;
+    .boot-mark { display: block; overflow: visible; }
+    /* 线宽是按 viewBox 单位算的，图标从 40 长到 64 时视觉线宽会跟着乘 1.6，
+       所以这里反向调细：1.2 / 1.15 在 64px 下渲染出来约 3.2 / 3.1px。
+       方框比 N 略粗一点、颜色也调实了 —— 原来两边都像铅笔稿，撑不住右边的实心字。
+       dash 用 102 而不是 100：方框是闭合路径，周期正好等于周长时，收笔点和起笔点
+       叠在同一处，浮点误差会让接缝漏出半像素（就是顶部那个小豁口）。多给 2 个单位
+       让实线盖过起点，接缝就补上了。 */
+    .bm-frame {
+      fill: none;
+      stroke: var(--boot-frame);
+      stroke-width: 1.2;
+      stroke-dasharray: 102;
+      stroke-dashoffset: 102;
     }
-    .boot-word {
-      margin-top: 20px;
-      font: 500 12px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      letter-spacing: .44em;
-      text-indent: .44em; /* 补掉最后一个字母多出来的字距，让字标真的居中 */
-      color: var(--boot-ink);
+    .bm-n {
+      fill: none;
+      stroke: var(--boot-ink);
+      stroke-width: 1.15;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-dasharray: 102;
+      stroke-dashoffset: 102;
+    }
+    /* 双轨：先铺一条完整的淡蓝轨迹（像图纸上的底稿），墨色的方框和 N 再压上去。
+       轨迹比主笔画粗一点，收笔后仍会露出约 0.4px 的蓝边。
+       它没有 delay，所以 0~0.35s 会先看到一个完整的蓝框，然后墨线才慢慢覆盖。
+       时长 2.5s 跟到图标描完（2.17s），再留 0.3s 淡到 .1，不抢主笔画。 */
+    .bm-track {
+      fill: none;
+      stroke: var(--boot-track);
+      stroke-width: 1.35;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      opacity: 0;
+      animation: boot-track 2.5s cubic-bezier(.4, 0, .2, 1) both;
+    }
+    .bm-dot {
+      fill: var(--boot-dot);
+      opacity: 0;
+      transform: scale(.4);
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+    .boot-word { display: block; }
+    /* 轮廓描边：8 个字母各自沿自己的字形走一遍，同一刻起笔、同一刻收笔。
+       每条 path 都带 pathLength="1"，所以 dash 长度统一是 1，不用按字宽分别算。
+       1.82s 是刻意放慢的（比原来整体横扫的 1.3s 慢 40%）——描得快就成了「闪一下」，
+       慢下来才看得出笔尖沿笔画走。描完再统一填色，填的是 fill-opacity，
+       不是 fill 颜色：transparent → 墨色会经过灰黑，那一下会先暗一帧。 */
+    .boot-word path {
+      fill: var(--boot-ink);
+      fill-opacity: 0;
+      stroke: var(--boot-ink);
+      stroke-width: 48;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-dasharray: 1;
+      stroke-dashoffset: 1;
+      animation: boot-trace 1.82s cubic-bezier(.28, .5, .5, .8) .35s forwards,
+                 boot-fill .35s ease-out 2.17s forwards;
     }
     .boot-rule {
-      margin-top: 16px;
-      width: 44px;
+      margin-top: 26px;
+      width: 66px;
       height: 1px;
       background: var(--boot-line);
       transform-origin: center;
-      animation: boot-rule .38s cubic-bezier(.2, .7, .3, 1) .14s both;
+      transform: scaleX(0);
+      animation: boot-rule .3s cubic-bezier(.2, .7, .3, 1) 2.52s both;
     }
+
+    /* 整段作画 2.82s，所有线条统一在 2.17s 收笔：
+       方框 0.35–2.17、N 0.35–2.17、文字轮廓 0.35–2.17（三样同步，图标不再抢先画完），
+       2.17 蓝点点亮 + 文字填色 2.17–2.52，横线 2.52–2.82。
+       缓动用 .28/.5/.5/.8 而不是 ease-in-out：两头慢的话前 0.4s 只有一小段弧，
+       画面空得像卡住；前段把主要笔画带出来，后段慢慢收，起步才不空。
+       和 useBoot 的 HOLD（4.12s，即横线收起后再停 1.3s）对齐。 */
+    .bm-frame { animation: boot-draw 1.82s cubic-bezier(.28, .5, .5, .8) .35s both; }
+    .bm-n { animation: boot-draw 1.82s cubic-bezier(.28, .5, .5, .8) .35s both; }
+    .bm-dot { animation: boot-pop .26s cubic-bezier(.2, .8, .3, 1) 2.17s both; }
 
     /* 揭开：整块幕布向上推走。字标只淡出、不跟着位移 ——
        让它一起升的话，揭到一半会看见一个「AUTOCASE」悬在页面顶端，
@@ -142,10 +215,29 @@
       from { transform: scaleX(0); }
       to { transform: scaleX(1); }
     }
-    @keyframes boot-breathe {
-      0%, 100% { opacity: 1; }
-      50% { opacity: .4; }
+    @keyframes boot-draw { to { stroke-dashoffset: 0; } }
+    /* 字形轮廓走完（1.82s）之后再填色，两个动画靠 delay 接力，中间不重叠 */
+    @keyframes boot-trace { to { stroke-dashoffset: 0; } }
+    @keyframes boot-fill { to { fill-opacity: 1; } }
+    /* 冷光：起笔 0.4s 后才起晕（一上来就发光像灯泡点亮，不像笔在走），
+       一直保持到横线收完，最后 0.4s 褪干净。总时长 3.22s = 作画 2.82 + 收尾 0.4。
+       收尾色的 alpha 必须归零，否则 filter 会留下一层看不见但仍在合成的图层。 */
+    @keyframes boot-glow {
+      0% { filter: drop-shadow(0 0 0 rgba(0, 0, 0, 0)); }
+      12% { filter: drop-shadow(0 0 4.5px var(--boot-glow)); }
+      88% { filter: drop-shadow(0 0 4.5px var(--boot-glow)); }
+      100% { filter: drop-shadow(0 0 0 rgba(0, 0, 0, 0)); }
     }
+    /* 轨迹只服务图标，文字是轮廓描边、没有底稿，所以它自己 1.2s 就收，
+       不跟着文字拖到 2.8s，否则方框会一直泛蓝。
+       峰值压到 .32：太亮会把整只框染成蓝色，墨线压上去也看不出「覆盖」这个动作。 */
+    @keyframes boot-track {
+      0% { opacity: 0; }
+      6% { opacity: .32; }
+      85% { opacity: .32; }
+      100% { opacity: .1; }
+    }
+    @keyframes boot-pop { to { opacity: 1; transform: scale(1); } }
   </style>
 </head>
 <body>
@@ -154,8 +246,28 @@
        而清空的那一刻正是路由还没解析完的时候 -->
   <div id="ac-boot" aria-hidden="true">
     <div class="boot-in">
-      <span class="boot-mark"><i></i></span>
-      <span class="boot-word">AUTOCASE</span>
+      <!-- 标识沿用顶栏那套：40px 方框 + N + 蓝点，右边 AutoCase。
+           下面这串 path 是 Inter Medium 的 "AutoCase" 字形轮廓（2048 upem，
+           y 已经翻成 SVG 方向），改名字就用 fonttools 重新导一遍，别手改。 -->
+      <div class="boot-lock">
+        <svg class="boot-mark" viewBox="0 0 24 24" width="64" height="64">
+          <rect class="bm-track" x="1.6" y="1.6" width="20.8" height="20.8" rx="6.6"></rect>
+          <path class="bm-track" d="M8.2 16.2V7.8L14 16.2V7.8"></path>
+          <rect class="bm-frame" x="1.6" y="1.6" width="20.8" height="20.8" rx="6.6" pathLength="100"></rect>
+          <path class="bm-n" d="M8.2 16.2V7.8L14 16.2V7.8" pathLength="100"></path>
+          <circle class="bm-dot" cx="18.9" cy="12" r="1.35"></circle>
+        </svg>
+        <svg class="boot-word" viewBox="0 -1540 9589 1620" width="224" height="37.9">
+          <path d="M50.9 0 581.5 -1490H861.2L1400.8 0H1154.3L864.1 -828.9Q830.2 -930 789.8 -1066.9Q749.4 -1203.8 696.4 -1395.6H742.5Q690.7 -1202.2 650.5 -1063.6Q610.4 -925.1 579.4 -828.9L297.9 0ZM338.4 -392.6V-583.1H1113.3V-392.6Z" pathLength="1" transform="translate(0 0)"></path>
+          <path d="M528.9 14Q415 14 329.1 -33.8Q243.1 -81.7 195.5 -175.9Q147.9 -270.1 147.9 -407.6V-1118H367.9V-435.1Q367.9 -314.3 431.2 -245.9Q494.5 -177.5 604.1 -177.5Q678.7 -177.5 737.3 -210.1Q795.8 -242.7 829.8 -305.2Q863.7 -367.8 863.7 -455.6V-1118H1084.5V0H874L872.5 -273.7H894.4Q844.9 -122.1 751.2 -54Q657.5 14 528.9 14Z" pathLength="1" transform="translate(1452 0)"></path>
+          <path d="M626.4 -1118V-939.2H20V-1118ZM183.3 -1384H403.3V-302.4Q403.3 -234.6 431.5 -203.2Q459.8 -171.7 525.2 -171.7Q542.4 -171.7 570.3 -175.8Q598.3 -179.9 618.3 -183.9L657.3 -7.6Q621.9 4 581.8 9.3Q541.7 14.5 503.3 14.5Q350.5 14.5 266.9 -63.7Q183.3 -141.9 183.3 -284.3Z" pathLength="1" transform="translate(2684 0)"></path>
+          <path d="M618 23.3Q460.6 23.3 343.4 -48.8Q226.1 -120.9 161.3 -250.8Q96.4 -380.7 96.4 -552.7Q96.4 -727.2 161.3 -857.5Q226.1 -987.8 343.4 -1059.9Q460.6 -1132 618 -1132Q776.3 -1132 893.8 -1059.9Q1011.3 -987.8 1076.1 -857.5Q1140.9 -727.2 1140.9 -552.7Q1140.9 -380.7 1076.1 -250.8Q1011.3 -120.9 893.8 -48.8Q776.3 23.3 618 23.3ZM618 -162.7Q720.1 -162.7 786.7 -216.2Q853.3 -269.7 885.6 -358.5Q917.9 -447.2 917.9 -553.1Q917.9 -659.9 885.6 -749.2Q853.3 -838.5 786.7 -892.3Q720.1 -946 618 -946Q516.7 -946 450.8 -892.3Q384.9 -838.5 352.6 -749.6Q320.3 -660.8 320.3 -553.1Q320.3 -447.2 352.6 -358.5Q384.9 -269.7 450.8 -216.2Q516.7 -162.7 618 -162.7Z" pathLength="1" transform="translate(3381 0)"></path>
+          <path d="M783.9 20Q590.6 20 438.7 -71.7Q286.9 -163.4 199.8 -334.7Q112.6 -506 112.6 -744Q112.6 -983.2 200 -1154.6Q287.4 -1326 439.4 -1418Q591.3 -1510 783.9 -1510Q901.6 -1510 1005.1 -1476.2Q1108.7 -1442.4 1190.3 -1377.4Q1271.9 -1312.3 1325.7 -1219.2Q1379.5 -1126.1 1398.4 -1007.5H1168.8Q1154.6 -1079.3 1119.5 -1133.9Q1084.4 -1188.4 1033.2 -1226.3Q981.9 -1264.1 919 -1283.2Q856 -1302.3 786.1 -1302.3Q658 -1302.3 556.7 -1237.7Q455.5 -1173 397.4 -1048.5Q339.2 -924 339.2 -744Q339.2 -563.7 397.9 -439.3Q456.7 -314.9 557.7 -251.3Q658.8 -187.7 785.7 -187.7Q855.6 -187.7 918.5 -207.2Q981.4 -226.7 1032.8 -264.1Q1084.3 -301.6 1119.5 -356.5Q1154.8 -411.5 1169.2 -482.5H1398.8Q1381.9 -371.9 1329.9 -280.3Q1277.8 -188.7 1197 -121.1Q1116.2 -53.5 1011.5 -16.7Q906.9 20 783.9 20Z" pathLength="1" transform="translate(4618 0)"></path>
+          <path d="M460.7 24.6Q354.6 24.6 268.8 -14.6Q183 -53.8 132.9 -129.9Q82.8 -206 82.8 -316.2Q82.8 -411.5 119.5 -472.4Q156.3 -533.3 218.4 -569Q280.6 -604.8 357.1 -622.8Q433.7 -640.8 513.3 -650.1Q612.2 -662 674.1 -669.5Q735.9 -677.1 765.5 -694.5Q795.1 -712 795.1 -751.3V-757Q795.1 -819.6 771 -863Q746.9 -906.3 699.2 -929.6Q651.5 -952.8 580.5 -952.8Q508.1 -952.8 455.8 -930.3Q403.4 -907.8 370.6 -873.1Q337.8 -838.4 321.8 -800.3L114.8 -853.5Q152.9 -954.1 224 -1015.1Q295 -1076.1 386.9 -1104Q478.7 -1132 577.5 -1132Q644.8 -1132 720.8 -1115.9Q796.8 -1099.8 863.7 -1058Q930.6 -1016.2 972.8 -939.8Q1015 -863.5 1015 -742.2V0H802.2V-153.1H790.9Q769.2 -109.8 726.3 -68.8Q683.3 -27.8 617.5 -1.6Q551.8 24.6 460.7 24.6ZM509.6 -151.5Q599.8 -151.5 663.7 -186.9Q727.6 -222.3 761.7 -280Q795.8 -337.6 795.8 -402.6V-546.2Q783.9 -534.5 750.3 -524.8Q716.7 -515.1 674.1 -507.6Q631.5 -500.2 591.1 -495Q550.7 -489.7 525.1 -486.5Q463.3 -478.7 411.7 -459.8Q360.1 -440.8 329.7 -405.8Q299.3 -370.8 299.3 -313.1Q299.3 -260 326.6 -224.1Q353.9 -188.3 401.2 -169.9Q448.5 -151.5 509.6 -151.5Z" pathLength="1" transform="translate(6120 0)"></path>
+          <path d="M549.3 23.3Q427.7 23.3 333.3 -11.9Q239 -47.1 178.4 -115.6Q117.7 -184 97.9 -282.5L305.1 -325.9Q328.4 -238.5 391 -196.9Q453.6 -155.2 550.9 -155.2Q657.5 -155.2 720.4 -199.5Q783.4 -243.7 783.4 -306.4Q783.4 -359.7 744.6 -394.7Q705.8 -429.7 625.8 -447.5L437.7 -490Q282.4 -525.1 206.5 -601.9Q130.5 -678.6 130.5 -799.2Q130.5 -898.9 186 -973.8Q241.5 -1048.6 339 -1090.3Q436.5 -1132 562.8 -1132Q683.8 -1132 769.8 -1096.8Q855.8 -1061.6 909.3 -999Q962.9 -936.4 986.4 -853.3L789.1 -809.7Q767.9 -868.8 716.1 -913.5Q664.3 -958.3 565.1 -958.3Q473.7 -958.3 412.7 -917.3Q351.7 -876.2 351.7 -812.5Q351.7 -757.2 392.5 -722.4Q433.3 -687.7 525 -666.9L704.6 -626.9Q860 -592 935.1 -516.7Q1010.1 -441.5 1010.1 -324.9Q1010.1 -222.9 951.8 -144.5Q893.4 -66 789.5 -21.3Q685.6 23.3 549.3 23.3Z" pathLength="1" transform="translate(7283 0)"></path>
+          <path d="M629.8 23.3Q464.7 23.3 345.1 -48.1Q225.4 -119.5 160.9 -248.5Q96.4 -377.5 96.4 -551.1Q96.4 -723.3 159.8 -854Q223.1 -984.7 339.1 -1058.4Q455 -1132 610.8 -1132Q706.6 -1132 796 -1100.7Q885.4 -1069.4 956.3 -1002.3Q1027.3 -935.2 1068.7 -828.3Q1110.2 -721.5 1110.2 -570.3V-492.2H218.8V-656.5H996.8L894.1 -602.3Q894.1 -704.7 862.2 -783.2Q830.3 -861.7 767.5 -905.9Q704.8 -950 611.5 -950Q518.2 -950 452.2 -905Q386.1 -860 351.4 -786.5Q316.6 -712.9 316.6 -626.1V-514.4Q316.6 -399.4 356.1 -319.8Q395.6 -240.1 466.9 -199.4Q538.2 -158.7 632.1 -158.7Q693.6 -158.7 743.9 -176.3Q794.2 -194 830.5 -229.4Q866.8 -264.9 886.2 -317.2L1092.6 -268.5Q1066.2 -181.6 1002.6 -115.9Q939 -50.2 844.4 -13.4Q749.8 23.3 629.8 23.3Z" pathLength="1" transform="translate(8386 0)"></path>
+        </svg>
+      </div>
       <span class="boot-rule"></span>
     </div>
   </div>

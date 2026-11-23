@@ -35,7 +35,11 @@
           <div class="dbg-chrome">
             <span :class="['dbg-live', { on: playing }]"></span>
             <span class="dbg-addr" :title="state.url || ''">{{ prettyUrl || 'about:blank' }}</span>
+            <!-- 步数和进度原来单独占一行（约 28px 高），现在并进地址条：
+                 这一步在整条流程里的位置本来就该和 URL 一起看。 -->
+            <span class="dbg-stepcount">第 {{ state.index || 0 }} / {{ state.total || 0 }} 步</span>
             <span class="dbg-chrome-tag">沙箱</span>
+            <div class="dbg-bar"><i :style="{ width: progress + '%' }"></i></div>
           </div>
           <div class="dbg-canvas">
             <img v-if="streamSrc" :src="streamSrc" class="dbg-img" alt="沙箱中的被测页面" @error="onImgError">
@@ -53,19 +57,18 @@
           </div>
         </div>
 
-        <div class="dbg-meter">
-          <span class="dbg-meter-text">第 {{ state.index || 0 }} / {{ state.total || 0 }} 步</span>
-          <div class="dbg-bar"><i :style="{ width: progress + '%' }"></i></div>
-          <span class="dbg-meter-hint">{{ statusText }}</span>
-        </div>
-
         <div v-if="state.error" class="dbg-error">
           <span class="dbg-error-dot"></span>
           <span class="dbg-error-text">{{ state.error }}</span>
         </div>
       </section>
 
-      <aside :class="['dbg-side', { 'has-heal': !!heal }]">
+      <!-- 拖拽条压在 stage 和 side 的接缝上，不占布局宽度 -->
+      <div v-if="!immersive" class="dbg-split" title="拖动调整步骤栏宽度，双击复位"
+           @pointerdown="startSideDrag" @dblclick="resetSideWidth"></div>
+
+      <aside :class="['dbg-side', { 'has-heal': !!heal }]"
+             :style="sideWidth ? { width: sideWidth + 'px' } : null">
         <div class="dbg-ctrl">
           <button type="button" class="dbg-btn" :disabled="!canPlay" :title="playing ? '暂停' : '继续'"
                   @click="togglePlay">
@@ -367,6 +370,64 @@ const canAiHeal = computed(() => {
   return !['queued', 'investigating', 'applying'].includes(card.status)
 })
 const immersive = ref(false)
+
+/* 右侧栏宽度：可拖（240~560），双击复位，记住上次的值。
+   0 表示「没拖过」，此时交给 CSS 的 clamp(260px, 18%, 340px) 按窗口自适应——
+   1440 下是 260（画面 1149×718），1920 下是 340，不至于在大屏上缩成一条。
+   拖过之后就用固定像素，窗口再变也不改，用户的手动选择优先。 */
+const SIDE_MIN = 240
+const SIDE_MAX = 560
+const sideWidth = ref(readSideWidth())
+
+function readSideWidth() {
+  try {
+    const raw = Number(localStorage.getItem('ac-dbg-side'))
+    if (raw >= SIDE_MIN && raw <= SIDE_MAX) return raw
+  } catch (error) { /* 无痕模式读不到，用自适应 */ }
+  return 0
+}
+
+function saveSideWidth() {
+  if (!sideWidth.value) return
+  try { localStorage.setItem('ac-dbg-side', String(sideWidth.value)) } catch (error) { /* 忽略 */ }
+}
+
+let sideDragX = 0
+let sideDragW = 0
+
+function startSideDrag(event) {
+  // 第一次拖的时候 sideWidth 还是 0（自适应），得先量出侧栏当前的真实宽度，
+  // 否则一按下去就会跳到 0 或者 240。
+  const aside = event.currentTarget.nextElementSibling
+  sideDragX = event.clientX
+  sideDragW = sideWidth.value || (aside ? Math.round(aside.getBoundingClientRect().width) : SIDE_MIN)
+  window.addEventListener('pointermove', onSideDrag)
+  window.addEventListener('pointerup', endSideDrag)
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  event.preventDefault()
+}
+
+function onSideDrag(event) {
+  // 往左拖 → 侧栏变宽（分割条在侧栏左边）
+  const next = sideDragW - (event.clientX - sideDragX)
+  sideWidth.value = Math.min(SIDE_MAX, Math.max(SIDE_MIN, Math.round(next)))
+}
+
+function endSideDrag() {
+  window.removeEventListener('pointermove', onSideDrag)
+  window.removeEventListener('pointerup', endSideDrag)
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  saveSideWidth()
+}
+
+function resetSideWidth() {
+  // 双击回到自适应，而不是某个固定值：换到更大的窗口时它还能继续长
+  sideWidth.value = 0
+  try { localStorage.removeItem('ac-dbg-side') } catch (error) { /* 忽略 */ }
+}
+
 const diffLines = computed(() => {
   const text = (heal.value && heal.value.spec_diff) || ''
   if (!text) return []
@@ -683,6 +744,9 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  // 拖到一半直接切页面时，这两个监听会把已卸载的组件继续往回调
+  window.removeEventListener('pointermove', onSideDrag)
+  window.removeEventListener('pointerup', endSideDrag)
   stopPoll()
   api.controlDebugReplay('stop').catch(() => {})
 })
@@ -709,8 +773,8 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 12px;
   flex: none;
-  height: 48px;
-  padding: 0 18px;
+  height: 44px;
+  padding: 0 16px;
   background: var(--bg-card);
   border-bottom: 1px solid var(--line-soft);
 }
@@ -752,7 +816,6 @@ onBeforeUnmount(() => {
    因为它不是失败，是需要人确认的「绿得可疑」。 */
 .dbg-badge.warn { background: #fdf3e3; color: #8a5a12; border: 1px solid #e8cfa6; }
 
-.dbg-meter-hint { font-size: 11.5px; color: var(--faint); flex: none; }
 .dbg-head-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 
 /* 页头的小方按钮：齿轮（模型）和放大。和「重新开始」不是一个量级的操作，
@@ -788,8 +851,8 @@ onBeforeUnmount(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px;
+  gap: 6px;
+  padding: 8px;
 }
 
 .dbg-viewport {
@@ -806,6 +869,7 @@ onBeforeUnmount(() => {
 /* 地址条：让它看起来就是一扇浏览器，而不是一张飘着的图片。
    用户判断「这一步在哪个页面」靠的就是这一行。 */
 .dbg-chrome {
+  position: relative;
   flex: none;
   display: flex;
   align-items: center;
@@ -814,6 +878,25 @@ onBeforeUnmount(() => {
   padding: 0 12px;
   background: var(--bg-sunken);
   border-bottom: 1px solid var(--line-soft);
+}
+
+/* 步数从原来单独一行的进度条里搬过来，靠右、等宽数字 */
+.dbg-stepcount {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 进度条变成地址条底下的一条 2px 细线，不再占 28px 的独立一行 */
+.dbg-chrome .dbg-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 0;
+  background: transparent;
 }
 
 .dbg-live {
@@ -895,9 +978,7 @@ onBeforeUnmount(() => {
 
 @keyframes dbg-spin { to { transform: rotate(360deg); } }
 
-.dbg-meter { display: flex; align-items: center; gap: 10px; flex: none; }
-.dbg-meter-text { font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.dbg-bar { flex: 1; height: 3px; border-radius: 2px; background: var(--line-soft); overflow: hidden; }
+.dbg-bar { flex: 1; height: 2px; border-radius: 1px; background: var(--line-soft); overflow: hidden; }
 .dbg-bar i { display: block; height: 100%; background: var(--accent); transition: width .25s ease; }
 
 .dbg-error {
@@ -915,13 +996,36 @@ onBeforeUnmount(() => {
 .dbg-error-text { font-size: 12.5px; color: var(--danger); line-height: 1.5; word-break: break-word; }
 
 .dbg-side {
-  width: clamp(300px, 23%, 392px);
+  width: clamp(260px, 18%, 340px);
   flex: none;
   display: flex;
   flex-direction: column;
   background: var(--bg-card);
   border-left: 1px solid var(--line-soft);
 }
+
+/* 分割条：宽度为 0 的 flex 项，热区用伪元素往两边各扩 3px，
+   这样既不占画面宽度，又比 1px 的线好点中。 */
+.dbg-split {
+  flex: none;
+  width: 0;
+  position: relative;
+  cursor: col-resize;
+  z-index: 6;
+}
+
+.dbg-split::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 7px;
+  background: transparent;
+  transition: background .12s ease;
+}
+
+.dbg-split:hover::after { background: var(--accent); }
 
 .dbg-ctrl {
   display: flex;
@@ -1091,8 +1195,6 @@ onBeforeUnmount(() => {
    盖在右侧栏底部而不是居中遮罩：左边那半屏是出事现场，判断「要不要改」
    全靠对照它，遮住就等于让人盲选。 */
 .dbg-side { position: relative; }
-
-.dbg-side.has-heal { width: clamp(370px, 31%, 520px); }
 
 /* 沉浸模式：右侧栏变成浮在画面上的抽屉，预览吃满整宽。
    1440×900 的截图在这个宽度下缩放比从 ~0.67 提到 0.95 以上；

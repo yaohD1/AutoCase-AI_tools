@@ -90,12 +90,22 @@
   --radius-ctl: 8px;
   --radius-chip: 5px;
 
-  /* 字体 */
+  /* 字体
+     以前这一行写的是 -apple-system / 'SF Pro Display'，Windows 上两个都不存在，
+     实际落到 Segoe UI + 微软雅黑 两套拼着用——字面大小、笔画粗细、基线全对不上，
+     这就是界面看着「怪」的根源。现在西文走随包的 Inter，中文走随包的思源黑体，
+     中英混排是同一个人设计的，各平台只有一套观感。
+     最后两个兜底是「字体文件没加载出来」时的救命绳，正常不会命中。 */
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --sans: 'Inter Variable', 'Noto Sans SC Variable', -apple-system, BlinkMacSystemFont,
+    'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI', sans-serif;
 
   /* 尺寸 */
   --ctl-h: 32px;
+
+  /* Element Plus 的组件（按钮/输入框/表格）自带一套 'Helvetica Neue + 雅黑'，
+     不一并接管的话会出现「页头是 Inter、表格里是雅黑」的割裂 */
+  --el-font-family: var(--sans);
 }
 
 /* ==================== 夜墨（暗色）==================== */
@@ -202,6 +212,19 @@ html.dark {
   --el-fill-color-blank: var(--bg-card);
   --el-mask-color: var(--scrim);
   --el-box-shadow-light: none;
+}
+
+/* ==================== 基础排版 ==================== */
+
+/* 表单控件默认不继承字体：浏览器给 button / input 的是 Arial 13.33px。
+   Element 的按钮、输入框原来就是 Arial + 雅黑 混搭，和正文不是一套字。
+   这里统一成继承；teleport 到 body 的弹窗、下拉也走同一条路。 */
+body,
+button,
+input,
+select,
+textarea {
+  font-family: var(--sans);
 }
 
 /* ==================== 页面通用小件 ==================== */

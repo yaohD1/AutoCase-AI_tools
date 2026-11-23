@@ -85,9 +85,11 @@ watchEffect(() => {
 
 <style>
 #app {
-  font-family: var(--sans, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif);
+  font-family: var(--sans, 'Inter Variable', 'Noto Sans SC Variable', -apple-system, 'PingFang SC', 'Microsoft YaHei UI', sans-serif);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
+  /* 可变字体默认会做伪粗体/伪斜体，中文一伪粗就糊；关掉，粗体只认真实字重 */
+  font-synthesis: none;
 }
 
 /* 顶栏：一件深色横条压在页面上方就够，不加渐变之外的装饰。

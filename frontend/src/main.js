@@ -3,6 +3,10 @@ import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import 'element-plus/dist/index.css'
+// 界面字体随包走：西文/数字用 Inter，中文用思源黑体（Noto Sans SC）。
+// 两个都是 OFL 开源可商用，按 unicode-range 分片，浏览器只下用到的那几片。
+import '@fontsource-variable/inter'
+import '@fontsource-variable/noto-sans-sc'
 // 暗色只引 Element 自己的变量表（html.dark 下覆盖 --el-*），
 // 组件外观仍然由后面那四个样式文件决定
 import 'element-plus/theme-chalk/dark/css-vars.css'

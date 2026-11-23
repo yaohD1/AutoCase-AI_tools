@@ -28,7 +28,9 @@ CSS = """
 --muted:#77808d;--line:#2a3140;--ok:#4ac07a;--bad:#ef6b6b;--warn:#d9a43a;--accent:#5b8cff;--sunken:#151a21}}
 *{box-sizing:border-box}
 body{margin:0;padding:28px 22px 60px;background:var(--bg);color:var(--ink);
-font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+/* 导出的文件是拿到别的机器上双击打开的，字体只能靠系统：
+   Mac 用苹方、Windows 用雅黑，所以这里不写死某一套，交给 system-ui 决定 */
+font:14px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif}
 .wrap{max-width:1080px;margin:0 auto}
 h1{font-size:19px;margin:0 0 4px;font-weight:600}
 .sub{color:var(--muted);font-size:12.5px;margin-bottom:18px}

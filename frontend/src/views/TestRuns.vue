@@ -142,10 +142,60 @@
         </div>
       </aside>
 
+      <!-- 运行记录：跨目录/用例两列铺在底部。以前只在报告栏放了个 180px 下拉，
+           还要求「≥2 条」才渲染，只有一条记录时等于没有入口。 -->
+      <div class="run-hist">
+        <div class="run-hist-head">
+          <button type="button" class="run-hist-toggle" @click="historyOpen = !historyOpen">
+            <span :class="['tree-caret', { 'is-open': historyOpen }]">›</span>
+            运行记录
+          </button>
+          <span class="run-hist-count">{{ history.length }}</span>
+          <span class="run-bar-spacer"></span>
+          <button
+            type="button"
+            :class="['run-hist-scope', { 'is-on': historyScope === 'workspace' }]"
+            @click="setHistoryScope('workspace')"
+          >本工作区</button>
+          <button
+            type="button"
+            :class="['run-hist-scope', { 'is-on': historyScope === 'all' }]"
+            @click="setHistoryScope('all')"
+          >全部</button>
+          <button type="button" class="run-hist-refresh" title="重新拉取运行记录" @click="loadHistory()">刷新</button>
+        </div>
+        <div v-show="historyOpen" class="run-hist-body">
+          <div v-if="!history.length" class="run-hist-empty">
+            还没有运行记录，跑完一次就会列在这里。
+          </div>
+          <button
+            v-for="item in history"
+            :key="item.id"
+            type="button"
+            :class="['run-hist-row', { 'is-active': item.id === run?.id }]"
+            :title="historyTitle(item)"
+            @click="openRun(item.id)"
+          >
+            <span :class="['run-dot', 'is-' + item.status]"></span>
+            <span class="run-hist-time">{{ historyTime(item) }}</span>
+            <span v-if="historyScope === 'all'" class="run-hist-ws">{{ shortWorkspace(item.workspace) }}</span>
+            <span class="run-hist-nums">
+              <span v-if="item.status === 'running'" class="is-zero">执行中</span>
+              <template v-else-if="item.passed || item.failed">
+                <span class="is-ok">✓ {{ item.passed }}</span>
+                <span v-if="item.failed" class="is-bad">✕ {{ item.failed }}</span>
+              </template>
+              <span v-else class="is-zero">—</span>
+            </span>
+            <span class="run-hist-cost">{{ item.duration_ms ? seconds(item.duration_ms) : '—' }}</span>
+          </button>
+        </div>
+      </div>
+
       <section class="run-report">
         <div v-if="!run" class="run-empty">
-          <div class="run-empty-title">还没有运行记录</div>
-          <p>勾选左侧用例后点「执行所选用例」；跑完这里会列出每条用例的状态、耗时和失败截图。</p>
+          <div class="run-empty-title">还没有选中的运行</div>
+          <p>在左下「运行记录」里点一次历史运行，或者勾选用例后点「执行所选用例」。</p>
         </div>
 
         <template v-else>
@@ -154,21 +204,6 @@
             <span :class="['chip', statusTone(run.status)]">{{ statusLabel(run.status) }}</span>
             <span v-if="run.duration_ms" class="run-cost">{{ seconds(run.duration_ms) }}</span>
             <span class="run-bar-spacer"></span>
-            <el-select
-              v-if="history.length > 1"
-              :model-value="run.id"
-              size="small"
-              class="run-history"
-              placeholder="运行历史"
-              @change="openRun"
-            >
-              <el-option
-                v-for="item in history"
-                :key="item.id"
-                :label="historyLabel(item)"
-                :value="item.id"
-              />
-            </el-select>
             <el-button v-if="run.status === 'running'" size="small" @click="stopRun">停止</el-button>
             <el-button
               v-else
@@ -426,6 +461,9 @@ const activeFolder = ref('')
 const expandedDirs = reactive(new Set())
 const run = ref(null)
 const history = ref([])
+// 运行记录面板：默认展开；默认只看当前工作区（换项目后不至于把别人的记录混进来）。
+const historyOpen = ref(true)
+const historyScope = ref('workspace')
 let pollTimer = null
 
 // 报告区的筛选状态。换一次运行就重置——上一批的标签在下一批里往往不存在，
@@ -681,9 +719,52 @@ function statusTone(status) {
   return ''
 }
 
-function historyLabel(item) {
-  const time = formatTime(item.started_at).slice(6)
-  return `${time} · ${item.passed}/${item.total} 通过${item.status === 'failed' ? ' · 有失败' : ''}`
+/* ------------------------------------------------------------ 运行记录面板 */
+// 后端存的是 UTC（datetime.utcnow），formatTime 会给缺失的时区补 Z，这里沿用同一套
+function historyTime(item) {
+  if (!item.started_at) return '—'
+  const raw = String(item.started_at)
+  const date = new Date(raw.endsWith('Z') ? raw : raw + 'Z')
+  if (Number.isNaN(date.getTime())) return raw
+  const pad = num => String(num).padStart(2, '0')
+  const hm = `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  const today = new Date()
+  if (date.toDateString() === today.toDateString()) return hm
+  const yesterday = new Date(today)
+  yesterday.setDate(today.getDate() - 1)
+  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${hm}`
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${hm}`
+}
+
+function shortWorkspace(path) {
+  const text = String(path || '')
+  return text.split(/[\\/]/).filter(Boolean).pop() || text || '—'
+}
+
+function historyTitle(item) {
+  const bits = [formatTime(item.started_at), statusLabel(item.status),
+                `${item.passed}/${item.total} 通过`]
+  if (item.failed) bits.push(`${item.failed} 失败`)
+  if (item.duration_ms) bits.push(seconds(item.duration_ms))
+  bits.push(shortWorkspace(item.workspace))
+  return bits.join(' · ')
+}
+
+function setHistoryScope(value) {
+  if (historyScope.value === value) return
+  historyScope.value = value
+  loadHistory()
+}
+
+// 轮询只刷新 run 本身，列表项跟着同步一下：否则「执行中」那条会一直停在开始时的 0/0
+function syncHistory(item) {
+  const hit = history.value.find(row => row.id === item.id)
+  if (!hit) return
+  hit.status = item.status
+  hit.total = item.total
+  hit.passed = item.passed
+  hit.failed = item.failed
+  hit.duration_ms = item.duration_ms
 }
 
 function checkState(list) {
@@ -997,11 +1078,13 @@ function reload() {
 }
 
 async function loadHistory() {
-  if (!workspace.value) return
+  if (historyScope.value === 'workspace' && !workspace.value) return
   try {
-    const { data } = await api.listTestRuns(workspace.value, 20)
+    // 「全部」不传 workspace：后端按 if workspace 过滤，不传就是跨项目
+    const scope = historyScope.value === 'all' ? undefined : workspace.value
+    const { data } = await api.listTestRuns(scope, 20)
     history.value = data.runs || []
-    // 没有正在看的运行时，默认落在最近一次（可能是执行中）上，免得右半屏永远空着。
+    // 没有正在看的运行时，默认落在最近一次上，免得右半屏永远空着。
     if (!run.value && history.value.length) await showRun(history.value[0].id)
   } catch {
     history.value = []
@@ -1042,6 +1125,7 @@ async function pollOnce() {
   try {
     const { data } = await api.getTestRun(run.value.id)
     run.value = data
+    syncHistory(data)
     if (data.status === 'running') {
       schedulePoll()
     } else {
@@ -1108,7 +1192,9 @@ function errorText(error) {
   flex: 1;
   min-height: 0;
   display: grid;
+  /* 两行：上面是目录/用例，下面是跨两列的运行记录；报告区占满右侧整高 */
   grid-template-columns: 186px 256px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   background: var(--bg-card);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-card);
@@ -1117,6 +1203,8 @@ function errorText(error) {
 
 /* ---------- 目录列 ---------- */
 .run-dirs {
+  grid-column: 1;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1218,6 +1306,8 @@ function errorText(error) {
 
 /* ---------- 文件列 ---------- */
 .run-files {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1320,8 +1410,128 @@ function errorText(error) {
 .run-picked b { color: var(--ink-2); font-weight: 600; font-variant-numeric: tabular-nums; }
 .run-foot-spacer { flex: 1; }
 
+/* ---------- 运行记录（两列通铺在底部） ---------- */
+.run-hist {
+  grid-column: 1 / 3;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--line-soft);
+  border-right: 1px solid var(--line-soft);
+}
+.run-hist-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+}
+.run-hist-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.run-hist-count { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+/* 工作区范围切换：两个胶囊按钮比拼一个下拉省地方，一眼看到当前在看哪个范围 */
+.run-hist-scope {
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--faint);
+  cursor: pointer;
+}
+.run-hist-scope.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+.run-hist-refresh {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--faint);
+  cursor: pointer;
+}
+.run-hist-refresh:hover { color: var(--accent); text-decoration: underline; }
+.run-hist-body {
+  flex: 1;
+  min-height: 0;
+  max-height: 186px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 6px 6px;
+}
+.run-hist-body::-webkit-scrollbar { width: 8px; }
+.run-hist-body::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
+.run-hist-empty { padding: 10px 8px 12px; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+.run-hist-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.run-hist-row:hover { background: var(--bg-sunken); }
+.run-hist-row.is-active { background: var(--accent-soft); }
+.run-hist-time {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.run-hist-ws {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10.5px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-hist-nums {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.run-hist-nums .is-ok { color: var(--ok); }
+.run-hist-nums .is-bad { color: var(--danger); }
+.run-hist-nums .is-zero { color: var(--faint); }
+.run-hist-cost {
+  flex: none;
+  width: 44px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- 右侧报告 ---------- */
 .run-report {
+  grid-column: 3;
+  grid-row: 1 / 3;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1338,8 +1548,6 @@ function errorText(error) {
 .run-stamp { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .run-cost { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .run-bar-spacer { flex: 1; }
-.run-history { width: 180px; }
-.run-history :deep(.el-select__wrapper) { min-height: 26px; font-size: 12px; }
 
 .run-progress { flex: none; margin-top: 10px; }
 .run-progress-text {
@@ -1594,6 +1802,7 @@ function errorText(error) {
 .run-dot.is-failed, .run-dot.is-timedOut, .run-dot.is-interrupted, .run-dot.is-error { background: var(--danger); }
 .run-dot.is-skipped { background: var(--faint); }
 .run-dot.is-flaky { background: var(--warn); }
+.run-dot.is-running { background: var(--accent); }
 .run-case-title {
   flex: 1;
   min-width: 0;
