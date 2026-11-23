@@ -6,9 +6,12 @@
 3. 「允许降级」落库之后，这一步不再算待确认。
 """
 import http.server
+import io
 import threading
 import unittest
 from urllib.parse import urlparse
+
+from PIL import Image
 
 from app.services.recording.session import RecordingSession, _shot_error
 
@@ -34,6 +37,7 @@ def _click_like_a_human(session, locator, hold=0.12):
 
 INDEX_PAGE = (
     '<!doctype html><html><head><meta charset="utf-8"></head><body>'
+    '<div style="height:40px;background:#0a7d5a"></div>'
     '<h1>列表</h1>'
     '<button class="save">保存</button>'
     '<button class="save" onclick="location.href=\'/second.html\'">保存</button>'
@@ -43,10 +47,11 @@ INDEX_PAGE = (
 
 SECOND_PAGE = (
     '<!doctype html><html><head><meta charset="utf-8"></head><body>'
+    '<div style="height:40px;background:#c22"></div>'
     '<h1>第二页</h1></body></html>'
 )
 
-PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+JPEG_SIGNATURE = b'\xff\xd8\xff'
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -134,8 +139,11 @@ class AmbiguousShotTest(unittest.TestCase):
         self.assertTrue(shot.get('id'), step['target'])
         self.assertTrue(shot.get('w') and shot.get('h'), shot)
 
-        shot_bytes = (session.shot(step['no']) or {}).get('png')
-        self.assertTrue(shot_bytes and shot_bytes[:8] == PNG_SIGNATURE, '截图应该是合法 PNG')
+        shot_bytes = (session.shot(step['no']) or {}).get('data')
+        self.assertTrue(shot_bytes and shot_bytes[:3] == JPEG_SIGNATURE, '截图应该是合法 JPEG')
+        with Image.open(io.BytesIO(shot_bytes)) as img:
+            rgb = img.convert('RGB').getpixel((10, 10))
+        self.assertGreater(rgb[1], rgb[0], '图应该是跳转前那一页（顶部绿条），不是新页面（红条）')
 
     def test_items_carry_viewport_rects(self):
         """画框靠这几个字段：没有坐标，图上有几个元素也标不出来。"""
@@ -152,13 +160,14 @@ class AmbiguousShotTest(unittest.TestCase):
             # 两个按钮是左右并排的，横坐标必须不同 —— 全都一样说明取错了元素。
         self.assertNotEqual(items[0]['x'], items[1]['x'])
 
-    def test_unique_click_does_not_pay_for_a_screenshot(self):
-        """唯一的那几百次点击不该截图：那是白花 50~80ms。"""
+    def test_unique_click_also_gets_a_frame_without_a_screenshot(self):
+        """唯一元素不再现场截图；录屏帧是查表取的，顺手留一张也不增加成本。"""
         session = self._record()
         _click_like_a_human(session, session._test_page.get_by_role('button', name='提交'))
         self.assertTrue(_wait_for(lambda: len(session.ir()) == 2), session.ir())
-        self.assertNotIn('shot', session.ir()[-1]['target'])
-        self.assertIsNone(session.shot(session.ir()[-1]['no']))
+        self.assertIn('shot', session.ir()[-1]['target'])
+        data = (session.shot(session.ir()[-1]['no']) or {}).get('data')
+        self.assertTrue(data and data[:3] == JPEG_SIGNATURE)
 
     def test_degrade_stops_asking(self):
         session = self._record()
@@ -252,9 +261,11 @@ class EmbedShotTest(unittest.TestCase):
         self.assertTrue(shot.get('id'), step['target'])
         # iframe 是 500x400，截整页会是 1280x720
         self.assertEqual((shot['w'], shot['h']), (500, 400), shot)
-        png = (session.shot(step['no']) or {}).get('png') or b''
-        self.assertEqual(png[:8], PNG_SIGNATURE)
-        self.assertEqual(int.from_bytes(png[16:20], 'big'), 500, 'PNG 宽度应该就是 iframe 的宽度')
+        data = (session.shot(step['no']) or {}).get('data') or b''
+        self.assertEqual(data[:3], JPEG_SIGNATURE)
+        with Image.open(io.BytesIO(data)) as img:
+            self.assertAlmostEqual(img.size[0] / img.size[1], 500 / 400, places=2,
+                                   msg='裁出来的图应该保持 iframe 的宽高比')
 
     def test_fill_with_several_matches_gets_a_shot(self):
         """输入框以前永远没有图：它没有 pointerdown，只有 input 事件。"""

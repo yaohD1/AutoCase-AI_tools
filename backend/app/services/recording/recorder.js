@@ -213,6 +213,14 @@
       // 在页面里读，比 Python 侧事后读 frame.url / timeOrigin 更准（不会和导航抢时序）。
       _doc_url: location.href,
       _doc_stamp: (window.performance && performance.timeOrigin) || null,
+      // 按下这一刻的页面时钟（epoch 毫秒）。录屏帧带的是浏览器侧同一套时钟，
+      // 后端据此挑「时间戳 ≤ 这个值」的最后一帧，导航再快也抢不走按下前的画面。
+      // 只读 performance，不依赖 Date：系统时间被改也不影响。
+      _t: (window.performance && (performance.timeOrigin + performance.now())) || Date.now(),
+      // 视口尺寸（CSS 像素）。帧可能被等比缩到 1600 宽，前端画框要用 CSS 坐标，
+      // 所以尺寸在工作区里同步读，不靠事后去问页面（那时可能已经跳走）。
+      _vw: window.innerWidth,
+      _vh: window.innerHeight,
       _mark: mark,
       // 中心点被遮住、向上改用可点击容器时，记下原来的标签。
       // 界面拿它提示「这条定位上提过」，排查脚本点不到时能直接看出差异。

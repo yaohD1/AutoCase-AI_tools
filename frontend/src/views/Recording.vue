@@ -27,14 +27,13 @@
     <div v-if="embedMode && !panelCollapsed && !stepsCollapsed" class="embed-resizer" title="拖动调整面板宽度" @pointerdown="startResize"></div>
 
     <!-- 定位待确认（录制当场弹）：这是**必选**的，不是提醒。
-         不唯一的定位过后再选，页面早不是当时的样子了 —— 何况这一下点击本身就可能把页面带走。
-         所以按下鼠标那一刻就截了一张视口图，弹窗里直接在图上编号框出这几个，
-         选完立即落库，全程不用把被测页面翻回去。
-         版式复用 styles/dialog.css 的左右分栏：左边是图，右边是候选，窄窗口自动改成上下。 -->
+         图不是现场截的，而是录屏环形缓冲里「时间戳 ≤ 按下时刻」的最后一帧：
+         点击跳走、同 URL 删行都已经验过，图里永远是按下之前那一页。
+         左边看图确认位置，右边按行文本选——长行文本按原字号显示，不靠缩放后的图认字。 -->
     <el-dialog
       :model-value="!!locConfirm"
       class="dlg loc-dialog"
-      width="min(900px, calc(100vw - 32px))"
+      width="min(1180px, calc(100vw - 32px))"
       modal-class="loc-overlay"
       align-center
       append-to-body
@@ -43,17 +42,16 @@
       :close-on-press-escape="false"
     >
       <template #header>
-        <div>选择这一步的目标元素</div>
+        <div>确认这一步点的是哪一个</div>
         <div v-if="locConfirm" class="dlg-sub" :title="locConfirm.label">
           第 <b>{{ locConfirm.no }}</b> 步 · {{ locConfirm.label }}
+          <span v-if="locConfirm.count" class="loc-head-count">· 匹配 {{ locConfirm.count }} 个</span>
         </div>
       </template>
 
-      <div v-if="locConfirm" class="dlg-split">
-        <div :class="['dlg-viewer', { 'is-empty': !locConfirm.shotUrl || locConfirm.shotMissing }]">
+      <div v-if="locConfirm" :class="['dlg-split', { 'no-shot': !hasShot }]">
+        <div v-if="hasShot" class="dlg-viewer">
           <div class="dlg-stage">
-            <!-- 两层：shot-inner 就是「整张图按原比例放大后的那块」，用百分比撑开，
-                 所以弹窗宽度怎么变都不用重新量。聚焦到哪一块由 focusRect 决定。 -->
             <div
               v-if="locConfirm.shotUrl && !locConfirm.shotMissing"
               class="shot-stage"
@@ -88,20 +86,29 @@
               </div>
             </div>
             <span v-else-if="locConfirm.loading" class="dlg-stage-empty">正在取按下那一刻的页面…</span>
-            <span v-else class="dlg-stage-empty">{{ locConfirm.shotError || '这一页没截到图' }}</span>
+            <span v-else class="dlg-stage-empty">{{ locConfirm.shotError || '这一页没留下可靠的图' }}</span>
           </div>
-          <p v-if="locConfirm.shotUrl && !locConfirm.shotMissing" class="shot-tip">
-            图是<b>按下鼠标那一刻</b>的页面，已自动放大到候选所在区域；字母和右侧一致，点框也能直接选。
-          </p>
+          <div class="shot-bar">
+            <p class="shot-tip">图为<b>按下鼠标那一刻</b>的页面，框和右侧候选一一对应。</p>
+            <button type="button" class="shot-toggle" @click="locFull = !locFull">
+              {{ locFull ? '聚焦候选' : '看整页' }}
+            </button>
+          </div>
         </div>
 
         <div class="dlg-panel">
           <div class="dlg-bar">
             <span class="dlg-bar-text">匹配到 <b>{{ locConfirm.count }}</b> 个</span>
+            <span v-if="locConfirm.pageGone" class="loc-gone">页面已翻走 · 图为按下那一刻</span>
+            <span v-else-if="hasShot" class="dlg-bar-note">点一行，图上会框出它</span>
             <span v-if="locConfirm.count > locConfirm.items.length" class="dlg-bar-note">
               只列前 {{ locConfirm.items.length }} 个
             </span>
           </div>
+          <p v-if="locConfirm.loading" class="loc-noshot">正在向浏览器确认这几个候选…</p>
+          <p v-else-if="!hasShot" class="loc-noshot">
+            {{ locConfirm.shotError || '这一下没留下可靠的图' }}；下面是按下那一刻读到的候选，判断不受影响。
+          </p>
           <div class="dlg-scroll">
             <div v-if="locConfirm.items.length" class="loc-list">
               <button
@@ -119,26 +126,24 @@
                 @blur="hoverLoc = null"
               >
                 <span class="loc-no">{{ locTag(item.index) }}</span>
-                <!-- 证件照：同一张截图按元素位置裁出来的小窗，A 和 B 在这里不可能看混。
-                     元素在录制时就在视口外的话没有像素可裁，直接标「屏外」。 -->
                 <span
-                  v-if="locConfirm.shotUrl && !locConfirm.shotMissing"
+                  v-if="hasShot"
                   :class="['loc-thumb', { 'is-off': !thumbable(item), 'is-origin': locConfirm.active === item.index }]"
                 >
                   <template v-if="thumbable(item)">
                     <img :src="locConfirm.shotUrl" :style="thumbImgStyle(item)" alt="" />
-                    <b class="loc-thumb-ring" :style="thumbRingStyle(item)"></b>
                   </template>
                   <span v-else class="loc-thumb-off">屏外</span>
                 </span>
                 <span class="loc-main">
-                  <span class="loc-text">{{ item.row || item.text || ('<' + item.tag + '>') }}</span>
+                  <span class="loc-text">{{ rowLabel(item) }}</span>
                   <span class="loc-meta">
                     <span v-if="item.tag">&lt;{{ item.tag }}&gt;</span>
                     <span v-if="locConfirm.active === item.index" class="loc-origin">录制时点的</span>
-                    <span v-if="!item.visible" class="loc-hidden">不在视口里</span>
+                    <span v-if="item.visible === false" class="loc-hidden">不在视口里</span>
                   </span>
                 </span>
+                <span :class="['loc-check', { 'is-on': locConfirm.picked === item.index }]"></span>
               </button>
             </div>
             <p v-else class="dlg-empty">没有可选的候选了</p>
@@ -150,10 +155,10 @@
       <template #footer>
         <div class="dlg-foot">
           <span class="dlg-foot-note">
-            {{ locQueue.length ? `还有 ${locQueue.length} 步待确认` : '必须选一个才能继续' }}
+            {{ locQueue.length ? `还有 ${locQueue.length} 步待确认` : '选一行才能继续' }}
           </span>
           <div class="dlg-foot-actions">
-            <el-button size="small" :loading="locDegrading" @click="degradeLocConfirm">不看这个，允许降级</el-button>
+            <el-button size="small" :loading="locDegrading" @click="degradeLocConfirm">先按录制时定位</el-button>
             <el-button
               type="primary"
               size="small"
@@ -2933,6 +2938,8 @@ const locPicking = ref(false)
 const locDegrading = ref(false)
 // 鼠标停在哪个候选上：图上和列表里的 A/B/C 要能互相指认，光靠字母还是容易看串行。
 const hoverLoc = ref(null)
+// 图默认聚焦到候选那一块（整页缩到 700px 里字太小）；点「看整页」才退回全图看上下文。
+const locFull = ref(false)
 const GOTO_STEP_REASONS = {
   no_url: '这一步没有记下页面地址，翻不回去',
   no_frame: '找不到可操作的页面，浏览器可能已经关了',
@@ -2946,16 +2953,18 @@ function freshSteps(list) {
   return (list || []).filter(s => !seenStepNos.has(s.no))
 }
 
-function needsLocConfirm(step) {
+function needsLocConfirm(step, auto = false) {
   const target = step.target
   if (!target || target.degraded) return false
   // 已经亲手确认过的步骤不再打扰。
   if (chosenOf(target)) return false
   const status = effectiveStatus(step)
-  // fragile = 页面上有多个同名元素，当前框架只能退回结构路径（css）才唯一。
-  // 这类步骤生成时靠「层级里的第 N 个」取元素，页面一改版就点错，正是「事后回列表
-  // 再框已经框错了」的主要来源（典型：点删除，这一行连同按钮一起消失），必须当场选。
-  if (status !== 'ambiguous' && status !== 'suspect' && status !== 'fragile') return false
+  // fragile = 只能靠结构路径才唯一。它也要人看一眼，但不该在录制中自动弹：
+  // 图标按钮多的时候每一下都弹，录制根本进行不下去。auto 只留给 ambiguous/suspect，
+  // fragile 进停止后的「逐条确认」清单。
+  if (status !== 'ambiguous' && status !== 'suspect') {
+    if (!(status === 'fragile' && !auto)) return false
+  }
   // 有「按下鼠标那一刻」的截图：页面跑没跑、元素有没有被这一下点击带走，都不影响在图上选。
   if (target.shot) return true
   // 没图就只能靠实时框选，那几种情况框出来是错的（页面已翻走 / 元素已被点走），不弹。
@@ -2967,6 +2976,16 @@ function needsLocConfirm(step) {
 function withIndex(items) {
   return (items || []).map((item, i) => ({ ...item, index: typeof item.index === 'number' ? item.index : i }))
 }
+
+// 行文本是弹窗的主判据：它在页面 pointerdown 那一刻就同步读进 payload 了，
+// 导航再快也不会变；图只是用来确认位置。空白压成一个空格，长文本交给 CSS 截两行。
+function rowLabel(item) {
+  const text = String(item?.row || item?.text || item?.tag || '元素').replace(/\s+/g, ' ').trim()
+  return text || '元素'
+}
+
+// 有没有一张能看的图：URL 有、且没有加载失败。没图时整块左栏收起，列表占满。
+const hasShot = computed(() => !!(locConfirm.value?.shotUrl && !locConfirm.value?.shotMissing))
 
 // 这个弹窗只属于「还活着的录制」：浏览器一关，后面所有命令都会 409「录制已结束」，
 // 弹窗既选不了也关不掉，遮罩会把整页锁死。所以只要录制不能再回答，就立刻收掉。
@@ -2988,7 +3007,7 @@ function trackLocConfirm(fresh, data) {
   // 停录/暂停期间不再弹：那已经不是「当场」了，硬弹只会打断收尾。
   if (data.status !== 'recording' || data.paused) return
   if (!canAnswerLoc()) return
-  const hits = fresh.filter(needsLocConfirm).map(s => s.no)
+  const hits = fresh.filter(s => needsLocConfirm(s, true)).map(s => s.no)
   if (!hits.length) return
   locQueue.value = [...locQueue.value, ...hits.filter(no => no !== locConfirm.value?.no)]
   if (!locConfirm.value) openNextLocConfirm(true)
@@ -3031,6 +3050,7 @@ async function openNextLocConfirm(auto = true) {
   // 等于替用户把页面滚了），弹窗自己就能说清楚。
   const shot = step.target?.shot
   hoverLoc.value = null
+  locFull.value = false
   locAuto = auto
   locConfirm.value = {
     no,
@@ -3049,6 +3069,8 @@ async function openNextLocConfirm(auto = true) {
     // 截图失败的原因：后端现在会把「页面跳走了 / 截图超时 / 浏览器关了」带上来。
     shotError: shot?.error || '',
     shotMissing: false,
+    // 停止后复核时页面可能已经翻走：图仍然是按下那一刻的，但界面要说明这件事。
+    pageGone: !!step.target?.page_gone,
     // 页面跑掉时的兜底入口；有截图这条路径根本不走它。
     gone: false,
     returnUrl: '',
@@ -3169,11 +3191,31 @@ function visibleBox(item, shot) {
   return { left, top, right, bottom }
 }
 
+// 行矩形：候选在表格里时，按钮都在最右列，只按元素矩形聚焦会得到一条竖缝，
+// 看不到「张三还是李四」。聚焦和缩略图用整行，画框仍然画在按钮上。
+function rowBox(item) {
+  if (typeof item.row_w === 'number' && item.row_w > 0) {
+    return { x: item.row_x || 0, y: item.row_y || 0, w: item.row_w, h: item.row_h || item.h || 0 }
+  }
+  return { x: item.x || 0, y: item.y || 0, w: item.w || 0, h: item.h || 0 }
+}
+
+function visibleRowBox(item, shot) {
+  const box = rowBox(item)
+  const left = Math.max(0, box.x)
+  const top = Math.max(0, box.y)
+  const right = Math.min(shot.w, box.x + box.w)
+  const bottom = Math.min(shot.h, box.y + box.h)
+  if (right - left < 1 || bottom - top < 1) return null
+  return { left, top, right, bottom }
+}
+
 const focusRect = computed(() => {
   const shot = locConfirm.value?.shot
   if (!shot?.w || !shot?.h) return null
   const full = { x: 0, y: 0, w: shot.w, h: shot.h }
-  const boxes = (locConfirm.value.items || []).map(it => visibleBox(it, shot)).filter(Boolean)
+  if (locFull.value) return full
+  const boxes = (locConfirm.value.items || []).map(it => visibleRowBox(it, shot)).filter(Boolean)
   if (!boxes.length) return full
   let left = Math.min(...boxes.map(b => b.left)) - FOCUS_PAD
   let top = Math.min(...boxes.map(b => b.top)) - FOCUS_PAD
@@ -3240,49 +3282,51 @@ function shotTagOutside(item) {
 
 // ---- 候选证件照：把同一张截图当放大镜用 ----// 不走 background-size 是因为元素宽高差太多（图标 16、容器 400），
 // 直接摆一张按比例缩放、按元素中心对齐的 img 更稳，还能顺手在里面画个圈。
-const THUMB_W = 46
-const THUMB_H = 30
-const THUMB_FILL = 0.78       // 元素最多占缩略图多宽，剩下的留作上下文
+const THUMB_W = 64
+const THUMB_H = 40
+const THUMB_FILL = 0.92       // 行图最多占缩略图多宽，剩下的留作上下文
 const LOC_TAGS = 'ABCDEFGHIJ' // 只列前 10 个，字母够用
 
 function locTag(index) {
   return LOC_TAGS[index] || String((index || 0) + 1)
 }
 
+// 缩略图只取行的左侧一截（姓名/手机）：整行 1400px 缩到 64px 什么都看不清，
+// 但取 260px 至少能看出「不是同一行」；可读的文字由卡片本身承担，不靠这张小图。
+// 取「行高 × 缩略图比例」这么宽：整行缩进去只有一条细线，按高度裁一段
+// 至少能把姓名放到 ~10px，扫一眼能看出不是同一行。
+function thumbBox(item) {
+  const box = rowBox(item)
+  const ratio = THUMB_W / THUMB_H
+  const h = box.h || item.h || THUMB_H
+  const w = Math.min(box.w || h * ratio, h * ratio)
+  return { x: box.x, y: box.y, w, h }
+}
+
 function thumbable(item) {
   const shot = locConfirm.value?.shot
-  if (!shot?.w || !shot?.h || !item.w || !item.h) return false
-  return !!visibleBox(item, shot)
+  const box = thumbBox(item)
+  if (!shot?.w || !shot?.h || !box.w || !box.h) return false
+  return box.x < shot.w && box.y < shot.h && box.x + box.w > 0 && box.y + box.h > 0
 }
 
 // 最多 1:1：放大只会把本来就几十像素的区域插值成一团糊，不如按原尺寸给个窗口。
 function thumbScale(item) {
-  return Math.min(1, (THUMB_W * THUMB_FILL) / Math.max(item.w || 1, 1))
+  return Math.min(1, (THUMB_W * THUMB_FILL) / Math.max(thumbBox(item).w || 1, 1))
 }
 
 function thumbImgStyle(item) {
   const shot = locConfirm.value?.shot
   if (!shot) return { display: 'none' }
+  const box = thumbBox(item)
   const scale = thumbScale(item)
-  const cx = (item.x || 0) + (item.w || 0) / 2
-  const cy = (item.y || 0) + (item.h || 0) / 2
+  const cx = box.x + box.w / 2
+  const cy = box.y + box.h / 2
   return {
     width: shot.w * scale + 'px',
     height: shot.h * scale + 'px',
     left: Math.round((THUMB_W / 2 - cx * scale) * 10) / 10 + 'px',
     top: Math.round((THUMB_H / 2 - cy * scale) * 10) / 10 + 'px'
-  }
-}
-
-function thumbRingStyle(item) {
-  const scale = thumbScale(item)
-  const w = Math.max((item.w || 0) * scale, 6)
-  const h = Math.max((item.h || 0) * scale, 6)
-  return {
-    width: w + 'px',
-    height: h + 'px',
-    left: (THUMB_W - w) / 2 + 'px',
-    top: (THUMB_H - h) / 2 + 'px'
   }
 }
 
@@ -3560,6 +3604,21 @@ const draftTip = computed(() => {
 // 同一条会话再存一次是更新，不会在记录里堆副本（draft_id 由后端记在会话上）。
 async function saveDraft() {
   if (savingDraft.value || !steps.value.length) return
+  // 草稿只存步骤和定位（drafts._lean_target 会剥掉 shot / matches）。
+  // 还有未确认的步骤时，续录后它们既没有当时的图、也没有候选行文本，
+  // 只能按录制时的定位生成或重新框选——这件事必须现在说清楚，不能等续录才发现。
+  if (reviewCount.value > 0) {
+    try {
+      await ElMessageBox.confirm(
+        `还有 ${reviewCount.value} 步定位未确认。存档不会保存这些步骤的截图和候选行，` +
+        '续录后只能按录制时的定位生成，或者重新框选。',
+        '先存档，还是先处理完？',
+        { confirmButtonText: '仍然保存', cancelButtonText: '先处理', type: 'warning' }
+      )
+    } catch (error) {
+      return
+    }
+  }
   savingDraft.value = true
   try {
     const { data } = await api.saveRecordingDraft({
@@ -6147,12 +6206,15 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 高度跟着图走，不用 dialog.css 那个固定视口高度：
    横屏截图在固定 660 高的画布里只占 270，上下会空出两大块。 */
 .loc-dialog .dlg-split { height: auto; }
-/* 宽窗里给图多一点：候选文字短，图大一点才看得清位置。
+/* 宽窗里给图 1.75 份：1600 宽的帧缩到 ~700 才勉强能读表格；窄了就退回单列。
    写进 min-width 里，否则会盖掉 dialog.css 在 900 以下改成单列的那条。 */
-@media (min-width: 901px) {
-  .loc-dialog .dlg-split { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+@media (min-width: 981px) {
+  .loc-dialog .dlg-split { grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); }
 }
-.loc-dialog .dlg-panel { max-height: min(620px, calc(100dvh - 220px)); }
+.loc-dialog .dlg-panel { max-height: min(660px, calc(100dvh - 210px)); }
+/* 没图时左栏整块收起，列表占满：留一个空画布只会让人以为图没加载出来。 */
+.loc-dialog .dlg-split.no-shot { grid-template-columns: minmax(0, 1fr); }
+.loc-dialog .dlg-split.no-shot .dlg-viewer { display: none; }
 /* 没图时只剩一句原因：给点内边距，否则窄屏下文字会贴着框线 */
 .loc-dialog .dlg-stage-empty { padding: 18px; text-align: center; }
 
@@ -6170,7 +6232,12 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 }
 /* 整张图放大后的那块，坐标系还是「整张图」：框的百分比定位一个字都不用改。
    百分比而不是 px，是因为画布宽度由 CSS 算，面板 600 和弹窗 900 拿不到同一个值。 */
-.shot-inner { position: absolute; }
+.shot-inner {
+  position: absolute;
+  /* 「看整页 / 聚焦候选」切换时是平移+缩放，不是硬跳；150ms 够看清但不会拖泥带水 */
+  transition: left .16s cubic-bezier(.3, .7, .3, 1), top .16s cubic-bezier(.3, .7, .3, 1),
+              width .16s cubic-bezier(.3, .7, .3, 1), height .16s cubic-bezier(.3, .7, .3, 1);
+}
 .shot-stage img { display: block; width: 100%; height: 100%; user-select: none; }
 /* 框按百分比定位，所以弹窗宽度变了、图片缩放变了都对得上 */
 .shot-box {
@@ -6188,14 +6255,14 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 字母压在框的左上角做成实心小方块：细框在浅色页面上几乎看不见，
    有个实心块才能一眼数清「一共几个」 */
 .shot-no {
-  position:absolute; left:-1px; top:-1px; min-width:16px; height:16px;
+  position:absolute; left:-1px; top:-1px; min-width:18px; height:18px;
   display:flex; align-items:center; justify-content:center;
-  padding:0 4px; border-radius:4px 0 4px 0;
+  padding:0 5px; border-radius:4px 0 4px 0;
   background:var(--accent); color:var(--ink-inverse);
-  font-family:var(--mono); font-size:10.5px; font-weight:600; line-height:1;
+  font-family:var(--mono); font-size:11px; font-weight:600; line-height:1;
 }
-/* 上方有空位就把徽标挪到框外：压在框里那 16px 正好盖住元素开头的字 */
-.shot-box.is-tag-out .shot-no { top:-17px; border-radius:4px 4px 4px 0; }
+/* 上方有空位就把徽标挪到框外：压在框里那 18px 正好盖住元素开头的字 */
+.shot-box.is-tag-out .shot-no { top:-19px; border-radius:4px 4px 4px 0; }
 /* 录制时真正点的那一个：琥珀色，和「已选中」的实心蓝分开。
    底色只铺一层很淡的：铺满了会把元素本身的文字盖掉，那就等于没截。 */
 .shot-box.is-origin { border-color:var(--warn); border-width:2px; background:color-mix(in srgb, var(--warn) 7%, transparent); }
@@ -6203,14 +6270,29 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .shot-box.is-picked { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 22%, transparent); }
 .shot-box.is-picked .shot-no { background:var(--accent); }
 
-.shot-tip { margin:0; font-size:11.5px; line-height:1.6; color:var(--faint); }
+.shot-bar { display:flex; align-items:center; gap:10px; flex:none; }
+.shot-tip { margin:0; flex:1; min-width:0; font-size:11.5px; line-height:1.6; color:var(--faint); }
 .shot-tip b { color:var(--muted); font-weight:600; }
+.shot-toggle {
+  flex:none; padding:3px 9px; border-radius:6px; cursor:pointer;
+  border:1px solid var(--line-soft); background:var(--bg-card);
+  font:11.5px/1.5 var(--sans); color:var(--muted);
+  transition:border-color .14s ease, color .14s ease;
+}
+.shot-toggle:hover { border-color:var(--accent-line); color:var(--accent); }
+.loc-head-count { font-weight:400; color:var(--faint); }
+.loc-gone { font-size:11.5px; color:var(--warn); display:flex; align-items:center; gap:5px; }
+.loc-gone::before { content:''; width:5px; height:5px; border-radius:50%; background:var(--warn); }
+.loc-noshot {
+  margin:0 0 6px; padding:6px 9px; border-radius:7px; font-size:11.5px; line-height:1.55;
+  color:var(--muted); background:var(--bg-sunken); border:1px solid var(--line-soft);
+}
 
 /* 候选：一行一张卡。字母 → 证件照 → 说明，三列对得齐齐的，扫一眼就能对上。 */
 .loc-list { display:flex; flex-direction:column; gap:6px; }
 .loc-item {
-  display:flex; align-items:center; gap:8px; width:100%; flex:none;
-  padding:7px 10px 7px 9px; border-radius:9px; border:1px solid var(--line-soft);
+  display:flex; align-items:center; gap:10px; width:100%; flex:none;
+  padding:8px 10px 8px 9px; border-radius:9px; border:1px solid var(--line-soft);
   background:var(--bg-card); text-align:left; font-family:inherit; cursor:pointer;
   transition:border-color .14s ease, background .14s ease;
 }
@@ -6227,7 +6309,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .loc-item.is-picked .loc-no { background:var(--accent); color:#fff; }
 /* 证件照：同一张截图按元素位置裁出来的小窗。元素在视口外就没有像素可裁，标「屏外」。 */
 .loc-thumb {
-  position:relative; flex:none; width:46px; height:30px; overflow:hidden;
+  position:relative; flex:none; width:64px; height:40px; overflow:hidden;
   border-radius:6px; border:1px solid var(--line-soft); background:var(--bg-sunken);
 }
 .loc-thumb img { position:absolute; max-width:none; max-height:none; user-select:none; }
@@ -6241,18 +6323,33 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .loc-thumb.is-off { display:flex; align-items:center; justify-content:center; border-style:dashed; }
 .loc-thumb-off { font-size:10.5px; color:var(--faint); letter-spacing:.5px; }
 .loc-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
-.loc-text { font-size:13px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.loc-text {
+  font-size:13px; color:var(--ink); line-height:1.45;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+  overflow:hidden; white-space:normal; word-break:break-word;
+}
 .loc-meta { display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--faint); }
 .loc-origin { color:var(--warn); }
 .loc-hidden { color:var(--muted); }
 .loc-note { margin:6px 0 0; font-size:11.5px; line-height:1.5; color:var(--ok); }
+/* 右侧的选中圆点：整行可点，但需要一个「已选中」的明确落点，光靠边框还不够 */
+.loc-check {
+  flex:none; width:16px; height:16px; border-radius:50%;
+  border:1px solid var(--line-strong); box-sizing:border-box;
+  transition:border .14s ease, background .14s ease;
+}
+.loc-item.is-picked .loc-check { border:5px solid var(--accent); }
 
 /* 面板窗口窄的时候 dialog.css 会把左右改成上下，画布固定 280px。
    这里不能让画布撑满固定高度：聚焦后的截图是一条横带，撑满就会上下各留一大块灰。
    改成跟着图走，弹窗自己长高。 */
-@media (max-width: 900px) {
-  .loc-dialog .dlg-viewer { height: auto; }
+@media (max-width: 980px) {
+  .loc-dialog .dlg-split { grid-template-columns: minmax(0, 1fr); }
+  .loc-dialog .dlg-viewer {
+    height: auto; border-right: 0; border-bottom: 1px solid var(--line-soft);
+  }
   .loc-dialog .dlg-stage { flex: none; }
+  .loc-dialog .dlg-panel { max-height: min(520px, calc(100dvh - 260px)); }
   .shot-stage { max-width: calc(320px * var(--shot-ratio, 1.6)); }
 }
 

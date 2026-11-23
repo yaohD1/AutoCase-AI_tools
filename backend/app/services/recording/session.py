@@ -6,7 +6,9 @@ Playwright 同步 API 必须在同一个线程里使用，所以每个会话占�
 - 循环里调用 wait_for_timeout 让事件得以分发（同步 API 只在调用期间分发事件）。
 """
 import atexit
+import base64
 import copy
+import io
 import json
 import logging
 import os
@@ -17,8 +19,10 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from urllib.parse import urlencode, urlparse
 
+from PIL import Image
 from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
@@ -158,10 +162,15 @@ MATCH_SUMMARY_JS = """(els) => els.slice(0, 10).map((el) => {
   const row = el.closest('tr, li, [role=row], [role=listitem], dd, article');
   const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
   const r = el.getBoundingClientRect();
+  // 行矩形给「聚焦到哪一块」和缩略图用：只框按钮的话，6 个「删除」都在最右列，
+  // 聚焦出来是一条竖缝，看不到张三/李四。框本身仍然画在元素上。
+  const rr = row ? row.getBoundingClientRect() : null;
   return {
     tag: el.tagName.toLowerCase(),
-    text: clean(el.innerText || el.value || '').slice(0, 40),
-    row: row ? clean(row.innerText).slice(0, 40) : null,
+    text: clean(el.innerText || el.value || '').slice(0, 60),
+    // 行文本是弹窗里区分「张三 / 李四」的主判据，40 字常把手机号和部门截掉；
+    // 120 字够放一行表格，10 条候选也只多 1KB 左右。
+    row: row ? clean(row.innerText).slice(0, 120) : null,
     visible: el.getClientRects().length > 0,
     // 视口坐标，给「不唯一」弹窗在截图上画框用。和截图同一时刻取，所以对得上。
     // 负数/超出视口的值原样保留，前端据此把框裁掉并标「在屏幕外」。
@@ -169,6 +178,10 @@ MATCH_SUMMARY_JS = """(els) => els.slice(0, 10).map((el) => {
     y: Math.round(r.top),
     w: Math.round(r.width),
     h: Math.round(r.height),
+    row_x: rr ? Math.round(rr.left) : null,
+    row_y: rr ? Math.round(rr.top) : null,
+    row_w: rr ? Math.round(rr.width) : null,
+    row_h: rr ? Math.round(rr.height) : null,
   };
 })"""
 MAX_MATCH_ITEMS = 10
@@ -191,6 +204,16 @@ FILL_SHOT_REUSE = 1.5
 # 截图自己最多等多久。等待期间录制线程是停着的，不能按 Playwright 默认的 30 秒等：
 # 页面真在跳转时它会一直卡到超时，把后面的点击全堵在队列里。
 SHOT_TIMEOUT_MS = 1500
+# 录屏帧：Chromium 的 screencast 是「画面变了才推帧」，静止时 0 帧。
+# 1600×1000 q60 在 120 行表格上实测约 101KB/帧，10 帧环形缓冲约 1MB。
+# 保留 10 帧是为了等事件泵把帧收齐：点击时取「时间戳 ≤ 按下时刻」的最后一帧，
+# 即使当前帧还在队列里，前一帧也一定是按下之前渲染的。
+CAST_MAX_FRAMES = 10
+CAST_MAX_WIDTH = 1600
+CAST_MAX_HEIGHT = 1000
+CAST_QUALITY = 60
+# 每步一张图，一次录制几百步：200 张 × 100KB 约 20MB，够回看，也不至于把内存撑爆。
+MAX_SHOTS = 200
 # 「回到这一步的页面」用记下来的地址重新打开，不走浏览器后退：
 # 实测后退会被登录跳转留下的历史条目带偏（URL 落到 /login，前进也回不去）。
 # 静音 4 秒是给 SPA 连续几次 framenavigated 上报留的窗口。
@@ -232,6 +255,81 @@ NAV_INFO_JS = (
     ' return { type: e ? e.type : null, origin: performance.timeOrigin || null } }'
     ' catch (err) { return null } }'
 )
+
+
+class _PageCast:
+    """一个页面的录屏帧环形缓冲。
+
+    为什么不用 page.screenshot：那条命令是跨进程发的，从页面 pointerdown 到它真正
+    拿到帧要经过「binding 入队 → 30ms 泵 → 数候选」≈100ms，而页面里的 location.href
+    是同步的，8~30ms 就换文档了。截图命令到达时，导航已经提交，拿回来的是新页面，
+    而且不报错。实测按下即跳转时 8/8 都截到新页面。
+
+    screencast 是浏览器在**画面变化时主动推帧**，帧在页面线程里就已经生成，导航
+    抢不走。后端只留最近 CAST_MAX_FRAMES 帧，点击时按 payload 里的 _t（页面时钟）
+    挑「时间戳 ≤ 按下时刻」的最后一帧。静止页面上可能只有一帧、时间戳很旧，但画面
+    本来就没变，它仍然是正确的那一帧。
+
+    ack 必须立刻发：Chromium 收不到 ack 就不再推下一帧。
+    """
+
+    def __init__(self, cdp):
+        self.cdp = cdp
+        self.frames = deque(maxlen=CAST_MAX_FRAMES)
+        self.ok = False
+        # ack 不在帧回调里发：回调是在事件分发中间执行的，那里再走一次 CDP
+        # 会把 binding 事件挤后。实测回车提交表单时 press 会被 goto 吃掉。
+        # 先记下来，等这一轮 wait_for_timeout 结束再统一发。
+        self._acks = []
+
+    def start(self):
+        self.cdp.send('Page.startScreencast', {
+            'format': 'jpeg',
+            'quality': CAST_QUALITY,
+            'maxWidth': CAST_MAX_WIDTH,
+            'maxHeight': CAST_MAX_HEIGHT,
+            'everyNthFrame': 1,
+        })
+        self.ok = True
+
+    def on_frame(self, params):
+        try:
+            self.frames.append((params['metadata']['timestamp'],
+                                params['data'],
+                                params.get('metadata') or {}))
+        except Exception:
+            return
+        self._acks.append(params['sessionId'])
+
+    def flush_acks(self):
+        pending, self._acks = self._acks, []
+        for session_id in pending:
+            try:
+                self.cdp.send('Page.screencastFrameAck', {'sessionId': session_id})
+            except Exception:
+                # 页面正在销毁 / CDP 断开：下一帧自然会停，不需要额外处理。
+                pass
+
+    def pick(self, t_ms):
+        """取时间戳 <= t_ms 的最后一帧。t_ms 是页面里的 epoch 毫秒。"""
+        if not t_ms:
+            return None
+        for ts, data, meta in reversed(self.frames):
+            try:
+                if ts * 1000 <= float(t_ms) + 1:
+                    return ts, data, meta
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def stop(self):
+        try:
+            if self.ok:
+                self.cdp.send('Page.stopScreencast')
+        except Exception:
+            pass
+        self.ok = False
+        self.frames.clear()
 # 点击之后这么短时间内到达的导航算「这次点击的结果」，不单独记一步 goto。
 # 用一次性窗口而不是「上一步是不是 click」：后者会让点击之后的刷新、以及任何
 # 「点完按钮页面自己跳」都永久丢失（刷新那条 bug 的根因）。
@@ -427,8 +525,12 @@ class RecordingSession(object):
         # click 命中后即取走。下拉项、选中态这类元素会被点击自己从 DOM 上带走，
         # click 回来再数只能数到 0；同一时刻截的图也是唯一能证明「点的是哪一个」的东西。
         self._precounts = {}
-        # 不唯一时的视口截图：shot_id → png 字节。只在内存里，录制结束即清。
+        # 每步的截图：shot_id → {data, mime, w, h}。只在内存里，会话关闭即清。
         self._shots = {}
+        # 页面 id → _PageCast。录屏帧是「点击前那一帧」的唯一可靠来源，见 _PageCast。
+        self._casts = {}
+        # 重新接上新页面时，旧页面的 cast 要停掉：不然 Chromium 会一直给已销毁的页面编码。
+        self._cast_pages = {}
         # 输入/按键没有 pointerdown 那个时机，只能事件到达时截。fill 每个字符来一条，
         # 同一元素短时间内沿用上一张，否则打字会被「每个字符一张 80ms 的图」拖死。
         self._fill_shots = {}
@@ -1533,6 +1635,10 @@ class RecordingSession(object):
         if not pages:
             raise RecordingError('没有打开的页面')
         pages[0].wait_for_timeout(PUMP_MS)
+        # 帧回调里只入队，ack 在这里统一发：把 CDP 往返挪出事件分发，避免
+        # 「回车提交表单」这类紧挨着导航的操作被挤到 goto 后面。
+        for cast in list(self._casts.values()):
+            cast.flush_acks()
 
     def _drain_commands(self):
         while True:
@@ -1664,6 +1770,17 @@ class RecordingSession(object):
         # 先立旗子：关窗期间线程还活着，但已经没有循环取命令了，接口不能傻等。
         self._closed = True
         self._closing = True
+        # 录屏先停：浏览器一关，帧就没用了；显式 stop 也让 Chromium 立刻停编码。
+        # 截图字节只在内存里，和会话同生命周期——这里清掉就是「录制结束全删」。
+        with self._lock:
+            casts = list(self._casts.values())
+            self._casts.clear()
+            self._cast_pages.clear()
+        for cast in casts:
+            cast.stop()
+        with self._lock:
+            self._shots.clear()
+            self._fill_shots.clear()
         # 解析进程跟着浏览器一起收：浏览器都关了，没人会再插断言。
         try:
             self._stop_ask_pool()
@@ -2687,11 +2804,38 @@ class RecordingSession(object):
         page.on('framenavigated', lambda frame, pg=page: self._on_navigated(pg, frame))
         # 弹窗是浏览器自己的对话框，注入的 recorder.js 拿不到，只能在 Playwright 这层接。
         page.on('dialog', lambda dialog, pg=page: self._on_dialog(pg, dialog))
+        page.on('close', lambda pg=page: self._drop_cast(pg))
         if self._pick:
             self._apply_pick(page)
         if self._paused:
             self._apply_pause(page)
+        # 开录屏必须早于第一次 goto：用户可能在页面刚打开时就点，那时也得有帧。
+        self._start_cast(page)
         self._push_hud()
+
+    def _start_cast(self, page):
+        """给一个页面开录屏。失败只是没有「点击前那一帧」，不能影响录制本身。"""
+        with self._lock:
+            if id(page) in self._casts:
+                return
+        try:
+            cdp = page.context.new_cdp_session(page)
+            cast = _PageCast(cdp)
+            cdp.on('Page.screencastFrame', cast.on_frame)
+            cast.start()
+        except Exception:
+            logger.debug('录屏启动失败：%s', page.url, exc_info=True)
+            return
+        with self._lock:
+            self._casts[id(page)] = cast
+            self._cast_pages[id(page)] = page
+
+    def _drop_cast(self, page):
+        with self._lock:
+            cast = self._casts.pop(id(page), None)
+            self._cast_pages.pop(id(page), None)
+        if cast is not None:
+            cast.stop()
 
     def _on_navigated(self, page, frame):
         self._inbox.put(lambda: self._handle_navigated(page, frame))
@@ -3085,9 +3229,12 @@ class RecordingSession(object):
             return
         # 同名元素的快照也在这时候取：点完它们可能就没了，这份快照是「当场选第几个」的依据。
         matches = self._collect_matches(frame, counted)
-        # 只有真的不唯一才截图：截图 50~80ms，唯一的那几百次点击没必要付这个成本。
-        # 失败也留一份（带 error），弹窗要能说清「为什么没图」。
-        shot = self._capture_shot(page, frame, matches) if matches else None
+        # 录屏帧是缓冲区里取的，不是现场截图：一次查表，微秒级。
+        # 所以不再只在「不唯一」时取——唯一点击也留一张，步骤详情里能回看当时页面。
+        # 只有一种情况会没有：录屏还没出过帧（页面刚打开就点），这时带 error 让界面说清楚。
+        shot = self._cast_shot(page, frame, snap)
+        if shot is None:
+            shot = {'error': '没拿到按下之前的帧（录屏还没出帧）'}
         now = time.monotonic()
         with self._lock:
             self._precounts = {k: v for k, v in self._precounts.items()
@@ -3144,6 +3291,73 @@ class RecordingSession(object):
             return None
         return {'x': left, 'y': top, 'width': right - left, 'height': bottom - top}
 
+    def _cast_shot(self, page, frame, snap):
+        """从录屏环形缓冲里取「按下之前」的那一帧。
+
+        这是给弹窗用的唯一截图来源：帧在页面线程里就生成了，导航抢不走。
+        fill / press 也走这里——事件到达时页面已经是输入后的状态，只有按下前那一帧
+        才能说明「输入之前长什么样」。
+
+        被测页面在 iframe 里时，整帧包含 AutoCase 自己的外壳；这里按 iframe 的
+        位置裁掉外壳，并把 w/h 记成 iframe 的 CSS 尺寸，前端画框的百分比才对得上。
+        """
+        t = (snap or {}).get('_t')
+        cast = self._casts.get(id(page))
+        if not t or cast is None:
+            return None
+        hit = cast.pick(t)
+        if hit is None:
+            return None
+        _ts, raw, _meta = hit
+        try:
+            data = base64.b64decode(raw)
+        except Exception:
+            return None
+        try:
+            with Image.open(io.BytesIO(data)) as img:
+                img_w, img_h = img.size
+        except Exception:
+            return None
+
+        clip = None
+        try:
+            if frame is not None and page is not None and frame != page.main_frame:
+                clip = self._shot_clip(page, frame)
+                if clip is None:
+                    return None
+        except Exception:
+            return None
+
+        if clip:
+            try:
+                vw, vh = page.evaluate('[window.innerWidth, window.innerHeight]')
+            except Exception:
+                vw, vh = img_w, img_h
+            sx = img_w / float(vw or img_w)
+            sy = img_h / float(vh or img_h)
+            left = max(0, int(round(clip['x'] * sx)))
+            top = max(0, int(round(clip['y'] * sy)))
+            right = min(img_w, int(round((clip['x'] + clip['width']) * sx)))
+            bottom = min(img_h, int(round((clip['y'] + clip['height']) * sy)))
+            if right - left < 8 or bottom - top < 8:
+                return None
+            try:
+                with Image.open(io.BytesIO(data)) as img:
+                    cropped = img.crop((left, top, right, bottom)).convert('RGB')
+                    buf = io.BytesIO()
+                    cropped.save(buf, format='JPEG', quality=75, optimize=True)
+                data = buf.getvalue()
+            except Exception:
+                return None
+            return {'data': data, 'mime': 'image/jpeg',
+                    'w': int(round(clip['width'])), 'h': int(round(clip['height']))}
+
+        vw = int((snap or {}).get('_vw') or 0)
+        vh = int((snap or {}).get('_vh') or 0)
+        if vw <= 0 or vh <= 0:
+            vw, vh = img_w, img_h
+        return {'data': data, 'mime': 'image/jpeg', 'w': vw, 'h': vh}
+
     def _capture_shot(self, page, frame, matches):
         """按下鼠标那一刻截一张**视口**图，给「不唯一」弹窗画框用。
 
@@ -3165,7 +3379,8 @@ class RecordingSession(object):
             return {'error': '浏览器没有返回图片'}
         if clip:
             # 有 clip 时尺寸就是裁出来的那块（CSS 像素），不用再按 DPR 折算。
-            return {'png': png, 'w': int(round(clip['width'])), 'h': int(round(clip['height']))}
+            return {'data': png, 'mime': 'image/png',
+                    'w': int(round(clip['width'])), 'h': int(round(clip['height']))}
         # 有头浏览器上 viewport_size 是 None，而 PNG 的像素尺寸又受设备缩放影响。
         # 画框用的是 CSS 像素，所以这里统一按 devicePixelRatio 折回 CSS 尺寸——
         # 直接用 PNG 宽度当分母的话，125% 缩放的机器上框会整体偏小一圈。
@@ -3175,7 +3390,7 @@ class RecordingSession(object):
         except Exception:
             dpr = 1
         size = page.viewport_size or {}
-        return {'png': png,
+        return {'data': png, 'mime': 'image/png',
                 'w': int(round(png_w / dpr)) if png_w else size.get('width'),
                 'h': int(round(png_h / dpr)) if png_h else size.get('height')}
 
@@ -3199,32 +3414,34 @@ class RecordingSession(object):
         """
         if not shot:
             return None
-        if not shot.get('png'):
+        if not shot.get('data'):
             error = shot.get('error')
             return {'error': error} if error else None
         with self._lock:
             self._shot_seq = getattr(self, '_shot_seq', 0) + 1
             shot_id = 'shot-%d' % self._shot_seq
             self._shots[shot_id] = shot
-            # 一小时的录制可能攒几十张，每张 100~300KB：只留最近 40 张，够回头选了。
-            while len(self._shots) > 40:
+            # 1600 宽的帧约 100KB：留最近 200 张（约 20MB），够回看整场录制；
+            # 再老的图已经被步骤行翻过去了，留着只是占内存。
+            while len(self._shots) > MAX_SHOTS:
                 self._shots.pop(next(iter(self._shots)))
         return {'id': shot_id, 'w': shot.get('w'), 'h': shot.get('h')}
 
-    def _shot_for(self, kind, page, frame, matches, cached_shot, key):
-        """给这一步配一张图：click 用按下那一刻的，fill/press 现在截。
+    def _shot_for(self, kind, page, frame, matches, cached_shot, key, snap=None):
+        """给这一步配一张图：优先用录屏里按下/输入之前的那一帧。
 
-        输入和按键没有 pointerdown 那个时机（fill 是 input 事件，press 是 keydown），
-        之前这两类永远没有图——「很多都显示没截到」主要就是它们。
-        它们也不会像点击那样把页面带走，所以事件到达时截是安全的。
-
-        fill 每敲一个字符就来一条，同一条元素 1.5 秒内复用上一张：页面没变，
-        重截只是白花 50~80ms，还会把后面的按键堵在队列里。
+        fill / press 没有 pointerdown 那个时机（fill 是 input，press 是 keydown），
+        事件到达时页面已经是输入后的状态；录屏帧按 _t 取，刚好是输入之前。
+        只有录屏没帧（极少见）才退回现场截图，且只对 fill/press 这么做——
+        click 绝不退回截图：那正是「跳转后拍到新页面」的来源。
         """
         if cached_shot:
             return self._register_shot(cached_shot)
         if kind not in ('fill', 'press'):
             return None
+        cast = self._cast_shot(page, frame, snap or {})
+        if cast:
+            return self._register_shot(cast)
         # 连续输入会合并成上一条 fill：直接沿用它的图，不必再截。
         # 打一段长文字中间停两秒也只会重截一次，不会每停一次就多一张。
         if kind == 'fill':
@@ -3594,21 +3811,32 @@ class RecordingSession(object):
         key = self._merge_key(snap, primary, frame)
         if vanished_after:
             target['vanished_after'] = True
+        # 先取出缓存里的快照：unverified 分支也要用它去取图，漏赋值会让整条步骤
+        # 在取图时抛 UnboundLocalError（回车提交表单那条 press 就是这么丢的）。
+        matches = cached_matches
         if unverified:
             target['unverified'] = True
-        elif any((c.get('count') or 0) > 1 for c in ordered):
+        else:
             # 页面上存在同名元素时就把「那几个分别是什么」记下来。
             # 不止 ambiguous 要记：更常见的是 getByRole 命中 3 个、于是退到 css 绝对路径
             # 标成「结构定位」——那种步骤用户更该看见「其实有 3 个，你点的是第 2 个」。
             # 浏览器一关这份快照就取不到了，必须在录制当时存。
-            matches = cached_matches or self._collect_matches(frame, ordered)
+            if matches is None and any((c.get('count') or 0) > 1 for c in ordered):
+                matches = self._collect_matches(frame, ordered)
             if matches:
                 target['matches'] = matches
-                # 按下那一刻的截图：弹窗直接在图上框出这几个，不用把浏览器翻回去。
-                # fill/press 没有那个时机，在这里补一张（见 _shot_for）。
-                shot = self._shot_for(kind, page, frame, matches, cached_shot, key)
-                if shot:
-                    target['shot'] = shot
+        # 截图统一在录屏缓冲里取，不再现场截：
+        # - click / pick 取「按下之前」那一帧，导航再快也抢不走；
+        # - fill / press 取「输入之前」那一帧（_shot_for 内部处理）；
+        # - 唯一定位也留一张，步骤详情里能回看当时页面；一张约 100KB，200 张封顶。
+        if kind in ('click', 'pick'):
+            shot = self._register_shot(
+                cached_shot or self._cast_shot(page, frame, snap)
+                or {'error': '没拿到按下之前的帧（录屏还没出帧）'})
+        else:
+            shot = self._shot_for(kind, page, frame, matches, cached_shot, key, snap=snap)
+        if shot:
+            target['shot'] = shot
         index = self._page_index(page)
 
         with self._lock:

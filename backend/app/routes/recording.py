@@ -483,17 +483,18 @@ def degrade_recording_target(no):
 
 @recording_bp.route('/automation/recording/steps/<int:no>/shot', methods=['GET'])
 def recording_step_shot(no):
-    """这一步被按下那一刻的视口截图（只在内存里，不落盘）。
+    """这一步按下之前的录屏帧（只在内存里，不落盘）。
 
-    没有图是正常情况：只有「不唯一」的点击才会截，唯一的那几百次点击不付这个成本。
+    帧是浏览器侧生成的，不是现场截的：这一步点完页面已经跳走，它仍然是按下前那张。
+    没有图是正常情况：页面刚打开、录屏还没出帧时会有 error，界面据此显示原因。
     """
     session = RecordingSession.current()
     if session is None:
         return _error('没有录制', 404)
     shot = session.shot(no)
-    if not shot or not shot.get('png'):
+    if not shot or not shot.get('data'):
         return _error('这一步没有截图', 404)
-    return Response(shot['png'], mimetype='image/png',
+    return Response(shot['data'], mimetype=shot.get('mime') or 'image/png',
                     headers={'Cache-Control': 'no-store'})
 
 
