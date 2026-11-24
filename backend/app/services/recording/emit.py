@@ -17,6 +17,7 @@ from app.services.recording import detect, guard, toolchain
 from app.services.recording.locators import (best_effort, false_positive, inline_nth,
                                             pick_for, pool_for)
 from app.services.recording.captcha_ts import CAPTCHA_TS
+from app.services.recording.files_bundle import FILES_PY, FILES_TS
 from app.services.recording.slider_ts import SLIDER_TS
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,12 @@ LOCATOR_RULES = (
     '- step.type 为 dialog 表示「上一步操作会弹出原生对话框」，它没有 target，也没有定位。'
     'step.value 是 accept 或 dismiss，step.dialog.message 是弹窗文字（只用于写注释，不要拿去断言）。'
     '弹窗这一步本身不产生新动作，只是把「上一步会引起弹窗、以及怎么处理」记下来。\n'
+    '- step.type 为 upload 表示「把 step.file.path 指向的项目内文件塞进上传控件」，'
+    'step.file.name / size 只用于注释。target 指向的是「选择文件」按钮，不是 input 本身：'
+    '不要为它编造 input 的选择器，工具函数会自己往下往上找。也不要写「先点按钮再选文件」两行。\n'
+    '- step.type 为 download 表示「点 target 触发下载，再校验落盘的文件」，'
+    'step.expect 是校验口径（name / min_bytes / parse / min_rows / timeout）。'
+    '这一步除了那次点击不产生别的交互，不要把它改写成对页面元素的断言。\n'
     '- target.match_count > 1 表示这条定位在页面上匹配了多个元素，属于「不唯一但仍可用」：\n'
     '  · target.nth_applied 为 true：序号已经写进 target.locator 里了（形如 xpath=(...)[3]），\n'
     '    原样使用。不要再写 .nth()，也不要再包一层 (...)[n]——那会变成「第 3 个里的第 3 个」，\n'
@@ -119,6 +126,22 @@ FRAMEWORK_RULES = {
         '  Wait Until Location Contains    <nav_to 的路径片段>    15s\n'
         '  只取路径，不要把带查询串的整条 URL 写死（参数一变就失配），也不要用 Sleep。\n'
         '- target.locator 已带 xpath= 前缀，原样使用，不要再包 css= 或再拼前缀。\n'
+        '- 导入文件（type 为 upload）：用已生成的文件库，不要自己点「选择文件」按钮。\n'
+        '  · *** Settings *** 里加一行：Library    ${CURDIR}/libraries/FilesLibrary.py\n'
+        '  · 这一步写：Upload File    <这一行的 target.locator>    <step.file.path>\n'
+        '  · step.file.path 是项目内相对路径（assets/终端导入模板.xlsx），原样写，不要转成绝对路径。\n'
+        '  · 这一行之前不要加 Click Element：点那个按钮会拉起操作系统的文件对话框，'
+        'Selenium 会一直挂在那里直到超时。也不要用 Press Keys 往按钮上打路径。\n'
+        '- 下载校验（type 为 download）：\n'
+        '  · 写：${file}=    Download File    <这一行的 target.locator>    expected=<step.expect.name>'
+        '    min_bytes=<step.expect.min_bytes>    parse=<step.expect.parse>'
+        '    min_rows=<step.expect.min_rows>    timeout=<step.expect.timeout>\n'
+        '  · expect 里为空或为 0 的参数直接省略，不要出现 expected= 这种空值。'
+        'parse 为 none 时不要传 parse 和 min_rows。\n'
+        '  · driver 的 options 必须已经配好下载目录：download.default_directory 指向 downloads 目录、'
+        'download.prompt_for_download 为 False。项目里有现成的公共 resource 就只补这两个选项，'
+        '不要重写整个 driver 初始化。\n'
+        '  · 中文文件名到磁盘可能被 URL 编码，断言优先用通配的 expected（*.xlsx），不要把全名写死。\n'
     ),
     'playwright-ts': (
         '框架写法（Playwright，自带 auto-wait）：\n'
@@ -167,6 +190,20 @@ FRAMEWORK_RULES = {
         '正确的步骤是「刷新 → 重新操作 → 立即断言」三步，不是把操作塞进 poll 里。'
         '遇到这种断言，按规则写 reload + 判断，并在 poll 上方加一行注释：\n'
         '    // TODO: 该条件刷新后需重新操作才会出现，建议拆成「刷新 / 重新操作 / 立即断言」三步\n'
+        '- 导入文件（type 为 upload）：调已生成的文件工具，不要自己点「选择文件」按钮。\n'
+        '  · import { uploadFile } from "<files.ts 相对路径>";\n'
+        '  · await uploadFile(<这一行的 target.locator>, <step.file.path>);\n'
+        '  · 第一个参数传目标元素本身（通常是按钮），函数会自己往下、往上找 input[type=file]。'
+        '直接 click 那个按钮会拉起操作系统的文件对话框，之后所有步骤都会阻塞。\n'
+        '  · step.file.path 是项目内相对路径，原样写，不要拼绝对路径。\n'
+        '- 下载校验（type 为 download）：\n'
+        '  · const file = await downloadFile(page, async () => { await <这一行的 target.locator>.click(); });\n'
+        '  · verifyFile(file, { name: "<step.expect.name>", minBytes: <step.expect.min_bytes>, '
+        'parse: "<step.expect.parse>", minRows: <step.expect.min_rows> });\n'
+        '  · 也可以把 { expect: {...} } 直接传给 downloadFile 的第三个参数，省掉 verifyFile。\n'
+        '  · expect 里为空或为 0 的键不要写。parse 为 none 时连 verifyFile 都省掉：'
+        '文件存在、体积过线这两条已由 downloadFile 保证。\n'
+        '  · 下载目录默认是项目根的 downloads/，不要改成绝对路径，也不要写死盘符。\n'
     ),
 }
 
@@ -291,6 +328,12 @@ def _steps_for_prompt(steps, framework, actions=None):
             # 同理：验证码是一段流程（截图 → 问模型 → 填入），把配置原样交出去，
             # 规则里要求必须调 solveCaptcha。
             item['captcha'] = step['captcha']
+        if step.get('file') is not None:
+            # 文件上传：资产引用 + 体积。不把 selector 交给写手——那是录制那一刻的
+            # 结构路径，只适合回放兜底；生成的代码按 target.locator 现场找更耐改版。
+            item['file'] = {k: v for k, v in (step['file'] or {}).items() if k != 'selector'}
+        if step.get('expect') is not None:
+            item['expect'] = step['expect']
         if step.get('seconds') is not None:
             item['seconds'] = step['seconds']
         target = step.get('target')
@@ -480,7 +523,9 @@ PLAN_RULES = (
     '其余情况留空数组，不要专门去找。\n'
     '- steps 要覆盖每一个录制步骤，顺序一致。标 reuse 时把要传的参数写进 args。'
     '每个步骤都要写 note，说清这一步做什么；只有录制里的 assert / wait 步骤才写断言或等待要求，'
-    'click / fill 这类步骤不要自己加断言。不要写定位表达式——'
+    'click / fill 这类步骤不要自己加断言。upload 的 note 写「把哪个文件导进哪个控件」，'
+    'download 的 note 写「等到什么文件、至少几行」——这两类的校验口径已经在 step.file / step.expect 里，'
+    '不要再另编一套断言。不要写定位表达式——'
     '录制时已经把定位算准了，写手会直接用 dispatch 里的 locator，'
     '你猜的跟它不一致反而要让写手在两个版本之间打架。\n'
     '- intent.reload 为 true 的等待步骤，note 只描述「反复刷新，直到条件成立」。'
@@ -526,6 +571,11 @@ def _plan_step(step):
             item[key] = step[key]
     if step.get('intent'):
         item['intent'] = step['intent']
+    if step.get('file'):
+        # 规划阶段只要知道「这一步要导入哪个文件」，不影响它判断项目里有没有现成封装。
+        item['file'] = {k: v for k, v in step['file'].items() if k != 'selector'}
+    if step.get('expect'):
+        item['expect'] = step['expect']
     target = step.get('target') or {}
     if target:
         snap = target.get('snap') or {}
@@ -1003,6 +1053,28 @@ def _ensure_captcha_utils(root, target_path, steps, framework):
     return (target.parent / 'utils' / 'captcha.ts').as_posix()
 
 
+def _ensure_files_utils(root, target_path, steps, framework):
+    """把文件工具写进目标项目，返回相对路径；没有相关步骤就返回 None。
+
+    两个框架落盘位置不同：Playwright 放 utils/（和 slider.ts 并排），
+    Robot 放 libraries/（.robot 里用 ${CURDIR}/libraries/FilesLibrary.py 引用）。
+    和滑块一样必须在 guard.snapshot 之前写：写完才算「项目原有文件」，
+    既不进 diff，也不会被越界检查当成 agent 乱写。
+    """
+    if not any(step.get('type') in ('upload', 'download') for step in (steps or [])):
+        return None
+    target = Path(target_path)
+    if framework == RF_FRAMEWORK:
+        folder = Path(root) / target.parent / 'libraries'
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'FilesLibrary.py').write_text(FILES_PY, encoding='utf-8')
+        return (target.parent / 'libraries' / 'FilesLibrary.py').as_posix()
+    folder = Path(root) / target.parent / 'utils'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'files.ts').write_text(FILES_TS, encoding='utf-8')
+    return (target.parent / 'utils' / 'files.ts').as_posix()
+
+
 def _write_slider_env(root):
     """把视觉模型的三个环境变量补进项目根的 .env。已存在的键一个都不覆盖。
 
@@ -1286,10 +1358,13 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
     # 有滑块 / 验证码步骤时先把工具文件落到项目里（在快照之前，见函数注释）。
     slider_utils = _ensure_slider_utils(root, target_path, steps, framework)
     captcha_utils = _ensure_captcha_utils(root, target_path, steps, framework)
+    files_utils = _ensure_files_utils(root, target_path, steps, framework)
     if slider_utils:
         logger.info('录制生成：已注入滑块工具 %s', slider_utils)
     if captcha_utils:
         logger.info('录制生成：已注入验证码工具 %s', captcha_utils)
+    if files_utils:
+        logger.info('录制生成：已注入文件工具 %s', files_utils)
     if slider_utils or captcha_utils:
         _write_slider_env(root)
     try:

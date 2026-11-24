@@ -6,11 +6,13 @@
 而不是「生成的脚本写得对不对」。所以两个框架都能校验：RF 的 rf_* 候选本来就是
 用 Playwright 的 xpath= / css= 在浏览器里数出来的，换一套候选即可，不需要 Selenium。
 """
+import tempfile
 import time
+from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from app.services.recording import captcha, slider
+from app.services.recording import assets, captcha, files, slider
 from app.services.recording.ir import PAGE_READY
 from app.services.recording.locators import best_effort, build_locator, pick_for
 
@@ -204,7 +206,116 @@ def _disarm_dialog(probe):
             pass
 
 
-def _run_step(step, page, framework=PW_FRAMEWORK):
+def _replay_dir():
+    """这次回放的下载目录。
+
+    放在 storage/recording-replays 而不是系统临时目录：断言失败时用户要能自己去
+    把文件打开看一眼，知道「到底导出成什么样了」比只看到一句「行数不符」有用得多。
+    不自动清理——回放不常跑，文件也都是KB级。
+    """
+    base = Path(__file__).resolve().parents[4] / 'storage' / 'recording-replays'
+    base.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(dir=str(base), prefix='run-'))
+
+
+def _do_upload(step, page, framework, workspace):
+    """把文件塞进上传控件，返回 (用到的候选, 文件明细)。
+
+    用户录到的目标几乎都不是 input 本身：他点的是「选择文件」按钮，真 input 被组件藏着。
+    所以按三级顺序找：录制时算好的 selector → 从目标元素现场再找一次 → 目标自己就是 input。
+    第三级还要留，是因为有些组件把 input 做成透明的覆盖层，用户确实可能直接拾取到它。
+    """
+    info = step.get('file') or {}
+    rel = str(info.get('path') or '').strip()
+    if not rel:
+        raise ReplayError('这一步没有选文件')
+    if not workspace:
+        raise ReplayError('没有工作区，找不到导入的文件（资产是相对工作区存的）')
+    try:
+        path = assets.abs_path(workspace, rel)
+    except assets.AssetError as exc:
+        raise ReplayError(str(exc)) from exc
+    if not path.is_file():
+        raise ReplayError('文件不存在：%s（资产要跟用例一起提交，不能只在录制那台机器上）' % rel)
+
+    target = step.get('target') or {}
+    loc, chosen = _locator(page, target, framework)
+    snap = target.get('snap') or {}
+    root = page
+    if snap.get('frame_url') or snap.get('frame_name'):
+        root = _frame_of(page, snap)
+        if root is None:
+            raise ReplayError('找不到目标所在的 iframe')
+    size = path.stat().st_size
+    filled = False
+    selector = str(info.get('selector') or '').strip()
+    if selector:
+        try:
+            hit = root.locator(selector)
+            if hit.count() > 0:
+                hit.first.set_input_files(str(path))
+                filled = True
+        except Exception:
+            # selector 是录制那一刻的结构路径，页面改过就会失效。失效不是错误，
+            # 走下一级从目标元素现场找。
+            filled = False
+    if not filled:
+        try:
+            found = loc.first.evaluate(files.FIND_INPUT_JS)
+        except Exception:
+            found = ''
+        if isinstance(found, str) and found:
+            root.locator(found).first.set_input_files(str(path))
+            filled = True
+    if not filled:
+        try:
+            loc.set_input_files(str(path))
+        except Exception as exc:
+            raise ReplayError(
+                '这个元素不是文件上传控件，也没在它附近找到 input[type=file]。'
+                '请重新拾取「选择文件」按钮所在的区域：%s' % exc) from exc
+    return chosen, {'file': {'name': path.name, 'size': size, 'path': rel}}
+
+
+def _do_download(step, page, framework, run_dir):
+    """点一下触发下载，等文件落盘并按 expect 校验。
+
+    不用「盯目录里多了谁」来等（Selenium 那边才需要那么做）：Playwright 的 download 事件
+    由浏览器直接交给我们，save_as 写完才算返回，天然没有 .crdownload 半截文件的问题。
+    """
+    expect_conf = step.get('expect') or {}
+    timeout = float(expect_conf.get('timeout') or 30)
+    # 正常路径由 _run 传 run_dir；单独调这一步（测试、预览）时给个临时目录，不要抛 TypeError。
+    folder = Path(run_dir or tempfile.mkdtemp(prefix='ac-download-')) / 'downloads'
+    folder.mkdir(parents=True, exist_ok=True)
+    loc, chosen = _locator(page, step['target'], framework)
+    try:
+        with page.expect_download(timeout=timeout * 1000) as waiting:
+            loc.click()
+        download = waiting.value
+    except Exception as exc:
+        raise ReplayError(
+            '点击后 %g 秒内没有开始下载。如果这个按钮会先打开一个新标签页、再由那个页面下载，'
+            '这一步要放在真正触发下载的那次点击之后：%s' % (timeout, exc)) from exc
+    name = assets.safe_name(download.suggested_filename or 'download')
+    target = folder / name
+    index = 2
+    while target.exists():
+        # 同名不覆盖：同一条用例连续导出两个文件时，前一个还要留着做对比。
+        target = folder / ('%s-%d%s' % (Path(name).stem, index, Path(name).suffix))
+        index += 1
+    try:
+        download.save_as(str(target))
+    except Exception as exc:
+        raise ReplayError('下载的文件保存失败：%s' % exc) from exc
+    result = files.verify(target, expect_conf)
+    result.pop('path', None)
+    if not result.get('ok'):
+        raise ReplayError('下载的文件不符合预期：%s' % (result.get('error') or '未知原因'))
+    return chosen, {'file': result}
+
+
+def _run_step(step, page, framework=PW_FRAMEWORK, workspace=None, run_dir=None):
     """执行一步，返回 (这一步实际用到的定位候选, 附加信息)。
 
     附加信息目前只有轮询等待用得上（试了几次、刷了几轮），没有的话是 None。
@@ -259,6 +370,10 @@ def _run_step(step, page, framework=PW_FRAMEWORK):
         except captcha.CaptchaError as exc:
             raise ReplayError(str(exc)) from exc
         return None, {'captcha': outcome}
+    if kind == 'upload':
+        return _do_upload(step, page, framework, workspace)
+    if kind == 'download':
+        return _do_download(step, page, framework, run_dir)
     if kind in ('assert', 'wait'):
         return _assert(step['intent'], step.get('target'), page, framework)
     raise ReplayError('回放不支持的步骤：%s' % kind)
@@ -297,6 +412,7 @@ def _entry(step, chosen, ok, error=None, poll=None):
     # 滑块把结果放在 poll 里带出来，这里拆出去（见下面的字段说明）。
     slider_detail = poll.get('slider') if isinstance(poll, dict) else None
     captcha_detail = poll.get('captcha') if isinstance(poll, dict) else None
+    file_detail = poll.get('file') if isinstance(poll, dict) else None
     used = None
     if chosen:
         matches = chosen.get('count')
@@ -326,21 +442,27 @@ def _entry(step, chosen, ok, error=None, poll=None):
         'used': used,
         # 轮询等待才有的明细：等了几秒、刷新了几轮。失败时靠它区分「设备没起来」和「定位写错了」。
         # 滑块的结果不能塞进 poll：前端把 poll 当「等了多久 / 刷新几次」渲染，
-        # 塞进去就会显示成「轮询 undefineds」。单独一个字段。
-        'poll': None if (slider_detail or captcha_detail) else poll,
+        # 塞进去就会显示成「轮询 undefineds」。单独一个字段。文件同理。
+        'poll': None if (slider_detail or captcha_detail or file_detail) else poll,
         'slider': slider_detail,
         'captcha': captcha_detail,
+        # upload / download 的落盘结果：文件名、体积、行数。前端拿它在步骤行里显示
+        # 「导出成功 · 123KB · 18 行」，比只给一个绿色对勾有用得多。
+        'file': file_detail,
     }
 
 
-def _run(steps, framework, headless, on_step):
+def _run(steps, framework, headless, on_step, workspace=None):
     done = 0
+    run_dir = _replay_dir()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         try:
             # 和录制用同一套证书策略：内网系统多为自签名证书，校验一开就
             # net::ERR_CERT_AUTHORITY_INVALID，回放连页面都进不去，会被误报成定位失效。
-            context = browser.new_context(ignore_https_errors=True)
+            # accept_downloads 默认就是 True，这里显式写出来：回放依赖它，关掉之后
+            # expect_download 永远等不到事件，报出来的错会指向「按钮没点中」这个错误方向。
+            context = browser.new_context(ignore_https_errors=True, accept_downloads=True)
             context.new_page()
             i = 0
             # 下一步要是弹窗步骤，处理方式必须在当前步执行之前交给浏览器，所以在这里拿着。
@@ -355,7 +477,8 @@ def _run(steps, framework, headless, on_step):
                     if upcoming and upcoming['type'] == 'new_page':
                         # 录制时这一步打开了新标签页，回放时同样要接住它，并等它加载完。
                         with context.expect_page() as info:
-                            chosen, poll = _run_step(step, _page_for(context, step), framework)
+                            chosen, poll = _run_step(step, _page_for(context, step), framework,
+                                                     workspace=workspace, run_dir=run_dir)
                         info.value.wait_for_load_state()
                         if on_step:
                             on_step(_entry(step, chosen, True, poll=poll))
@@ -363,7 +486,8 @@ def _run(steps, framework, headless, on_step):
                         i += 2
                         done += 2
                         continue
-                    chosen, poll = _run_step(step, _page_for(context, step), framework)
+                    chosen, poll = _run_step(step, _page_for(context, step), framework,
+                                             workspace=workspace, run_dir=run_dir)
                     if step['type'] == 'dialog' and probe and probe.get('no') == step.get('no'):
                         # 弹窗没出现就别装作成功：多半是上一步没点中，或者页面改成了自定义弹层。
                         if not probe['seen']:
@@ -386,9 +510,9 @@ def _run(steps, framework, headless, on_step):
     return done
 
 
-def replay(steps, headless=True, framework=PW_FRAMEWORK, actions=None):
+def replay(steps, headless=True, framework=PW_FRAMEWORK, actions=None, workspace=None):
     """steps 为 RecordingSession.ir() 的结果。返回执行过的步骤数。失败抛 ReplayError。"""
-    return _run(_expand(steps, actions), framework, headless, None)
+    return _run(_expand(steps, actions), framework, headless, None, workspace=workspace)
 
 
 def _expand(steps, actions):
@@ -403,7 +527,7 @@ def _expand(steps, actions):
     return actions_mod.expand(steps, actions)
 
 
-def replay_checked(steps, framework=PW_FRAMEWORK, headless=True, actions=None):
+def replay_checked(steps, framework=PW_FRAMEWORK, headless=True, actions=None, workspace=None):
     """回放并把每一步的结果收集成报告。
 
     失败不抛异常（前端需要展示「前面几步走通了、第 N 步定位失效」），
@@ -413,7 +537,7 @@ def replay_checked(steps, framework=PW_FRAMEWORK, headless=True, actions=None):
     trace = []
     payload = {'framework': framework, 'total': len(steps), 'steps': trace}
     try:
-        done = _run(steps, framework, headless, trace.append)
+        done = _run(steps, framework, headless, trace.append, workspace=workspace)
     except ReplayError as exc:
         payload.update({'ok': False, 'done': len(trace), 'error': str(exc),
                         'failed_no': exc.step_no, 'failed_type': exc.step_type})

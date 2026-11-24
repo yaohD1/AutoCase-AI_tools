@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>浅色主题方案对比</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px 44px 60px;
+    background: #d7dbe2;
+    font-family: 'Inter', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .doc-head { max-width: 1180px; margin: 0 auto 28px; }
+  .doc-head h1 { margin: 0 0 6px; font-size: 20px; font-weight: 600; color: #14181f; letter-spacing: -.01em; }
+  .doc-head p { margin: 0; font-size: 13px; line-height: 1.7; color: #5c6673; }
+  .doc-head code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 4px; }
+
+  .block { max-width: 1180px; margin: 0 auto 34px; }
+  .bhead { display: flex; align-items: flex-end; gap: 14px; margin-bottom: 10px; }
+  .bname { font-size: 15px; font-weight: 600; color: #14181f; }
+  .btag { font-size: 11px; font-weight: 500; color: #5c6673; background: rgba(255,255,255,.72); border: 1px solid rgba(0,0,0,.08); padding: 2px 7px; border-radius: 5px; }
+  .bnote { font-size: 12px; color: #4c5663; line-height: 1.6; max-width: 640px; }
+  .bmetric { margin-left: auto; text-align: right; font-size: 11px; color: #5c6673; font-variant-numeric: tabular-nums; }
+  .bmetric b { color: #14181f; font-weight: 600; }
+  .swatches { display: flex; gap: 6px; margin-bottom: 9px; }
+  .sw { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: #4c5663; font-variant-numeric: tabular-nums; }
+  .sw i { width: 13px; height: 13px; border-radius: 3px; border: 1px solid rgba(0,0,0,.12); display: block; }
+
+  /* ---------- 被展示的页面外壳 ---------- */
+  .frame {
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(16,24,40,.16);
+    box-shadow: 0 18px 44px -28px rgba(16,24,40,.6);
+    background: var(--page);
+  }
+  /* 高度按「顶栏 + 页头 + Tabs + 两个入口卡 + 完整配置卡」算出来，
+     整页一次性看完，不靠裁切暗示还有内容 */
+  .app { height: 606px; overflow: hidden; background: var(--page); color: var(--ink); padding-bottom: 20px; }
+
+  .tb {
+    height: 52px; display: flex; align-items: center; gap: 10px; padding: 0 18px;
+    background: linear-gradient(135deg, #191c23 0%, #171d2b 55%, #16233a 100%);
+    border-bottom: 1px solid rgba(255,255,255,.07);
+  }
+  .tb-logo { width: 22px; height: 22px; border-radius: 6px; background: #fff; color: #14181f; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  .tb-name { font-size: 12.5px; font-weight: 600; color: #fff; }
+  .tb-sep { width: 1px; height: 12px; background: rgba(255,255,255,.18); margin: 0 3px; }
+  .tb-sub { font-size: 11.5px; color: rgba(255,255,255,.52); }
+  .tb-actions { margin-left: auto; display: flex; gap: 6px; }
+  .tb-btn { width: 26px; height: 26px; border-radius: 7px; border: 1px solid rgba(255,255,255,.16); color: rgba(255,255,255,.8); display: flex; align-items: center; justify-content: center; font-size: 12px; }
+  .tb-btn.on { background: rgba(255,255,255,.14); }
+
+  .page { padding: 24px 30px 0; }
+  .head { display: flex; align-items: flex-start; gap: 20px; }
+  .eyebrow { font-size: 10px; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+  h1 { margin: 5px 0 6px; font-size: 22px; font-weight: 600; letter-spacing: -.015em; color: var(--ink); }
+  .lede { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); max-width: 460px; }
+  .stats { margin-left: auto; display: flex; gap: 26px; padding-top: 14px; }
+  .stat { text-align: right; }
+  .stat b { display: block; font-size: 17px; font-weight: 500; color: var(--ink); font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .stat span { font-size: 10.5px; color: var(--muted); }
+
+  .tabs { display: flex; gap: 22px; margin-top: 18px; border-bottom: 1px solid var(--line-soft); }
+  .tab { font-size: 12.5px; color: var(--muted); padding: 0 0 9px; position: relative; }
+  .tab.on { color: var(--ink); font-weight: 500; }
+  .tab.on::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent); border-radius: 2px; }
+
+  .entries { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+  .entry {
+    display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px 13px;
+    background: var(--card); border: 1px solid var(--line-soft); border-radius: 11px;
+    box-shadow: var(--card-shadow);
+  }
+  .entry .ico { width: 22px; height: 22px; border-radius: 6px; background: var(--sunken); display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--muted); flex: none; }
+  .entry b { display: block; font-size: 12.5px; font-weight: 500; color: var(--ink); }
+  .entry p { margin: 3px 0 0; font-size: 11px; line-height: 1.55; color: var(--muted); }
+  .entry .arrow { margin-left: auto; color: var(--faint); font-size: 13px; align-self: center; }
+
+  .card {
+    margin-top: 12px; display: grid; grid-template-columns: 340px 1fr;
+    background: var(--card); border: 1px solid var(--line-soft); border-radius: 13px;
+    box-shadow: var(--card-shadow); overflow: hidden; height: 296px;
+  }
+  .cfg { padding: 16px 18px; }
+  .cfg-t { font-size: 10.5px; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; margin-bottom: 12px; }
+  .row { padding: 9px 0; border-bottom: 1px solid var(--line-faint); }
+  .row:last-child { border-bottom: 0; }
+  .row label { display: flex; align-items: center; font-size: 11px; color: var(--muted); }
+  .row label i { margin-left: auto; font-style: normal; font-size: 11px; color: var(--accent-ink); }
+  .row label em { font-style: normal; margin-left: 6px; font-size: 10.5px; color: var(--faint); }
+  .sel { display: flex; align-items: center; margin-top: 5px; font-size: 12.5px; color: var(--faint); }
+  .sel::after { content: '⌄'; margin-left: auto; color: var(--muted); font-size: 12px; }
+  .switch { width: 32px; height: 18px; border-radius: 9px; background: var(--accent); position: relative; flex: none; margin-left: auto; }
+  .switch::after { content: ''; position: absolute; left: 16px; top: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; }
+  .row.inline { display: flex; align-items: center; }
+
+  .drop { padding: 14px; }
+  .drop-in {
+    height: 100%; border: 1px dashed var(--line-ctl); border-radius: 11px; background: var(--sunken);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  }
+  .ph { width: 34px; height: 34px; border-radius: 8px; background: var(--line-soft); color: var(--muted); display: flex; align-items: center; justify-content: center; font-size: 15px; }
+  .drop-in p { margin: 0; font-size: 12.5px; color: var(--muted); }
+  .drop-in b { color: var(--ink-2); font-weight: 500; }
+  .drop-in a { color: var(--accent-ink); text-decoration: none; }
+
+  /* ---------- 四套令牌 ---------- */
+  .s-now {
+    --page: #f5f7fa; --card: #ffffff; --sunken: #f4f6f9;
+    --ink: #15181d; --ink-2: #3c4048; --muted: #8d97a6; --faint: #b3bac5;
+    --line-soft: rgba(0,0,0,.06); --line-faint: rgba(0,0,0,.04); --line-ctl: #dfe3e8;
+    --accent: #0071e3; --accent-ink: #0b62c4;
+    --card-shadow: none;
+  }
+  /* A 冷灰分层：页底压深一档，卡片留纯白，靠 1px 线 + 极淡投影把卡片立起来 */
+  .s-a {
+    --page: #e9edf3; --card: #ffffff; --sunken: #f2f5fa;
+    --ink: #14181f; --ink-2: #3a414c; --muted: #77818f; --faint: #a8b1bd;
+    --line-soft: rgba(16,24,40,.10); --line-faint: rgba(16,24,40,.06); --line-ctl: #d5dce5;
+    --accent: #0071e3; --accent-ink: #0b62c4;
+    --card-shadow: 0 1px 2px rgba(16,24,40,.05);
+  }
+  /* B 雾蓝降白：全页没有一处纯白，卡片只比页底亮一点，长时间看不刺眼 */
+  .s-b {
+    --page: #e6ebf4; --card: #f8fafd; --sunken: #eef2f9;
+    --ink: #1a2331; --ink-2: #3d4757; --muted: #78849a; --faint: #a7b2c4;
+    --line-soft: rgba(28,45,72,.10); --line-faint: rgba(28,45,72,.06); --line-ctl: #d3dbe9;
+    --accent: #0a6cd6; --accent-ink: #0a5cb8;
+    --card-shadow: none;
+  }
+  /* C 暖纸：页底偏米，卡片近白带暖，文字用暖黑 */
+  .s-c {
+    --page: #f0ede6; --card: #fdfbf7; --sunken: #f5f1ea;
+    --ink: #1d1a15; --ink-2: #46413a; --muted: #8a8377; --faint: #b3ab9d;
+    --line-soft: rgba(64,48,24,.11); --line-faint: rgba(64,48,24,.07); --line-ctl: #dcd5c8;
+    --accent: #0b6bcb; --accent-ink: #0a5cae;
+    --card-shadow: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="doc-head">
+  <h1>浅色主题：把「一张大白纸」拆出层次</h1>
+  <p>同一个页面（上传原型图）渲染四遍，只有颜色令牌不同，结构和字号完全没有改动。判定标准写在每块右上角：<code>底/卡</code> 是页面底与卡片的明度比，越接近 1 越像同一张纸；<code>正文</code> 是正文色与卡片底的对比度。</p>
+</div>
+
+<section class="block">
+  <div class="bhead">
+    <span class="bname">现状</span>
+    <span class="btag">#f5f7fa / #ffffff</span>
+    <div class="bnote">页底和卡片只差 4% 明度，边线只有 6% 黑，整块连成一片白。</div>
+    <div class="bmetric" data-metric="s-now"></div>
+  </div>
+  <div class="swatches">
+    <span class="sw"><i style="background:#f5f7fa"></i>#f5f7fa</span>
+    <span class="sw"><i style="background:#ffffff"></i>#ffffff</span>
+    <span class="sw"><i style="background:#f4f6f9"></i>#f4f6f9</span>
+    <span class="sw"><i style="background:#8d97a6"></i>#8d97a6</span>
+  </div>
+  <div class="frame s-now"><div class="app" data-render></div></div>
+</section>
+
+<section class="block">
+  <div class="bhead">
+    <span class="bname">A · 冷灰分层</span>
+    <span class="btag" style="background:#e8f2e6;border-color:#bfd9ba;color:#2a6b2f">已采用</span>
+    <span class="btag">页底加深，卡片留白</span>
+    <div class="bnote">页底压到 <b>#e9edf3</b>，卡片仍是纯白，再补一条 10% 的线和 1px 投影。卡片真的浮起来，白色面积也被页底挤小了。改动只落在 6 个令牌上。</div>
+    <div class="bmetric" data-metric="s-a"></div>
+  </div>
+  <div class="swatches">
+    <span class="sw"><i style="background:#e9edf3"></i>#e9edf3</span>
+    <span class="sw"><i style="background:#ffffff"></i>#ffffff</span>
+    <span class="sw"><i style="background:#f2f5fa"></i>#f2f5fa</span>
+    <span class="sw"><i style="background:#77818f"></i>#77818f</span>
+  </div>
+  <div class="frame s-a"><div class="app" data-render></div></div>
+</section>
+
+<section class="block">
+  <div class="bhead">
+    <span class="bname">B · 雾蓝降白</span>
+    <span class="btag">全页无纯白</span>
+    <div class="bnote">卡片从 <b>#ffffff</b> 降到 <b>#f8fafd</b>，页底带一点蓝。整页没有任何纯白，长时间盯着最不刺眼；代价是卡片边界只能靠线维持，层次比 A 软。</div>
+    <div class="bmetric" data-metric="s-b"></div>
+  </div>
+  <div class="swatches">
+    <span class="sw"><i style="background:#e6ebf4"></i>#e6ebf4</span>
+    <span class="sw"><i style="background:#f8fafd"></i>#f8fafd</span>
+    <span class="sw"><i style="background:#eef2f9"></i>#eef2f9</span>
+    <span class="sw"><i style="background:#78849a"></i>#78849a</span>
+  </div>
+  <div class="frame s-b"><div class="app" data-render></div></div>
+</section>
+
+<section class="block">
+  <div class="bhead">
+    <span class="bname">C · 暖纸</span>
+    <span class="btag">米底 + 暖白卡</span>
+    <div class="bnote">页底偏米 <b>#f0ede6</b>，卡片 <b>#fdfbf7</b>，文字用暖黑。视觉上最不像「屏幕」，最柔和；但和深色顶栏、蓝色强调的科技感有点脱节。</div>
+    <div class="bmetric" data-metric="s-c"></div>
+  </div>
+  <div class="swatches">
+    <span class="sw"><i style="background:#f0ede6"></i>#f0ede6</span>
+    <span class="sw"><i style="background:#fdfbf7"></i>#fdfbf7</span>
+    <span class="sw"><i style="background:#f5f1ea"></i>#f5f1ea</span>
+    <span class="sw"><i style="background:#8a8377"></i>#8a8377</span>
+  </div>
+  <div class="frame s-c"><div class="app" data-render></div></div>
+</section>
+
+<template id="page-tpl">
+  <div class="tb">
+    <div class="tb-logo">N</div>
+    <div class="tb-name">AutoCase</div>
+    <div class="tb-sep"></div>
+    <div class="tb-sub">Test Case Generator</div>
+    <div class="tb-actions"><div class="tb-btn">☾</div><div class="tb-btn on">⚙</div></div>
+  </div>
+  <div class="page">
+    <div class="head">
+      <div>
+        <div class="eyebrow">测试资产 · PROTOTYPE</div>
+        <h1>上传原型图</h1>
+        <p class="lede">拖进 Figma 导出的页面图，AI 先拆出模块，审批通过后再生成测试用例。</p>
+      </div>
+      <div class="stats">
+        <div class="stat"><b>0</b><span>待审批</span></div>
+        <div class="stat"><b>0</b><span>已通过</span></div>
+        <div class="stat"><b>0</b><span>AI 生成</span></div>
+        <div class="stat"><b>0%</b><span>通过率</span></div>
+      </div>
+    </div>
+    <nav class="tabs">
+      <a class="tab on">原型图</a><a class="tab">文档</a><a class="tab">知识库</a>
+    </nav>
+    <div class="entries">
+      <div class="entry">
+        <span class="ico">▭</span>
+        <div><b>自动化工具</b><p>在浏览器里录制操作，插入断言和等待，生成 Playwright 或 Robot Framework 脚本</p></div>
+        <span class="arrow">→</span>
+      </div>
+      <div class="entry">
+        <span class="ico">✥</span>
+        <div><b>Agent 自动化测试</b><p>给一段需求或一条用例，AI 自己探索页面、写脚本并跑通</p></div>
+        <span class="arrow">→</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cfg">
+        <div class="cfg-t">配置</div>
+        <div class="row"><label>项目<i>+ 新建</i></label><div class="sel">选择项目</div></div>
+        <div class="row"><label>迭代<i>+ 新建</i></label><div class="sel">选择迭代</div></div>
+        <div class="row inline"><label>关联分析<em>多图合分析，AI 理解页面关联流程</em></label><span class="switch"></span></div>
+        <div class="row"><label>原型分析模型</label><div class="sel">选择分析模型</div></div>
+      </div>
+      <div class="drop">
+        <div class="drop-in">
+          <div class="ph">▣</div>
+          <p><b>拖拽图片、Ctrl+V 粘贴截图</b> 或 <a>点击上传</a></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+  // 一份模板渲染四次，保证四块只有变量不同
+  const tpl = document.getElementById('page-tpl');
+  document.querySelectorAll('[data-render]').forEach(host => {
+    host.appendChild(tpl.content.cloneNode(true));
+  });
+
+  // 把「底/卡」「正文」两个比值算出来，替代“看着挺白”的主观判断
+  function rgb(str) {
+    const m = str.match(/rgba?\(([^)]+)\)/);
+    const p = m[1].split(',').map(Number);
+    return p.slice(0, 3);
+  }
+  function lum(c) {
+    const v = c.map(x => {
+      x /= 255;
+      return x <= .03928 ? x / 12.92 : Math.pow((x + .055) / 1.055, 2.4);
+    });
+    return .2126 * v[0] + .7152 * v[1] + .0722 * v[2];
+  }
+  function ratio(a, b) {
+    const la = lum(rgb(a)), lb = lum(rgb(b));
+    return ((Math.max(la, lb) + .05) / (Math.min(la, lb) + .05));
+  }
+  document.querySelectorAll('[data-metric]').forEach(el => {
+    const node = document.querySelector('.' + el.dataset.metric);
+    const cs = getComputedStyle(node);
+    const bgPage = cs.getPropertyValue('--page').trim();
+    const bgCard = cs.getPropertyValue('--card').trim();
+    const ink = cs.getPropertyValue('--ink').trim();
+    const conv = hex => {
+      if (hex.startsWith('#')) {
+        const n = parseInt(hex.slice(1), 16);
+        return [n >> 16 & 255, n >> 8 & 255, n & 255];
+      }
+      return rgb(hex);
+    };
+    const l = c => lum(conv(c));
+    const r = (a, b) => {
+      const la = l(a), lb = l(b);
+      return ((Math.max(la, lb) + .05) / (Math.min(la, lb) + .05)).toFixed(2);
+    };
+    el.innerHTML = '底/卡 <b>' + r(bgPage, bgCard) + ':1</b> · 正文 <b>' + r(ink, bgCard) + ':1</b>';
+  });
+</script>
+</body>
+</html>

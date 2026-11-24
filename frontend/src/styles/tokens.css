@@ -18,11 +18,13 @@
 :root {
   color-scheme: light;
 
-  /* 表面：底 / 卡片 / 淡底块 / 画布 / 浮层 / 悬浮 */
-  --bg-page: #f5f7fa;
+  /* 表面：底 / 卡片 / 淡底块 / 画布 / 浮层 / 悬浮
+     页底压到 #e9edf3：原来 #f5f7fa 与卡片只差 4% 明度，整页糊成一张白纸。
+     现在底/卡是 1.17:1，白色面积被页底分走，卡片才浮得起来。 */
+  --bg-page: #e9edf3;
   --bg-card: #ffffff;
-  --bg-sunken: #f4f6f9;
-  --bg-stage: #f6f7f9;
+  --bg-sunken: #f2f5fa;
+  --bg-stage: #eef2f7;
   --bg-raised: #ffffff;
   --bg-hover: rgba(0, 0, 0, .035);
   --bg-active: rgba(0, 0, 0, .055);
@@ -31,17 +33,17 @@
   /* 文字 */
   --ink: #15181d;          /* 正文、当前值 */
   --ink-2: #3c4048;        /* 次级正文 */
-  --muted: #8d97a6;        /* 标签、说明 */
-  --faint: #b3bac5;        /* 占位、失效 */
+  --muted: #77818f;        /* 标签、说明 */
+  --faint: #a8b1bd;        /* 占位、失效 */
   --ink-inverse: #ffffff;  /* 深色块上的字 */
 
-  /* 线 */
-  --line: rgba(0, 0, 0, .28);         /* 输入框下划线（聚焦） */
-  --line-soft: rgba(0, 0, 0, .06);    /* 行分隔、卡片边 */
-  --line-faint: rgba(0, 0, 0, .04);   /* 表格行 */
-  --line-field: rgba(0, 0, 0, .09);   /* 字段之间 */
-  --line-field-hover: rgba(0, 0, 0, .16);
-  --line-ctl: #dfe3e8;                /* 按钮描边 */
+  /* 线：卡片边从 6% 提到 10%，否则压在加深的页底上看不出边界 */
+  --line: rgba(0, 0, 0, .28);              /* 输入框下划线（聚焦） */
+  --line-soft: rgba(16, 24, 40, .10);      /* 行分隔、卡片边 */
+  --line-faint: rgba(16, 24, 40, .06);     /* 表格行 */
+  --line-field: rgba(16, 24, 40, .13);     /* 字段之间 */
+  --line-field-hover: rgba(16, 24, 40, .20);
+  --line-ctl: #d5dce5;                     /* 按钮描边 */
   --line-ctl-hover: #c3d6ee;
 
   /* 语义色：本体 + 淡底 + 淡底上的字 */
@@ -63,7 +65,7 @@
   --warn-soft: #fdf6ea;
 
   /* 小方片 */
-  --chip-bg: #f4f6f9;
+  --chip-bg: #f0f3f8;
   --chip-ink: #5b6472;
 
   /* 代码 / 终端 / 日志面板：两套主题都保持深色，
@@ -71,15 +73,18 @@
   --bg-code: #12161d;
   --bg-code-ink: #d6dfeb;
 
-  /* 投影只留给弹窗和主按钮，其余一律不投 */
+  /* 投影分三档：弹窗最重、主按钮带品牌色、页面级白卡只有 1px。
+     卡片这层只负责把白卡从页底上「提」起来一点点，不参与层级表达。 */
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, .05);
   --shadow-dialog: 0 40px 90px -44px rgba(16, 24, 40, .45);
   --shadow-primary: 0 1px 2px rgba(0, 113, 227, .2);
   --shadow-primary-hover: 0 3px 10px rgba(0, 113, 227, .26);
   --scrim: rgba(16, 24, 40, .38);
   --focus-ring: rgba(0, 113, 227, .42);
   --loading-mask: rgba(255, 255, 255, .68);
-  --scroll-thumb: #e6e9ef;
-  --scroll-thumb-hover: #d8dde5;
+  /* 滚动条：页底加深后原来的 #e6e9ef 比轨道还亮，几乎看不见，跟着压暗一档 */
+  --scroll-thumb: #cfd6e0;
+  --scroll-thumb-hover: #bcc5d1;
 
   /* 顶栏：两套主题都是深色，暗色下再压一档，和页面区分开 */
   --topbar: linear-gradient(135deg, #191c23 0%, #171d2b 55%, #16233a 100%);
@@ -158,6 +163,8 @@
   --bg-code: #0b0f14;
   --bg-code-ink: #d6dfeb;
 
+  /* 暗色下卡片不加投影：页底本来就比卡片暗，再加一层黑只会糊成一团 */
+  --shadow-card: none;
   --shadow-dialog: 0 40px 90px -44px rgba(0, 0, 0, .8);
   --shadow-primary: 0 1px 2px rgba(0, 0, 0, .35);
   --shadow-primary-hover: 0 3px 10px rgba(10, 132, 255, .22);

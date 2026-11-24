@@ -101,6 +101,7 @@
   background: var(--bg-card);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 
   /* Element 表格自带的一堆颜色，在这里一次改掉，页面里就不用再逐个覆盖 */

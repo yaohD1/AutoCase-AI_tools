@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型 A · 审查台</title>
+<style>
+:root{
+  --bg-page:#12161d; --bg-card:#191e27; --bg-sunken:#20262f; --bg-raised:#1e242d;
+  --ink:#e6eaf2; --ink-2:#c3cbd8; --muted:#8b95a6; --faint:#66707f;
+  --line-soft:rgba(255,255,255,.085); --line-faint:rgba(255,255,255,.055); --line-ctl:#2d3540;
+  --accent:#0a84ff; --accent-soft:rgba(10,132,255,.15); --accent-line:rgba(10,132,255,.28); --accent-ink:#74b4ff;
+  --ok:#4ec98a; --ok-soft:rgba(78,201,138,.14); --ok-line:rgba(78,201,138,.26);
+  --warn:#e2a74e; --warn-soft:rgba(226,167,78,.14); --warn-line:rgba(226,167,78,.28);
+  --danger:#ff6b61; --danger-soft:rgba(255,90,80,.12); --danger-line:rgba(255,107,97,.3);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg-page);color:var(--ink);
+  font-family:-apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.proto-bar{background:var(--warn-soft);color:var(--warn);font-size:12px;
+  padding:6px 20px;display:flex;justify-content:space-between;align-items:center;
+  border-bottom:1px solid var(--warn-line)}
+.proto-bar a{color:var(--warn);text-decoration:none;border-bottom:1px dashed currentColor}
+.topbar{height:44px;display:flex;align-items:center;gap:10px;padding:0 20px;
+  border-bottom:1px solid var(--line-soft);color:var(--muted);font-size:12.5px}
+.logo{width:20px;height:20px;border-radius:5px;background:var(--ink);color:var(--bg-page);
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600}
+.topbar .sep{color:var(--faint)}
+.topbar .right{margin-left:auto;display:flex;gap:14px}
+main{max-width:1320px;margin:0 auto;padding:18px 20px 36px}
+.crumb{font-size:12px;color:var(--muted);margin-bottom:6px}
+.page-head{display:flex;align-items:flex-start;gap:16px;margin-bottom:16px}
+.page-head h1{margin:0;font-size:22px;font-weight:500;line-height:1.3}
+.page-head p{margin:6px 0 0;font-size:12.5px;color:var(--muted);max-width:640px}
+.head-acts{margin-left:auto;display:flex;gap:8px;flex:none}
+.btn{border:1px solid var(--line-ctl);background:transparent;color:var(--ink-2);
+  border-radius:8px;padding:6px 13px;font-size:12.5px;cursor:pointer;font-family:inherit}
+.btn:hover{border-color:#3d556f}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.shell{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start}
+.card{background:var(--bg-card);border:1px solid var(--line-soft);border-radius:14px;padding:14px 16px}
+.card-head{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.card-title{font-size:13.5px;font-weight:500}
+.tag{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--line-soft);color:var(--muted)}
+.tag.warn{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn)}
+.sub-line{font-size:11.5px;color:var(--muted);margin-bottom:12px}
+.issues{display:flex;flex-direction:column;gap:8px}
+.issue{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:0 9px 9px 0;
+  background:var(--bg-sunken);border-left:2px solid var(--line-ctl)}
+.issue.warn{border-left-color:var(--warn);background:var(--warn-soft)}
+.issue.info{border-left-color:var(--accent-line);background:var(--accent-soft)}
+.issue-main{flex:1;min-width:0}
+.issue-title{font-size:12.5px;font-weight:500;color:var(--ink)}
+.issue-desc{font-size:11.5px;color:var(--muted);margin-top:2px}
+.issue-desc code{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-2);
+  background:rgba(255,255,255,.06);padding:1px 4px;border-radius:4px}
+.issue-act{flex:none;align-self:center}
+.issue-act .btn{padding:4px 10px;font-size:11.5px}
+.issue-act .btn.link{border-color:transparent;color:var(--accent-ink);padding:4px 2px}
+.pass{margin-top:14px;padding-top:12px;border-top:1px solid var(--line-faint)}
+.pass-title{font-size:11.5px;color:var(--muted);margin-bottom:6px}
+.pass-item{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);padding:3px 0}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
+details{margin-top:14px;border-top:1px solid var(--line-faint);padding-top:10px}
+summary{cursor:pointer;font-size:12px;color:var(--muted);list-style:none;display:flex;align-items:center;gap:6px}
+summary::-webkit-details-marker{display:none}
+summary .arrow{color:var(--faint);font-size:10px;line-height:1}
+details[open] summary .arrow{transform:rotate(90deg);display:inline-block}
+.steps{margin-top:8px}
+.step{display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--line-faint);font-size:12px}
+.step:last-child{border-bottom:0}
+.step .no{width:20px;color:var(--faint);font-size:11px;flex:none;text-align:right}
+.step .kind{font-size:10.5px;padding:0 6px;border-radius:4px;border:1px solid var(--line-soft);
+  color:var(--muted);flex:none;line-height:1.7}
+.step .kind.act{color:var(--accent-ink);border-color:var(--accent-line);background:var(--accent-soft)}
+.step .kind.warn{color:var(--warn);border-color:var(--warn-line)}
+.step .txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-2)}
+.card-foot{display:flex;gap:8px;margin-top:14px;align-items:center}
+.card-foot .hint{font-size:11.5px;color:var(--muted)}
+.card-foot .grow{margin-left:auto;display:flex;gap:8px}
+.rail-row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;
+  border-bottom:1px solid var(--line-faint);font-size:12.5px}
+.rail-row:last-of-type{border-bottom:0}
+.rail-row .lab{color:var(--muted);flex:none}
+.rail-row .val{color:var(--ink-2);text-align:right;word-break:break-all}
+.rail-row .val.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.rail-state{background:var(--warn-soft);border:1px solid var(--warn-line);border-radius:9px;
+  padding:9px 11px;margin:12px 0;font-size:12px;color:var(--warn)}
+.rail-acts{display:flex;flex-direction:column;gap:8px}
+.rail-acts .btn{width:100%;text-align:center}
+.rail-acts .btn[disabled]{opacity:.45;cursor:not-allowed}
+.note{font-size:11.5px;color:var(--faint);margin-top:8px;text-align:center}
+</style>
+</head>
+<body>
+
+<div class="proto-bar">
+  <span>原型预览 · 方案 A 审查台（停止后只列需要你决定的事，全部步骤折叠在下面）</span>
+  <a href="config-page-c.html">切换到方案 C 双栏瘦身</a>
+</div>
+
+<header class="topbar">
+  <span class="logo">N</span>
+  <span>AutoCase</span><span class="sep">/</span><span>Test Case Generator</span>
+  <span class="right"><span>设置</span><span>账号</span></span>
+</header>
+
+<main>
+  <div class="crumb">录制 · 代码生成</div>
+  <div class="page-head">
+    <div>
+      <h1>自动化工具</h1>
+      <p>在真实浏览器里操作，录制步骤与唯一定位；录制时自动打开编排面板，插入断言后按工作区框架生成脚本。</p>
+    </div>
+    <div class="head-acts">
+      <button class="btn">配置</button>
+      <button class="btn">执行测试</button>
+      <button class="btn">生成记录</button>
+      <button class="btn">返回首页</button>
+    </div>
+  </div>
+
+  <div class="shell">
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">录制审查</span>
+        <span class="tag warn">5 项待处理</span>
+        <span style="margin-left:auto;font-size:11.5px;color:var(--muted)">终端资产导入与导出 · 12 步</span>
+      </div>
+      <div class="sub-line">处理完这 5 项，这条用例回放才有意义。每项都能点进去改。</div>
+
+      <div class="issues">
+        <div class="issue warn">
+          <div class="issue-main">
+            <div class="issue-title">2 步定位待确认</div>
+            <div class="issue-desc">第 3、4 步匹配到多个元素，现在用的是「结构路径 + 序号」。录制的浏览器还开着，可以逐条看图选。</div>
+          </div>
+          <div class="issue-act"><button class="btn">逐条确认</button></div>
+        </div>
+
+        <div class="issue warn">
+          <div class="issue-main">
+            <div class="issue-title">1 处明文密码</div>
+            <div class="issue-desc">动作「登录#2」的参数 <code>input_v_4</code> 是 <code>Ailink123456</code>，会原样写进代码和报告。</div>
+          </div>
+          <div class="issue-act"><button class="btn">换成变量</button></div>
+        </div>
+
+        <div class="issue warn">
+          <div class="issue-main">
+            <div class="issue-title">3 步固定等待，共 8.5 秒</div>
+            <div class="issue-desc">第 2、6、9 步是 sleep。前两处可以用「等待加载」代替，最后一处在等导入结果，建议改成带超时的断言。</div>
+          </div>
+          <div class="issue-act"><button class="btn">查看</button></div>
+        </div>
+
+        <div class="issue">
+          <div class="issue-main">
+            <div class="issue-title">2 处操作后没有断言</div>
+            <div class="issue-desc">第 7 步「确定」和第 8 步「导出」之后都没有验证。这类用例回放全绿，但其实什么都没检查。</div>
+          </div>
+          <div class="issue-act"><button class="btn">补断言</button></div>
+        </div>
+
+        <div class="issue">
+          <div class="issue-main">
+            <div class="issue-title">3 步只靠结构路径定位</div>
+            <div class="issue-desc">第 3、5、7 步没有 role、label 或 testid 可用。页面改版后会失效，但不影响现在跑。</div>
+          </div>
+          <div class="issue-act"><button class="btn link">看看能不能换</button></div>
+        </div>
+      </div>
+
+      <div class="pass">
+        <div class="pass-title">已通过</div>
+        <div class="pass-item"><span class="dot"></span>12 步全部录制完成，页面跳转没有断档</div>
+        <div class="pass-item"><span class="dot"></span>起始地址、生成框架已配置</div>
+        <div class="pass-item"><span class="dot"></span>工作区与模型已填写，动作库已存 1 条</div>
+      </div>
+
+      <details>
+        <summary><span class="arrow">▸</span>全部步骤 12</summary>
+        <div class="steps">
+          <div class="step"><span class="no">1</span><span class="kind">打开</span><span class="txt">https://192.168.123.135/#/login</span></div>
+          <div class="step"><span class="no">2</span><span class="kind act">动作</span><span class="txt">调用「登录#2」· admin@ailink.com / ••••••</span></div>
+          <div class="step"><span class="no">3</span><span class="kind warn">点击</span><span class="txt">终端管理 · 定位待确认</span></div>
+          <div class="step"><span class="no">4</span><span class="kind warn">点击</span><span class="txt">终端资产 · 定位待确认</span></div>
+          <div class="step"><span class="no">5</span><span class="kind">点击</span><span class="txt">导入</span></div>
+          <div class="step"><span class="no">6</span><span class="kind">导入文件</span><span class="txt">终端资产导入模板.xlsx · 11.8 KB</span></div>
+          <div class="step"><span class="no">7</span><span class="kind">点击</span><span class="txt">确定</span></div>
+          <div class="step"><span class="no">8</span><span class="kind">校验下载</span><span class="txt">导出 · ≥ 1 KB</span></div>
+          <div class="step"><span class="no">9</span><span class="kind">固定等待</span><span class="txt">3 秒</span></div>
+          <div class="step"><span class="no">10</span><span class="kind">断言</span><span class="txt">页面出现「预导入校验失败」</span></div>
+          <div class="step"><span class="no">11</span><span class="kind">断言</span><span class="txt">导出文件 ≥ 1024 字节</span></div>
+          <div class="step"><span class="no">12</span><span class="kind">刷新</span><span class="txt">当前页面</span></div>
+        </div>
+      </details>
+
+      <div class="card-foot">
+        <span class="hint">定位确认与改步骤在录制面板里做，生成入口在右侧</span>
+      </div>
+    </section>
+
+    <aside class="card">
+      <div class="card-head"><span class="card-title">准备与生成</span></div>
+
+      <div class="rail-row"><span class="lab">起始地址</span><span class="val mono">https://192.168.123.135</span></div>
+      <div class="rail-row"><span class="lab">生成框架</span><span class="val">Robot Framework</span></div>
+      <div class="rail-row"><span class="lab">目标文件</span><span class="val">由任务书决定</span></div>
+
+      <div class="rail-state">5 项待处理 · 建议处理后再生成</div>
+
+      <div class="rail-acts">
+        <button class="btn" disabled>调试回放</button>
+        <button class="btn primary">生成任务书</button>
+      </div>
+      <div class="note">任务书只读，确认后写入</div>
+    </aside>
+  </div>
+</main>
+
+</body>
+</html>

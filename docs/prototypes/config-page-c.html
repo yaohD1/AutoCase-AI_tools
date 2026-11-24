@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型 C · 双栏瘦身</title>
+<style>
+:root{
+  --bg-page:#12161d; --bg-card:#191e27; --bg-sunken:#20262f; --bg-raised:#1e242d;
+  --ink:#e6eaf2; --ink-2:#c3cbd8; --muted:#8b95a6; --faint:#66707f;
+  --line-soft:rgba(255,255,255,.085); --line-faint:rgba(255,255,255,.055); --line-ctl:#2d3540;
+  --accent:#0a84ff; --accent-soft:rgba(10,132,255,.15); --accent-line:rgba(10,132,255,.28); --accent-ink:#74b4ff;
+  --ok:#4ec98a; --ok-soft:rgba(78,201,138,.14); --ok-line:rgba(78,201,138,.26);
+  --warn:#e2a74e; --warn-soft:rgba(226,167,78,.14); --warn-line:rgba(226,167,78,.28);
+  --danger:#ff6b61;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg-page);color:var(--ink);
+  font-family:-apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.proto-bar{background:var(--warn-soft);color:var(--warn);font-size:12px;
+  padding:6px 20px;display:flex;justify-content:space-between;align-items:center;
+  border-bottom:1px solid var(--warn-line)}
+.proto-bar a{color:var(--warn);text-decoration:none;border-bottom:1px dashed currentColor}
+.topbar{height:44px;display:flex;align-items:center;gap:10px;padding:0 20px;
+  border-bottom:1px solid var(--line-soft);color:var(--muted);font-size:12.5px}
+.logo{width:20px;height:20px;border-radius:5px;background:var(--ink);color:var(--bg-page);
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600}
+.topbar .sep{color:var(--faint)}
+.topbar .right{margin-left:auto;display:flex;gap:14px;color:var(--muted)}
+main{max-width:1320px;margin:0 auto;padding:18px 20px 36px}
+.crumb{font-size:12px;color:var(--muted);margin-bottom:6px}
+.page-head{display:flex;align-items:flex-start;gap:16px;margin-bottom:16px}
+.page-head h1{margin:0;font-size:22px;font-weight:500;line-height:1.3}
+.page-head p{margin:6px 0 0;font-size:12.5px;color:var(--muted);max-width:640px}
+.head-acts{margin-left:auto;display:flex;gap:8px;flex:none}
+.btn{border:1px solid var(--line-ctl);background:transparent;color:var(--ink-2);
+  border-radius:8px;padding:6px 13px;font-size:12.5px;cursor:pointer;font-family:inherit}
+.btn:hover{border-color:#3d556f}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.ghost{border-color:transparent;color:var(--muted)}
+.shell{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start}
+.card{background:var(--bg-card);border:1px solid var(--line-soft);border-radius:14px;padding:14px 16px}
+.card-head{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.card-title{font-size:13.5px;font-weight:500}
+.tag{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--line-soft);color:var(--muted)}
+.tag.ok{background:var(--ok-soft);border-color:var(--ok-line);color:var(--ok)}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:14px}
+.metric{background:var(--bg-sunken);border-radius:10px;padding:10px 12px}
+.metric b{display:block;font-size:19px;font-weight:500;line-height:1.3}
+.metric span{font-size:11.5px;color:var(--muted)}
+.metric.is-warn b{color:var(--warn)}
+.seg{display:inline-flex;border:1px solid var(--line-soft);border-radius:8px;overflow:hidden;margin-bottom:10px}
+.seg button{border:0;background:transparent;color:var(--muted);font-size:12px;padding:4px 12px;cursor:pointer;font-family:inherit}
+.seg button.on{background:var(--accent-soft);color:var(--accent-ink)}
+.preview{border:1px solid var(--line-soft);border-radius:10px;background:var(--bg-sunken);
+  padding:12px 14px;height:318px;overflow:auto}
+.preview pre{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.85;color:var(--ink-2)}
+.k{color:#c792ea}.s{color:#a5d6a7}.c{color:var(--faint)}.f{color:#82aaff}.n{color:#f78c6c}
+.md h3{margin:0 0 6px;font-size:13px;font-weight:500}
+.md p{margin:0 0 8px;color:var(--ink-2);font-size:12.5px}
+.md ol{margin:0 0 10px;padding-left:18px;color:var(--ink-2);font-size:12.5px}
+.md ol li{margin-bottom:3px}
+.md .sub{font-size:11.5px;color:var(--muted);margin-bottom:4px}
+.card-foot{display:flex;gap:8px;margin-top:12px;align-items:center}
+.card-foot .hint{font-size:11.5px;color:var(--muted)}
+.card-foot .grow{margin-left:auto;display:flex;gap:8px}
+.rail-row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;
+  border-bottom:1px solid var(--line-faint);font-size:12.5px}
+.rail-row:last-of-type{border-bottom:0}
+.rail-row .lab{color:var(--muted);flex:none}
+.rail-row .val{color:var(--ink-2);text-align:right;word-break:break-all}
+.rail-row .val.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.rail-state{background:var(--bg-sunken);border-radius:9px;padding:9px 11px;margin:12px 0;
+  font-size:12px;color:var(--muted)}
+.rail-state b{color:var(--ink-2);font-weight:500}
+.rail-acts{display:flex;flex-direction:column;gap:8px}
+.rail-acts .btn{width:100%;text-align:center}
+.rail-acts .btn[disabled]{opacity:.45;cursor:not-allowed}
+.note{font-size:11.5px;color:var(--faint);margin-top:8px;text-align:center}
+.pending-link{display:flex;align-items:center;justify-content:space-between;
+  margin-top:10px;padding:8px 11px;border-radius:9px;background:var(--warn-soft);
+  border:1px solid var(--warn-line);font-size:12px;color:var(--warn)}
+.pending-link a{color:var(--warn);text-decoration:none;border-bottom:1px dashed currentColor}
+</style>
+</head>
+<body>
+
+<div class="proto-bar">
+  <span>原型预览 · 方案 C 双栏瘦身（左栏不再铺步骤，只留产物与预览）</span>
+  <a href="config-page-a.html">切换到方案 A 审查台</a>
+</div>
+
+<header class="topbar">
+  <span class="logo">N</span>
+  <span>AutoCase</span><span class="sep">/</span><span>Test Case Generator</span>
+  <span class="right"><span>设置</span><span>账号</span></span>
+</header>
+
+<main>
+  <div class="crumb">录制 · 代码生成</div>
+  <div class="page-head">
+    <div>
+      <h1>自动化工具</h1>
+      <p>在真实浏览器里操作，录制步骤与唯一定位；录制时自动打开编排面板，插入断言后按工作区框架生成脚本。</p>
+    </div>
+    <div class="head-acts">
+      <button class="btn">配置</button>
+      <button class="btn">执行测试</button>
+      <button class="btn">生成记录</button>
+      <button class="btn">返回首页</button>
+    </div>
+  </div>
+
+  <div class="shell">
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">录制产物</span>
+        <span class="tag ok">已完成</span>
+        <span style="margin-left:auto;font-size:11.5px;color:var(--muted)">终端资产导入与导出</span>
+      </div>
+
+      <div class="metrics">
+        <div class="metric"><b>12</b><span>录制步骤</span></div>
+        <div class="metric"><b>2</b><span>断言</span></div>
+        <div class="metric is-warn"><b>5</b><span>待处理</span></div>
+        <div class="metric is-warn"><b>3</b><span>结构定位</span></div>
+      </div>
+
+      <div class="seg">
+        <button class="on">任务书</button>
+        <button>代码预览</button>
+        <button>运行记录</button>
+      </div>
+
+      <div class="preview md">
+        <h3>终端资产导入与导出</h3>
+        <p class="sub">前置：已登录 AiUMS，账号 admin@ailink.com</p>
+        <ol>
+          <li>打开登录页 <code>https://192.168.123.135/#/login</code></li>
+          <li>用 admin 账号登录，通过滑块验证</li>
+          <li>进入「终端管理 → 终端资产」列表</li>
+          <li>点击「导入」，选择 <code>.assets/终端资产导入模板.xlsx</code>，点确定</li>
+          <li>点击「导出」，等文件落盘并校验体积 ≥ 1 KB</li>
+        </ol>
+        <p class="sub" style="margin-top:10px">断言</p>
+        <ol>
+          <li>导入后出现「预导入校验失败」提示或列表新增一行</li>
+          <li>导出文件体积 ≥ 1024 字节，且为 xlsx</li>
+        </ol>
+      </div>
+
+      <div class="pending-link">
+        <span>5 项待处理：2 步定位待确认、1 处明文密码、3 步固定等待</span>
+        <a href="#">去面板处理</a>
+      </div>
+
+      <div class="card-foot">
+        <span class="hint">已停止录制 · 浏览器仍开着 · 生成入口在右侧</span>
+      </div>
+    </section>
+
+    <aside class="card">
+      <div class="card-head"><span class="card-title">准备与生成</span></div>
+
+      <div class="rail-row"><span class="lab">起始地址</span><span class="val mono">https://192.168.123.135</span></div>
+      <div class="rail-row"><span class="lab">生成框架</span><span class="val">Robot Framework</span></div>
+      <div class="rail-row"><span class="lab">目标文件</span><span class="val">由任务书决定</span></div>
+
+      <div class="rail-state">已停止 · 已录 <b>12</b> 步 · <b>5</b> 项待处理</div>
+
+      <div class="rail-acts">
+        <button class="btn">调试回放</button>
+        <button class="btn primary">生成任务书</button>
+      </div>
+      <div class="note">任务书只读，确认后写入</div>
+    </aside>
+  </div>
+</main>
+
+</body>
+</html>

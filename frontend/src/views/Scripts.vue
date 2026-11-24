@@ -736,6 +736,7 @@ function casesPayload() {
   background: var(--bg-card);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
 }
 .sp-card-head {
   flex: none;

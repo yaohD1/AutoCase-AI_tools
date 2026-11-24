@@ -1227,6 +1227,7 @@ async function confirmDeleteSprint(sprint) {
   border: 1px solid var(--line-soft);
   border-radius: 11px;
   background: var(--bg-card);
+  box-shadow: var(--shadow-card);
   padding: 12px 14px 13px;
   transition: border-color .16s ease, opacity .16s ease;
 }

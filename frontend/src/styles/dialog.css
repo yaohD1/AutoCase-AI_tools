@@ -44,6 +44,14 @@
   margin-bottom: 24px;
 }
 
+/* 居中弹窗（align-center）在 Element 2.14 里靠上下两条 auto 外边距均分剩余空间实现，
+   而上面那条 margin-bottom:24px 把下边那个 auto 顶掉了，只剩上边一个 auto 吸收全部空隙，
+   弹窗就会一路沉到底部。这里把两条都还原成 auto，才是真居中。 */
+.el-dialog.dlg.is-align-center {
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
 /* ---------- 标题区 ---------- */
 .dlg .el-dialog__header {
   padding: 17px 56px 13px 24px;

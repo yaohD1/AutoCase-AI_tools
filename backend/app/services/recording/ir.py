@@ -4,7 +4,12 @@
 """
 
 STEP_TYPES = ('goto', 'reload', 'click', 'fill', 'select', 'press', 'dialog',
-              'new_page', 'assert', 'wait', 'sleep', 'call', 'slider', 'captcha')
+              'new_page', 'assert', 'wait', 'sleep', 'call', 'slider', 'captcha',
+              'upload', 'download')
+
+# 下载后要校验到什么程度。none 只看「有文件、体积过线」；
+# xlsx / csv 用 zipfile 与 csv 模块直接数行，不引第三方依赖。
+DOWNLOAD_PARSERS = ('none', 'xlsx', 'csv')
 
 # 断言 / 等待的意图类型，固定 schema。代码片段由生成 agent 按框架写。
 INTENT_TYPES = (
@@ -67,7 +72,8 @@ def make_target(snap, candidates, primary, status):
 
 
 def make_step(step_type, no, target=None, value=None, label=None, url=None, page_index=0,
-              source='record', dialog=None, action=None, args=None, slider=None, captcha=None):
+              source='record', dialog=None, action=None, args=None, slider=None, captcha=None,
+              file=None, expect=None):
     """一步操作。source 为 record（录制得到）或 manual（用户在工具栏添加）。
 
     press 用 value 存键名（Playwright 写法，如 Enter / Control+Enter）；
@@ -76,6 +82,9 @@ def make_step(step_type, no, target=None, value=None, label=None, url=None, page
     slider 是滑块验证的配置：{'selector', 'attempts', 'timeout'}，selector 空表示自动识别。
     captcha 是图形验证码的配置：{'selector', 'input_selector', 'charset', 'length', ...}，
     selector 空表示按常见图片命名猜一遍（猜不到会报错让人拾取，不静默跳过）。
+    upload 的 file 是 {'path', 'name', 'size', 'sha256', 'selector'}：path 是工作区相对路径，
+    selector 是从拾取到的按钮出发找到的 input[type=file] 的 CSS 路径（回放优先用它）。
+    download 的 expect 是 {'name', 'min_bytes', 'parse', 'min_rows'}，留空表示有文件即可。
     """
     if step_type not in STEP_TYPES:
         raise ValueError('unknown step type: %s' % step_type)
@@ -102,6 +111,11 @@ def make_step(step_type, no, target=None, value=None, label=None, url=None, page
     # captcha 也一样：两段流程（识别、填入）由它自己完成，不是一次元素操作。
     if step_type == 'captcha':
         step['captcha'] = dict(captcha or {})
+    # 文件类同样是自有字段：upload 要带资产引用，download 要带校验口径。
+    if step_type == 'upload':
+        step['file'] = dict(file or {})
+    if step_type == 'download':
+        step['expect'] = dict(expect or {})
     return step
 
 

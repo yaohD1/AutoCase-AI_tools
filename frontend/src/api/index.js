@@ -280,6 +280,15 @@ batchDeleteTestcases(ids) {
   setRecordingPanelWidth(width) {
     return api.post('/automation/recording/panel/width', { width })
   },
+  // 定位确认弹窗出现 / 关闭时临时放大、还原面板窗口。
+  // 弹窗是 append-to-body 到面板窗口的：600 宽的面板里它只有 568，单列下左图缩到
+  // 0.33 倍（13px 字剩 4px），放大窗口是唯一能让图变清楚的办法。
+  expandRecordingPanel() {
+    return api.post('/automation/recording/panel/expand')
+  },
+  restoreRecordingPanel() {
+    return api.post('/automation/recording/panel/restore')
+  },
   // 调试回放：逐步执行录制 IR，能暂停 / 单步 / 看画面
   startDebugReplay(payload) {
     return api.post('/automation/recording/debug/start', payload || {})
@@ -343,6 +352,31 @@ batchDeleteTestcases(ids) {
   // 验证码识别：验证码位置必填（拾取），输入框可空（空则从验证码附近往上找）。
   addRecordingCaptcha(payload) {
     return api.post('/automation/recording/captcha', payload, { timeout: 30000 })
+  },
+  // 文件资产：先传文件再插步骤。浏览器拿不到本地绝对路径，只能把字节传上来。
+  uploadRecordingAsset(file) {
+    const form = new FormData()
+    form.append('file', file)
+    // 这个实例的默认头写死了 application/json，而 axios 一旦读到 JSON 头，
+    // 就会把 FormData 序列化成 JSON 字符串发出去，后端 request.files 是空的
+    // （界面上表现为「没有收到文件」）。这里必须让浏览器自己带 multipart 的
+    // boundary：请求级把头置空，再用 transformRequest 跳过默认的 JSON 序列化。
+    return api.post('/automation/recording/assets', form, {
+      timeout: 120000,
+      headers: { 'Content-Type': undefined },
+      transformRequest: [(data) => data],
+    })
+  },
+  listRecordingAssets() {
+    return api.get('/automation/recording/assets')
+  },
+  // 导入文件：target 是拾取到的按钮别名，file 是资产引用（相对工作区）。
+  addRecordingUpload(payload) {
+    return api.post('/automation/recording/upload', payload, { timeout: 60000 })
+  },
+  // 校验下载：target 是触发下载的按钮别名，expect 是校验口径。
+  addRecordingDownload(payload) {
+    return api.post('/automation/recording/download', payload, { timeout: 30000 })
   },
   // 在浏览器里把这一步的匹配元素全部框出来并编号，供人眼确认；index 省略就按当前选中的那个。
   highlightRecordingStep(no, index = null, framework = null) {

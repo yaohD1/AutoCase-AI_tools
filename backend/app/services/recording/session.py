@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 from app.services.recording import intent as intent_mod
 from app.services.recording import actions as actions_mod
+from app.services.recording import assets, files
 from app.services.recording import emit, ir, progress, verify, winwindows
 from app.services.recording.ask_pool import STOP_DELAY_SECONDS as ASK_STOP_DELAY_SECONDS
 from app.services.recording.ask_pool import AskPool, disabled_snapshot
@@ -245,6 +246,15 @@ PANEL_CAPTION_CSS = 34
 PANEL_MIN_CSS = 420
 # 并排时页面至少要留这么多 CSS 宽，否则被测系统会退化成移动版布局。
 PAGE_MIN_CSS = 520
+# 定位确认弹窗的设计宽度（CSS）。弹窗按 min(1180px, 100vw - 32px) 排，而面板窗口只有
+# 420~900：600 宽时弹窗只能拿到 568，掉进单列，1600 宽的帧缩到 534（0.33 倍），图上
+# 13px 的字只剩 4px——等于没有图。弹窗出现时把面板窗口临时放到这个宽度，弹窗自己
+# 就回到双栏。低于 LOC_DIALOG_MIN_CSS 直接不放宽：那样只是把单列拉大，图还是读不出。
+LOC_DIALOG_CSS = 1180
+LOC_DIALOG_MIN_CSS = 980
+LOC_DIALOG_HEIGHT_CSS = 840
+# 放大后离屏幕边缘留白：贴死看着像全屏了，也不方便看到背后的窗口。
+LOC_DIALOG_MARGIN_CSS = 20
 # 浏览器自己知道这次导航的起因（刷新 / 前进后退 / 普通跳转），读它比拿「URL 变没变」猜准。
 # 同时带回 timeOrigin：它是当前 document 的身份。SPA 在启动时会做 same-document 导航
 # （pushState / hash 变化），Playwright 对每一次都会再发一个 framenavigated，但
@@ -394,9 +404,21 @@ def vanished_primary(ordered):
     return dict(ordered[0], count=0)
 
 
+def _clamp(value, low, high, default):
+    """把表单里的数字收进区间。
+
+    传了空串、None、或者被输入法带进来的中文，都退回默认值——
+    不要因为一个可选字段填错，就让用户已经拾取好的这一步整体插不进去。
+    """
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(number, high))
+
+
 class RecordingError(Exception):
     pass
-
 
 class RecordingBusy(RecordingError):
     """已有一个正在进行的录制。"""
@@ -463,6 +485,9 @@ class RecordingSession(object):
         self._panel_proc = None
         self._panel_profile = None
         self._panel_hwnd = 0
+        # 面板窗口是否正被「定位确认弹窗」临时放大着。放大期间粘合是停掉的，
+        # 选完必须把两边重新摆一次，否则以后拖页面面板不跟。
+        self._panel_expanded = False
         # 调试回放窗口：独立 context，和录制 context 隔离。
         # 关键：录制 context 会给每个新页面补一条 new_page 步骤（见 _handle_new_page），
         # 回放页要是开在同一个 context 里，步骤列表会凭空多一步。
@@ -1397,6 +1422,28 @@ class RecordingSession(object):
         """
         return self._call('captcha', config=config or {}, after_no=after_no)
 
+    def add_upload_step(self, config=None, after_no=None):
+        """插入一步「导入文件」。
+
+        和滑块、验证码一样不做自动识别：用户点「选择文件」弹出的是操作系统的文件对话框，
+        录制器既拿不到用户选了什么，也不能在 capture 阶段 preventDefault —— 拦下来页面就
+        收不到 change，只会录成一个不起作用的假点击。显式加一步，语义最清楚。
+
+        config: {'target': 元素别名, 'file': {'path', 'name', 'size', 'sha256'}}
+        """
+        return self._call('upload', config=config or {}, after_no=after_no)
+
+    def add_download_step(self, config=None, after_no=None):
+        """插入一步「校验下载」。
+
+        下载本身由前面那次点击触发，这一步只负责「等文件落地 + 断言文件本身」。
+        独立成一步而不是挂在点击上：文件什么时候下完由后端和网络决定，
+        和点击不是同一件事，分开才能单独设超时、单独看失败原因。
+
+        config: {'target': 元素别名, 'expect': {'name', 'min_bytes', 'parse', 'min_rows', 'timeout'}}
+        """
+        return self._call('download', config=config or {}, after_no=after_no)
+
     def _add_slider(self, config=None, after_no=None, **_):
         config = config or {}
         with self._lock:
@@ -1437,6 +1484,156 @@ class RecordingSession(object):
                     'attempts': max(0, min(int(config.get('attempts') or 2), 5)),
                     'timeout': max(5, min(int(config.get('timeout') or 20), 90)),
                 },
+            )
+            self._insert_step(step, after_no)
+            self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def _root_for(self, page, target):
+        """目标元素在哪个 frame 里。和回放同一套判断：frame_url 优先，frame_name 兜底。
+
+        老数据只有 frame_url；SPA 换路由或带临时 query 时 url 会失配，所以要留 name 这一手。
+        """
+        snap = (target or {}).get('snap') or {}
+        url = snap.get('frame_url')
+        name = snap.get('frame_name')
+        if not url and not name:
+            return page
+        for frame in page.frames:
+            if url and frame.url == url:
+                return frame
+        if name:
+            for frame in page.frames:
+                if frame.name == name:
+                    return frame
+        return page
+
+    def _file_input_selector(self, page, target):
+        """从拾取到的元素出发，找到真正的 input[type=file]，返回它的 CSS 路径。
+
+        用户能点到的是按钮，真 input 被组件藏着（display:none 或零尺寸）。找不到就返回空串
+        ——回放时还会在真实页面上再找一次，那时页面可能才渲染出上传控件，两步都失败才报错。
+        """
+        root = self._root_for(page, target)
+        primary = (target or {}).get('primary') or {}
+        spec = primary.get('spec')
+        if not spec:
+            for cand in (target or {}).get('candidates') or []:
+                if cand.get('spec') and cand.get('count') == 1:
+                    spec = cand['spec']
+                    break
+        if not spec:
+            return ''
+        try:
+            locator = build_locator(root, spec)
+            if locator.count() > 1 and primary.get('index') is not None:
+                locator = locator.nth(primary['index'])
+            found = locator.first.evaluate(files.FIND_INPUT_JS)
+        except Exception:
+            # 元素已经不在、页面正在跳转、或定位写法在这个浏览器上不支持：
+            # 空串表示「没找到」，由回放阶段再试一次，不要在这里中断用户的编辑。
+            return ''
+        return found if isinstance(found, str) else ''
+
+    def _resolve_target(self, value):
+        """把接口传来的 target 变成 target 对象。
+
+        平时前端传的是别名（拾取过、或已录过那一步），按别名回查。
+        但也允许直接传完整 target：删掉原步骤之后别名就查不到了，
+        而用户手上的定位其实还在；从动作库/草稿复制步骤时也是同一种情况。
+        """
+        if isinstance(value, dict) and value.get('primary'):
+            return value
+        return self._find_target_with_frame(str(value or '').strip())[0]
+
+    def _add_upload(self, config=None, after_no=None, **_):
+        """插入一条「把文件塞进上传控件」。
+
+        文件先在工作区里落定再记步骤：资产路径是相对路径，回放和生成代码都按项目根解析，
+        换机器、进 CI 才不会断。前端传来的 size / sha256 只用于展示，真伪以磁盘为准。
+        """
+        config = config or {}
+        raw = config.get('target')
+        if isinstance(raw, dict):
+            alias = str(raw.get('alias') or '').strip() or '目标元素'
+        else:
+            alias = str(raw or '').strip()
+        if not alias:
+            raise RecordingError('请先拾取「选择文件」按钮或上传区域')
+        info = config.get('file') or {}
+        rel = str(info.get('path') or '').strip()
+        if not rel:
+            raise RecordingError('请先选择要导入的文件')
+        try:
+            real = assets.abs_path(self.workspace, rel)
+        except assets.AssetError as exc:
+            raise RecordingError(str(exc)) from exc
+        if not real.is_file():
+            raise RecordingError('文件不存在：%s' % rel)
+        with self._lock:
+            target = self._resolve_target(raw)
+            if target is None:
+                raise RecordingError('没有名为 %r 的元素' % alias)
+            page = self._current_page()
+            page_index = self._page_index(page) if page is not None else 0
+        selector = ''
+        if page is not None:
+            try:
+                selector = self._file_input_selector(page, target)
+            except Exception:
+                selector = ''
+        payload = {
+            'path': rel,
+            'name': str(info.get('name') or real.name)[:120],
+            'size': int(info.get('size') or real.stat().st_size),
+            'sha256': str(info.get('sha256') or '')[:64],
+            # 录制时算好的 input 路径：回放优先用它，失效时再按 target 现场找一次。
+            'selector': selector,
+        }
+        with self._lock:
+            step = ir.make_step('upload', no=0, target=target, source='manual',
+                                page_index=page_index, file=payload)
+            self._insert_step(step, after_no)
+            self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def _add_download(self, config=None, after_no=None, **_):
+        """插入一条「等文件下载完并校验」。
+
+        参数都给上下限：min_rows 写成一千万、timeout 写成半小时，都会让一次回放卡到没法用。
+        parse 只认 ir.DOWNLOAD_PARSERS，认不出来就退回 none（只看存在和体积），
+        不要因为前端传了个奇怪的字符串就整步失败。
+        """
+        config = config or {}
+        raw = config.get('target')
+        if isinstance(raw, dict):
+            alias = str(raw.get('alias') or '').strip() or '目标元素'
+        else:
+            alias = str(raw or '').strip()
+        if not alias:
+            raise RecordingError('请先拾取触发下载的按钮')
+        expect = config.get('expect') or {}
+        parse = str(expect.get('parse') or 'none').strip().lower()
+        if parse not in ir.DOWNLOAD_PARSERS:
+            parse = 'none'
+        clean = {
+            'name': str(expect.get('name') or '').strip()[:80],
+            'min_bytes': _clamp(expect.get('min_bytes'), 0, 1024 * 1024 * 1024, 0),
+            'parse': parse,
+            'min_rows': _clamp(expect.get('min_rows'), 0, 1000000, 0),
+            'timeout': _clamp(expect.get('timeout'), 5, 180, 30),
+        }
+        with self._lock:
+            target = self._resolve_target(raw)
+            if target is None:
+                raise RecordingError('没有名为 %r 的元素' % alias)
+            page = self._current_page()
+            step = ir.make_step(
+                'download', no=0, target=target, source='manual',
+                page_index=self._page_index(page) if page is not None else 0,
+                expect=clean,
             )
             self._insert_step(step, after_no)
             self._renumber()
@@ -1694,6 +1891,10 @@ class RecordingSession(object):
                     result = self._set_panel_mode_now(bool(kwargs.get('mode')))
                 elif name == 'panel_width':
                     result = self._set_panel_width_now(int(kwargs['width']))
+                elif name == 'panel_expand':
+                    result = self._expand_panel_now()
+                elif name == 'panel_restore':
+                    result = self._restore_panel_now()
                 elif name == 'focus_sheet':
                     result = {'focused': self.sheet_windows(bool(kwargs.get('on', True)))}
                 elif name == 'goto_doc':
@@ -1708,6 +1909,10 @@ class RecordingSession(object):
                     result = self._add_slider(kwargs.get('config'), kwargs.get('after_no'))
                 elif name == 'captcha':
                     result = self._add_captcha(kwargs.get('config'), kwargs.get('after_no'))
+                elif name == 'upload':
+                    result = self._add_upload(kwargs.get('config'), kwargs.get('after_no'))
+                elif name == 'download':
+                    result = self._add_download(kwargs.get('config'), kwargs.get('after_no'))
                 elif name == 'highlight':
                     result = self._highlight_now(kwargs['no'], kwargs.get('index'),
                                                  kwargs.get('framework') or 'playwright-ts')
@@ -2313,6 +2518,62 @@ class RecordingSession(object):
         laid_out = self.layout_windows()
         self._push_hud()
         return {'laid_out': laid_out, 'panel_width': self._panel_css_width()}
+
+    def expand_for_loc_dialog(self):
+        """定位确认弹窗要出现时，把面板窗口临时放大到双栏能放下的宽度。
+
+        弹窗是 append-to-body 到面板窗口的：窗口多宽，弹窗就多宽。600 宽的面板里
+        弹窗只有 568，左图 534×184，1600 宽的帧缩成 0.33 倍，字读不出来。
+        改前端布局治不了这个——再排也只能把 4px 的字排得整齐一点。
+        """
+        return self._call('panel_expand')
+
+    def restore_after_loc_dialog(self):
+        """弹窗全部选完后把面板放回去：重新并排（或按原状态收回屏幕外）。"""
+        return self._call('panel_restore')
+
+    def _expand_panel_now(self):
+        if self._embed or self._headless or not winwindows.available():
+            return {'expanded': False, 'reason': 'not-native'}
+        hwnd = getattr(self, '_panel_hwnd', 0)
+        if not hwnd or not winwindows.prepare(hwnd):
+            return {'expanded': False, 'reason': 'no-panel'}
+        area = winwindows.work_area(hwnd)
+        if not area:
+            return {'expanded': False, 'reason': 'no-area'}
+        ax, ay, aw, ah = area
+        dpr = winwindows.scale(hwnd) or 1.0
+        margin = int(round(LOC_DIALOG_MARGIN_CSS * dpr))
+        width = min(int(round(LOC_DIALOG_CSS * dpr)), aw - margin * 2)
+        # 屏太窄就干脆别放：拉不到 980 CSS 的话弹窗还是单列，白跳一下窗口。
+        if width < int(round(LOC_DIALOG_MIN_CSS * dpr)):
+            return {'expanded': False, 'reason': 'screen-too-small',
+                    'css_width': round(width / dpr)}
+        height = min(int(round(LOC_DIALOG_HEIGHT_CSS * dpr)), ah - margin * 2)
+        # 放大期间必须断开粘合：粘合会把这次 SetWindowPos 当成用户拖动，顺手把
+        # 被测窗口也拽走，等还原时页面已经不在原位了。
+        self._stop_glue()
+        self._panel_expanded = True
+        ok = winwindows.move_visible(hwnd, ax + (aw - width) // 2,
+                                     ay + (ah - height) // 2, width, height)
+        if not ok:
+            self._panel_expanded = False
+            return {'expanded': False, 'reason': 'move-failed'}
+        # 弹窗要能直接被看见、直接点：放大后如果躲在别的窗口后面，用户会以为又没弹。
+        winwindows.bring_to_top(hwnd)
+        winwindows.activate(hwnd)
+        return {'expanded': True, 'css_width': round(width / dpr),
+                'css_height': round(height / dpr),
+                'screen_css': [round(aw / dpr), round(ah / dpr)]}
+
+    def _restore_panel_now(self):
+        if not getattr(self, '_panel_expanded', False):
+            return {'restored': False, 'reason': 'not-expanded'}
+        self._panel_expanded = False
+        # 重新走一遍标准摆位，而不是回放一个记下来的矩形：收起态在屏幕外、悬浮态
+        # 有自己的算法、并排态要重开粘合——这些 layout_windows 一次都能处理对。
+        ok = self.layout_windows()
+        return {'restored': bool(ok), 'panel_width': self._panel_css_width()}
 
     def _panel_css_width(self):
         """面板按界面尺寸要多宽（CSS 像素）。和嵌入模式那块面板同一个口径。"""

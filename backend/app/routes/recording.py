@@ -15,7 +15,7 @@ from app.services.automation_generator import AutomationScriptGenerator
 from app.services.opencode_runner import OpenCodeRunner
 from app.models import db
 from app.models.recording_generation import RecordingGeneration
-from app.services.recording import debug, detect, drafts, emit, guard, records, replay
+from app.services.recording import assets, debug, detect, drafts, emit, guard, records, replay
 from app.services.recording import emit_session, intent, memory, progress, verify
 from app.services.recording.ask_pool import AskUnavailable
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
@@ -81,6 +81,14 @@ def start_recording():
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return _error('base_url 必须是 http 或 https 地址', 400)
     headless = bool(current_app.config.get('RECORDING_HEADLESS', os.environ.get('RECORDING_HEADLESS') == '1'))
+    # 继续录制：把当前会话的步骤带进新会话。取的是服务端完整 IR（带可执行的定位 spec），
+    # 不能用前端那份——public_step 把 spec 剥掉了，灌回来回放和生成都会缺定位。
+    # 前端在「已经有步骤」时会先问一句：继续就带 keep_steps，覆盖重来就不带。
+    restore = None
+    if body.get('keep_steps'):
+        current = RecordingSession.current()
+        if current is not None and current.status not in ('starting', 'recording'):
+            restore = current.ir()
     # 统一并排：iframe 嵌入已下线，不再探测目标站能不能嵌。
     # 「能嵌的站」和「不能嵌的站」不该有两种录法；被测页面永远是独立顶层窗口，
     # 可以最大化、拖到副屏，DevTools / 弹窗 / 上传也都按正常页面走。
@@ -107,6 +115,7 @@ def start_recording():
             framework=(body.get('framework') or '').strip() or None,
             # 主窗口当前的深浅色：录制窗口是独立 profile，只能按地址带过去。
             theme=(body.get('theme') or '').strip().lower() or None,
+            restore_steps=restore,
         )
     except RecordingBusy as exc:
         return _error(str(exc), 409)
@@ -215,6 +224,37 @@ def set_panel_width():
         result = session.set_panel_width(body.get('width'))
     except RecordingError as exc:
         return _error(str(exc), 409)
+    return jsonify(result), 200
+
+
+@recording_bp.route('/automation/recording/panel/expand', methods=['POST'])
+def expand_panel_for_loc_dialog():
+    """定位确认弹窗出现时，把并排的面板窗口临时放大到能放双栏。
+
+    这是排版问题不是逻辑问题：弹窗 append-to-body 到面板窗口，600 宽的面板里它
+    只有 568，左图缩到 4px 的字，读不出是哪一行。放大失败不算错误——弹窗照样在
+    窄窗口里单列显示，只是图小一点，前端不用为此拦路。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    try:
+        result = session.expand_for_loc_dialog()
+    except RecordingError as exc:
+        return jsonify({'expanded': False, 'reason': str(exc)}), 200
+    return jsonify(result), 200
+
+
+@recording_bp.route('/automation/recording/panel/restore', methods=['POST'])
+def restore_panel_after_loc_dialog():
+    """弹窗选完后把面板窗口摆回原样（并排 / 收起 / 悬浮由后端自己判断）。"""
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    try:
+        result = session.restore_after_loc_dialog()
+    except RecordingError as exc:
+        return jsonify({'restored': False, 'reason': str(exc)}), 200
     return jsonify(result), 200
 
 
@@ -573,6 +613,93 @@ def add_recording_captcha():
             'length': body.get('length'),
             'attempts': body.get('attempts'),
             'timeout': body.get('timeout'),
+        }, after_no=after_no)), 200
+    except (RecordingError, TypeError, ValueError) as exc:
+        return _error(str(exc), 400)
+
+
+@recording_bp.route('/automation/recording/assets', methods=['GET'])
+def list_recording_assets():
+    """工作区里已有的文件资产。
+
+    前端用它做「用过的模板」下拉：同一个模板反复导入时，
+    不必每次都从磁盘重新挑一遍。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    try:
+        return jsonify({'items': assets.listing(getattr(session, 'workspace', None))}), 200
+    except OSError as exc:
+        return _error('读取资产目录失败：%s' % exc, 500)
+
+
+@recording_bp.route('/automation/recording/assets', methods=['POST'])
+def upload_recording_asset():
+    """收一个文件，存进工作区的 .assets/。
+
+    浏览器不会把用户选中文件的绝对路径交出来（安全限制），所以只能把字节传上来。
+    超过全局上限时 Flask 会在进到这里之前就回 413，前端拿到的是 HTML；
+    这里按 content_length 先拦一道，至少能回一句看得懂的话。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    limit = int(current_app.config.get('MAX_CONTENT_LENGTH') or 0)
+    if limit and (request.content_length or 0) > limit:
+        return _error('文件超过 %d MB，换一个小一点的，或者把文件直接放进工作区的 .assets 目录'
+                      % (limit // (1024 * 1024)), 413)
+    item = request.files.get('file')
+    if item is None or not (item.filename or '').strip():
+        return _error('没有收到文件', 400)
+    try:
+        saved = assets.save(getattr(session, 'workspace', None), item.filename, item.read())
+    except assets.AssetError as exc:
+        return _error(str(exc), 400)
+    except OSError as exc:
+        return _error('文件写入失败：%s' % exc, 500)
+    return jsonify(saved), 200
+
+
+@recording_bp.route('/automation/recording/upload', methods=['POST'])
+def add_recording_upload():
+    """插入一步「导入文件」。
+
+    文件要先经 /assets 落进工作区，这里只记引用。两段式的好处是换模板不用重录这一步：
+    改资产文件即可，步骤里的相对路径不变。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        after_no = body.get('after_no')
+        after_no = int(after_no) if after_no is not None else None
+        return jsonify(session.add_upload_step({
+            'target': body.get('target'),
+            'file': body.get('file') or {},
+        }, after_no=after_no)), 200
+    except (RecordingError, TypeError, ValueError) as exc:
+        return _error(str(exc), 400)
+
+
+@recording_bp.route('/automation/recording/download', methods=['POST'])
+def add_recording_download():
+    """插入一步「校验下载」。
+
+    触发下载的是前面那次点击，这一步只负责等文件落地 + 断言内容。
+    独立成一步才能单独设超时：报表导出慢的时候，卡住的往往不是点击而是落盘。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        after_no = body.get('after_no')
+        after_no = int(after_no) if after_no is not None else None
+        return jsonify(session.add_download_step({
+            'target': body.get('target'),
+            'expect': body.get('expect') or {},
         }, after_no=after_no)), 200
     except (RecordingError, TypeError, ValueError) as exc:
         return _error(str(exc), 400)
@@ -1002,7 +1129,8 @@ def replay_recording():
     try:
         result = replay.replay_checked(steps, framework=framework,
                                        headless=bool(body.get('headless', True)),
-                                       actions=session.action_definitions())
+                                       actions=session.action_definitions(),
+                                       workspace=getattr(session, 'workspace', None))
     except Exception as exc:  # 浏览器起不来、页面打不开等环境问题
         return _error('回放无法执行：%s' % exc, 500)
     return jsonify(result), 200

@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>录制步骤 · 三种排版方案</title>
+<style>
+:root{
+  --bg-page:#12161d; --bg-card:#191e27; --bg-sunken:#20262f; --bg-raised:#1e242d;
+  --ink:#e6eaf2; --ink-2:#c3cbd8; --muted:#8b95a6; --faint:#66707f;
+  --line-soft:rgba(255,255,255,.085); --line-faint:rgba(255,255,255,.055); --line-ctl:#2d3540;
+  --accent:#0a84ff; --accent-soft:rgba(10,132,255,.15); --accent-line:rgba(10,132,255,.28); --accent-ink:#74b4ff;
+  --ok:#4ec98a; --ok-soft:rgba(78,201,138,.14); --ok-line:rgba(78,201,138,.26);
+  --warn:#e2a74e; --warn-soft:rgba(226,167,78,.14); --warn-line:rgba(226,167,78,.28);
+  --purple:#b39ddb; --purple-soft:rgba(179,157,219,.14);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg-page);color:var(--ink);
+  font-family:-apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;-webkit-font-smoothing:antialiased;padding:22px 24px 40px}
+.wrap{max-width:1100px;margin:0 auto}
+.sec{margin-bottom:34px}
+.sec-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.sec-head h2{margin:0;font-size:14px;font-weight:500}
+.sec-head span{font-size:11.5px;color:var(--muted)}
+.panel{background:var(--bg-card);border:1px solid var(--line-soft);border-radius:14px;padding:14px 16px}
+.panel-head{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.panel-title{font-size:13.5px;font-weight:500}
+.status{font-size:11px;padding:1px 8px;border-radius:999px;background:var(--ok-soft);
+  border:1px solid var(--ok-line);color:var(--ok);line-height:1.8}
+.hint-dot{font-size:11.5px;color:var(--faint);margin-left:auto}
+.btn{border:1px solid var(--line-ctl);background:transparent;color:var(--ink-2);
+  border-radius:8px;padding:5px 12px;font-size:12.5px;cursor:pointer;font-family:inherit;
+  display:inline-flex;align-items:center;gap:6px;height:30px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.icon{padding:5px 9px}
+.btn.sm{height:26px;padding:4px 9px;font-size:11.5px;border-radius:7px}
+.btn .caret{font-size:9px;color:currentColor;opacity:.7}
+.toolbar{display:flex;align-items:center;gap:7px}
+.toolbar .grow{margin-left:auto}
+.divider{width:1px;height:18px;background:var(--line-soft);margin:0 3px}
+
+/* ---------- A ---------- */
+.a-card{border:1px solid var(--line-soft);border-radius:10px;padding:9px 12px;margin-bottom:8px;
+  background:var(--bg-sunken);transition:border-color .15s}
+.a-row{display:flex;align-items:center;gap:10px}
+.a-no{width:16px;text-align:right;font-size:11px;color:var(--faint);
+  font-family:ui-monospace,Menlo,monospace;flex:none}
+.chip{font-size:10.5px;padding:0 7px;border-radius:5px;line-height:1.8;flex:none;
+  border:1px solid var(--line-soft);color:var(--muted)}
+.chip.act{color:var(--accent-ink);border-color:var(--accent-line);background:var(--accent-soft)}
+.chip.fill{color:#9fd6b4;border-color:rgba(78,201,138,.22);background:rgba(78,201,138,.08)}
+.chip.goto{color:#9dc0e6;border-color:rgba(120,170,230,.2);background:rgba(120,170,230,.08)}
+.a-title{font-size:12.5px;color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.a-acts{margin-left:auto;display:flex;gap:2px;opacity:.45;flex:none}
+.a-card:hover .a-acts{opacity:1}
+.a-acts i{width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+  font-style:normal;font-size:11px;color:var(--muted);cursor:pointer}
+.a-acts i:hover{background:rgba(255,255,255,.07);color:var(--ink-2)}
+.a-sub{margin:6px 0 0 26px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.kv{display:inline-flex;align-items:center;gap:5px;font-size:11px;
+  font-family:ui-monospace,Menlo,monospace;background:rgba(255,255,255,.05);
+  border-radius:5px;padding:2px 6px;color:var(--ink-2)}
+.kv b{color:var(--faint);font-weight:400;font-family:-apple-system,sans-serif}
+.uniq{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--ok)}
+.uniq::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--ok)}
+
+/* ---------- B ---------- */
+.b-table{border-top:1px solid var(--line-faint)}
+.b-row{display:flex;align-items:center;gap:12px;height:38px;padding:0 6px;
+  border-bottom:1px solid var(--line-faint);font-size:12.5px}
+.b-row:hover{background:var(--bg-sunken)}
+.b-no{width:22px;text-align:right;font-size:11px;color:var(--faint);
+  font-family:ui-monospace,Menlo,monospace;flex:none}
+.b-kind{width:34px;flex:none;font-size:11px;color:var(--muted)}
+.b-kind.act{color:var(--accent-ink)}
+.b-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-2)}
+.b-loc{flex:none;font-size:11px;color:var(--muted);font-family:ui-monospace,Menlo,monospace}
+.b-acts{display:flex;gap:1px;flex:none;opacity:0}
+.b-row:hover .b-acts{opacity:.8}
+.b-acts i{width:22px;height:22px;display:flex;align-items:center;justify-content:center;
+  border-radius:5px;font-style:normal;font-size:10.5px;color:var(--muted);cursor:pointer}
+
+/* ---------- C ---------- */
+.c-item{display:flex;gap:12px;position:relative;padding-bottom:14px}
+.c-item:last-child{padding-bottom:0}
+.c-rail{width:18px;flex:none;display:flex;flex-direction:column;align-items:center;position:relative}
+.c-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);margin-top:6px;flex:none;
+  box-shadow:0 0 0 3px var(--bg-card)}
+.c-item.act .c-dot{background:var(--purple)}
+.c-item.fill .c-dot{background:var(--ok)}
+.c-line{width:1.5px;flex:1;background:var(--line-soft);margin-top:4px;min-height:14px}
+.c-item:last-child .c-line{display:none}
+.c-body{flex:1;min-width:0;padding-top:1px}
+.c-head{display:flex;align-items:center;gap:9px}
+.c-no{font-size:10.5px;color:var(--faint);font-family:ui-monospace,Menlo,monospace;width:14px}
+.c-kind{font-size:10.5px;color:var(--muted);flex:none;width:26px}
+.c-title{font-size:12.5px;color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.c-acts{margin-left:auto;display:flex;gap:2px;opacity:0}
+.c-item:hover .c-acts{opacity:.8}
+.c-acts i{width:22px;height:22px;display:flex;align-items:center;justify-content:center;
+  border-radius:5px;font-style:normal;font-size:10.5px;color:var(--muted);cursor:pointer}
+.c-meta{margin-top:4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding-left:23px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <section class="sec">
+    <div class="sec-head">
+      <h2>A · 分层收敛</h2>
+      <span>工具栏一行只留主操作，插入类收进下拉；步骤卡片去掉彩色圆和分隔线，靠字号分主次</span>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">录制步骤</span>
+        <span class="status">已停止</span>
+        <span class="hint-dot">解析器已关闭</span>
+      </div>
+
+      <div class="toolbar" style="margin-bottom:12px">
+        <button class="btn primary">开始录制</button>
+        <button class="btn">暂停</button>
+        <button class="btn">拾取元素</button>
+        <span class="divider"></span>
+        <button class="btn">插入 <span class="caret">▾</span></button>
+        <button class="btn">更多 <span class="caret">▾</span></button>
+        <div class="grow"></div>
+        <button class="btn icon" title="封装">封装</button>
+        <button class="btn icon" title="动作库">动作库 <span style="color:var(--faint)">2</span></button>
+      </div>
+
+      <div class="a-card">
+        <div class="a-row">
+          <span class="a-no">1</span>
+          <span class="chip goto">打开</span>
+          <span class="a-title">https://192.168.123.135/#/login</span>
+          <span class="a-acts"><i>✎</i><i>↑</i><i>↓</i><i>✕</i></span>
+        </div>
+      </div>
+
+      <div class="a-card">
+        <div class="a-row">
+          <span class="a-no">2</span>
+          <span class="chip act">动作</span>
+          <span class="a-title">调用「登录#2」</span>
+          <span class="a-acts"><i>✎</i><i>⤢</i><i>↑</i><i>↓</i><i>✕</i></span>
+        </div>
+        <div class="a-sub">
+          <span class="kv"><b>input_v_1</b> admin@ailink.com</span>
+          <span class="kv"><b>input_v_4</b> Ailink123456</span>
+        </div>
+      </div>
+
+      <div class="a-card">
+        <div class="a-row">
+          <span class="a-no">3</span>
+          <span class="chip fill">输入</span>
+          <span class="a-title">在「用户名称」中清空内容</span>
+          <span class="a-acts"><i>✎</i><i>↑</i><i>↓</i><i>✕</i></span>
+        </div>
+        <div class="a-sub">
+          <span style="font-size:11.5px;color:var(--muted)">用户名称</span>
+          <span class="kv">rf id:input-v-1</span>
+          <span class="uniq">唯一</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <h2>B · 高密度列表</h2>
+      <span>一步一行，去掉卡片。100 步也只有两屏，适合长流程快速扫</span>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">录制步骤</span>
+        <span class="status">已停止</span>
+        <span class="hint-dot">3 步 · 1 处待确认</span>
+      </div>
+
+      <div class="toolbar" style="margin-bottom:10px">
+        <button class="btn primary">开始录制</button>
+        <button class="btn sm">暂停</button>
+        <button class="btn sm">拾取</button>
+        <div class="grow"></div>
+        <button class="btn sm">插入 ▾</button>
+        <button class="btn sm">更多 ▾</button>
+        <button class="btn sm">动作库 2</button>
+      </div>
+
+      <div class="b-table">
+        <div class="b-row">
+          <span class="b-no">1</span>
+          <span class="b-kind">打开</span>
+          <span class="b-text">https://192.168.123.135/#/login</span>
+          <span class="b-loc">—</span>
+          <span class="b-acts"><i>✎</i><i>↑</i><i>↓</i><i>✕</i></span>
+        </div>
+        <div class="b-row">
+          <span class="b-no">2</span>
+          <span class="b-kind act">动作</span>
+          <span class="b-text">调用「登录#2」　admin@ailink.com · Ailink123456</span>
+          <span class="b-loc">2 参数</span>
+          <span class="b-acts"><i>✎</i><i>⤢</i><i>↑</i><i>↓</i><i>✕</i></span>
+        </div>
+        <div class="b-row">
+          <span class="b-no">3</span>
+          <span class="b-kind">输入</span>
+          <span class="b-text">用户名称 · 清空内容</span>
+          <span class="b-loc">id:input-v-1</span>
+          <span class="b-acts"><i>✎</i><i>↑</i><i>↓</i><i>✕</i></span>
+        </div>
+        <div class="b-row">
+          <span class="b-no">4</span>
+          <span class="b-kind">点击</span>
+          <span class="b-text">登录</span>
+          <span class="b-loc">role:button</span>
+          <span class="b-acts"><i>✎</i><i>↑</i><i>↓</i><i>✕</i></span>
+        </div>
+        <div class="b-row">
+          <span class="b-no">5</span>
+          <span class="b-kind">滑块</span>
+          <span class="b-text">滑块验证 · 自动识别容器</span>
+          <span class="b-loc">canvas</span>
+          <span class="b-acts"><i>✎</i><i>↑</i><i>↓</i><i>✕</i></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <h2>C · 流程时间轴</h2>
+      <span>左侧一条竖线串起各步，节点按类型着色；「一段流程」比「一堆卡片」更像流程</span>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">录制步骤</span>
+        <span class="status">已停止</span>
+        <span class="hint-dot">3 步</span>
+      </div>
+
+      <div class="toolbar" style="margin-bottom:14px">
+        <button class="btn primary">开始录制</button>
+        <button class="btn">暂停</button>
+        <button class="btn">拾取元素</button>
+        <div class="grow"></div>
+        <button class="btn">插入 ▾</button>
+        <button class="btn">更多 ▾</button>
+      </div>
+
+      <div class="c-item">
+        <div class="c-rail"><span class="c-dot"></span><span class="c-line"></span></div>
+        <div class="c-body">
+          <div class="c-head">
+            <span class="c-no">1</span><span class="c-kind">打开</span>
+            <span class="c-title">https://192.168.123.135/#/login</span>
+            <span class="c-acts"><i>✎</i><i>↑</i><i>↓</i><i>✕</i></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="c-item act">
+        <div class="c-rail"><span class="c-dot"></span><span class="c-line"></span></div>
+        <div class="c-body">
+          <div class="c-head">
+            <span class="c-no">2</span><span class="c-kind" style="color:var(--accent-ink)">动作</span>
+            <span class="c-title">调用「登录#2」</span>
+            <span class="c-acts"><i>✎</i><i>⤢</i><i>↑</i><i>↓</i><i>✕</i></span>
+          </div>
+          <div class="c-meta">
+            <span class="kv"><b>input_v_1</b> admin@ailink.com</span>
+            <span class="kv"><b>input_v_4</b> Ailink123456</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="c-item fill">
+        <div class="c-rail"><span class="c-dot"></span><span class="c-line"></span></div>
+        <div class="c-body">
+          <div class="c-head">
+            <span class="c-no">3</span><span class="c-kind">输入</span>
+            <span class="c-title">在「用户名称」中清空内容</span>
+            <span class="c-acts"><i>✎</i><i>↑</i><i>↓</i><i>✕</i></span>
+          </div>
+          <div class="c-meta">
+            <span class="kv">rf id:input-v-1</span>
+            <span class="uniq">唯一</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

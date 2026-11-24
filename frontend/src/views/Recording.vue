@@ -31,7 +31,7 @@
          点击跳走、同 URL 删行都已经验过，图里永远是按下之前那一页。
          左边看图确认位置，右边按行文本选——长行文本按原字号显示，不靠缩放后的图认字。 -->
     <el-dialog
-      :model-value="!!locConfirm"
+      :model-value="!!locConfirm && locOwner"
       class="dlg loc-dialog"
       width="min(1180px, calc(100vw - 32px))"
       modal-class="loc-overlay"
@@ -166,6 +166,49 @@
               :loading="locPicking"
               @click="acceptLocConfirm"
             >就这个，继续</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- 点「开始」时已经有步骤：先问保留还是覆盖。合并成一个弹窗而不是两个系统确认框，
+         因为两个选项的分量不一样——「覆盖」会丢东西，得让它看起来就有代价。 -->
+    <el-dialog
+      v-model="startChoice.visible"
+      width="min(460px, calc(100vw - 32px))"
+      align-center
+      append-to-body
+      class="dlg start-choice-dialog"
+      :close-on-click-modal="false"
+    >
+      <template #header>
+        <div class="sc-head">
+          <span class="sc-title">已经有 {{ steps.length }} 步了</span>
+          <span class="sc-sub">重新开始会清空它们</span>
+        </div>
+      </template>
+      <div class="sc-body">
+        <div class="sc-opt">
+          <span class="sc-dot is-keep"></span>
+          <div>
+            <div class="sc-name">继续录制</div>
+            <div class="sc-desc">保留这 {{ steps.length }} 步，重新打开浏览器接着录。新窗口是全新的浏览器环境，上次的登录态不会带过来。</div>
+          </div>
+        </div>
+        <div class="sc-opt">
+          <span class="sc-dot is-fresh"></span>
+          <div>
+            <div class="sc-name">覆盖重来</div>
+            <div class="sc-desc">清空这 {{ steps.length }} 步，从起始地址重新开始录。</div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <div class="sc-foot">
+          <el-button text @click="startChoice.visible = false">取消</el-button>
+          <div class="sc-actions">
+            <el-button :loading="starting" @click="startFresh">覆盖重来</el-button>
+            <el-button type="primary" :loading="starting" @click="startContinue">继续录制</el-button>
           </div>
         </div>
       </template>
@@ -608,26 +651,39 @@
 
           <span class="toolbar-sep"></span>
 
+          <!-- 插入与特殊能力收进两个下拉：这一排原本 8 个按钮平铺，和「开始」一样重，
+               主次分不出来。常用的留在外面，一次点开就能选，和之前一样是两步。 -->
           <div class="toolbar-group">
-            <!-- 刷新只由这个按钮添加：不自动检测（SPA 一次刷新会触发多个导航事件，分不清真假），
-                 点了会真的刷新，后续步骤就落在刷新后的页面上 -->
-            <el-button
-              :icon="Refresh"
-              :disabled="!canEdit"
-              :loading="addingReload"
-              :title="isRecording ? '插入刷新步骤，并实际刷新浏览器' : '插入刷新步骤（已停止录制，不会真刷新）'"
-              @click="insertReload()"
-            >
-              刷新页面
-            </el-button>
-            <el-button :icon="CircleCheck" :disabled="!canEdit" title="判断页面状态是否成立；可设「等到成立」" @click="openDraft('assert')">添加断言</el-button>
-            <el-button :icon="Loading" :disabled="!canEdit" title="等待页面加载到指定状态，比固定等待可靠" @click="openDraft('ready')">等待加载</el-button>
-            <el-button :icon="Clock" :disabled="!canEdit" title="无条件等待指定秒数；加载请用「等待加载」" @click="openDraft('sleep')">固定等待</el-button>
-            <!-- 滑块不做自动识别：拖动在 DOM 里只是一串 pointermove，和拖滚动条长得一样，
-                 自动认出必然误判。让用户显式加一步，语义最清楚。 -->
-            <el-button :icon="Pointer" :disabled="!canEdit" title="用视觉模型找缺口并拖动；限拼图缺口型" @click="openDraft('slider')">滑块验证</el-button>
-            <!-- 验证码同样不让自动识别：页面上的验证码图片和普通缩略图在 DOM 里没有可靠区别。 -->
-            <el-button :icon="Postcard" :disabled="!canEdit" title="用视觉模型识别字符并填入；支持数字、字母、算术" @click="openDraft('captcha')">验证码</el-button>
+            <el-dropdown trigger="click" placement="bottom-start" @command="onInsertTool">
+              <el-button :icon="Plus" :disabled="!canEdit" title="插入断言 / 等待加载 / 固定等待 / 刷新页面">
+                插入<span class="toolbar-caret">▾</span>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="assert" :disabled="!canEdit" title="判断页面状态是否成立；可设「等到成立」">添加断言</el-dropdown-item>
+                  <el-dropdown-item command="ready" :disabled="!canEdit" title="等待页面加载到指定状态，比固定等待可靠">等待加载</el-dropdown-item>
+                  <el-dropdown-item command="sleep" :disabled="!canEdit" title="无条件等待指定秒数；加载请用「等待加载」">固定等待</el-dropdown-item>
+                  <!-- 刷新只由这里添加：SPA 一次刷新会触发多个导航事件，自动检测分不清真假 -->
+                  <el-dropdown-item command="reload" :disabled="!canEdit" divided
+                                    :title="isRecording ? '插入刷新步骤，并实际刷新浏览器' : '插入刷新步骤（已停止录制，不会真刷新）'">刷新页面</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-dropdown trigger="click" placement="bottom-start" @command="onMoreTool">
+              <el-button :icon="MoreFilled" :disabled="!canEdit" title="滑块验证 / 验证码 / 导入文件 / 校验下载">
+                更多<span class="toolbar-caret">▾</span>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <!-- 这四类都不自动识别：拖动在 DOM 里和滚滚动条一样，验证码图与普通缩略图没有可靠区别，
+                       点「选择文件」弹的是系统对话框。让用户显式加一步最稳。 -->
+                  <el-dropdown-item command="slider" title="用视觉模型找缺口并拖动；限拼图缺口型">滑块验证</el-dropdown-item>
+                  <el-dropdown-item command="captcha" title="用视觉模型识别字符并填入">验证码</el-dropdown-item>
+                  <el-dropdown-item command="upload" divided title="把工作区里的文件塞进上传控件；不会弹出系统文件对话框">导入文件</el-dropdown-item>
+                  <el-dropdown-item command="download" title="等文件真正落地，再校验文件名、体积和行数">校验下载</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
 
           <span class="toolbar-sep"></span>
@@ -690,6 +746,10 @@
           <span class="ask-dot" aria-hidden="true"></span>{{ askHint }}
         </div>
 
+        <div v-if="locPendingOnPanel" class="loc-owner-hint">
+          有 <b>{{ locPendingOnPanel }}</b> 步的定位待确认，确认框在录制面板窗口里
+        </div>
+
         <div v-if="paused" class="pause-hint">
           已暂停：可以在浏览器里自由操作（关闭弹层、滚动、试填一遍都不算），这些动作不会被记录。点「继续」接着录。
         </div>
@@ -728,7 +788,7 @@
             v-for="step in steps"
             :key="step.no"
             :data-step-no="step.no"
-            :class="['step', {
+            :class="['step', 'type-' + step.type, {
               'is-blocked': ['ambiguous', 'suspect'].includes(effectiveStatus(step)),
               'is-flash': flashingNo === step.no,
               'is-selecting': selectMode,
@@ -1206,6 +1266,106 @@
             </div>
           </div>
 
+          <!-- 导入文件：拾取按钮 → 选本机文件（立刻传进工作区）→ 插入。
+               文件不能记录本机绝对路径：换机器、进 CI 都会断，所以复制进 .assets/。 -->
+          <div v-if="draft.kind === 'upload'" class="slider-body">
+            <div class="slider-field">
+              <span class="poll-label">目标控件</span>
+              <el-input v-model="draft.target" placeholder="点右侧拾取「选择文件」按钮" readonly />
+              <el-button
+                size="small"
+                :type="draft.picking ? 'warning' : 'default'"
+                :plain="draft.picking"
+                :disabled="!canInspect"
+                :title="canInspect ? '在浏览器中点选上传按钮所在的区域' : '浏览器已关闭，无法拾取'"
+                @click="pickForDraft('')"
+              >
+                {{ draft.picking ? '请在页面点击…' : '拾取' }}
+              </el-button>
+            </div>
+            <div class="field-hint">
+              拾取<b>按钮所在的区域</b>即可，不用非得点到隐藏的 input；回放会自动往里找。
+              <template v-if="draft.picking">Esc 退出拾取</template>
+            </div>
+
+            <div class="slider-field">
+              <span class="poll-label">导入的文件</span>
+              <el-input v-model="draft.uploadName" placeholder="点右侧选择本机文件" readonly />
+              <el-button size="small" :loading="draft.uploading" @click="pickUploadFile()">
+                {{ draft.uploading ? '上传中…' : '选择文件' }}
+              </el-button>
+            </div>
+            <input ref="uploadInput" type="file" class="file-hidden" @change="onUploadPicked" />
+            <div class="field-hint">
+              <template v-if="draft.uploadAsset">已存入工作区 · {{ draft.uploadAsset.path }}</template>
+              <template v-else>文件会复制进工作区 .assets/，跟用例一起提交，换机器也能跑</template>
+            </div>
+          </div>
+
+          <!-- 校验下载：这一步自己不点按钮，它校验的是「上一步点完之后落下来的文件」。
+               所以 target 只是用来触发那次点击，真正的断言在文件上。 -->
+          <div v-if="draft.kind === 'download'" class="slider-body">
+            <div class="slider-field">
+              <span class="poll-label">触发按钮</span>
+              <el-input v-model="draft.target" placeholder="点右侧拾取触发下载的按钮" readonly />
+              <el-button
+                size="small"
+                :type="draft.picking ? 'warning' : 'default'"
+                :plain="draft.picking"
+                :disabled="!canInspect"
+                :title="canInspect ? '在浏览器中点选触发下载的按钮' : '浏览器已关闭，无法拾取'"
+                @click="pickForDraft('')"
+              >
+                {{ draft.picking ? '请在页面点击…' : '拾取' }}
+              </el-button>
+            </div>
+            <div class="field-hint">
+              拾取<b>点一下就下载</b>的那个按钮（导出 / 下载报表），不是文件名也不是列表项。
+              <template v-if="draft.picking">Esc 退出拾取</template>
+            </div>
+
+            <div class="poll-row">
+              <span class="poll-label">文件名</span>
+              <el-input v-model="draft.downloadName" placeholder="留空 = 不限；可写 *.xlsx" style="width: 190px" />
+            </div>
+            <div class="poll-row">
+              <span class="poll-label">最小体积</span>
+              <el-input-number
+                v-model="draft.downloadMinKb"
+                :min="0"
+                :max="102400"
+                controls-position="right"
+                size="small"
+                style="width: 110px"
+              />
+              <span class="poll-unit">KB</span>
+            </div>
+            <div class="poll-row">
+              <span class="poll-label">内容校验</span>
+              <el-select v-model="draft.downloadParse" size="small" style="width: 120px">
+                <el-option label="不校验" value="none" />
+                <el-option label="Excel 行数" value="xlsx" />
+                <el-option label="CSV 行数" value="csv" />
+              </el-select>
+              <template v-if="draft.downloadParse !== 'none'">
+                <span class="poll-label" style="margin-left: 12px">最少</span>
+                <el-input-number
+                  v-model="draft.downloadRows"
+                  :min="0"
+                  :max="100000"
+                  controls-position="right"
+                  size="small"
+                  style="width: 100px"
+                />
+                <span class="poll-unit">行</span>
+              </template>
+            </div>
+            <div class="field-hint">
+              行数含表头。加这一条是为了抓住「导出成功、但表是空的」——
+              只断言文件存在的话，空表也会通过。
+            </div>
+          </div>
+
           <el-divider v-if="draft.kind === 'assert'" content-position="left">断言内容（可修改）</el-divider>
           <div v-if="draft.kind === 'assert'" class="form-grid">
             <el-select v-model="draft.intentType" placeholder="意图类型">
@@ -1578,6 +1738,8 @@
                 <span v-if="item.poll" class="gen-replay-poll">
                   轮询 {{ item.poll.elapsed }}s / 刷新 {{ item.poll.attempts - 1 }} 次
                 </span>
+                <!-- 文件类步骤的落盘结果：名字、体积、行数。这些比一句「通过」有用得多 -->
+                <span v-if="item.file" class="gen-replay-file" :title="fileSummary(item.file)">{{ fileSummary(item.file) }}</span>
                 <span v-if="!item.ok && item.error" class="gen-replay-why">{{ item.error }}</span>
               </li>
             </ul>
@@ -2062,7 +2224,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, EditPen, Files, FolderOpened, Loading, Plus, Pointer, Postcard, Refresh, Search, Setting, Tickets, Timer, Unlock, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, Download, EditPen, Files, FolderOpened, Loading, MoreFilled, Plus, Pointer, Postcard, Refresh, Search, Setting, Tickets, Timer, Unlock, Upload, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -2107,11 +2269,12 @@ const READY_TIMEOUT_DEFAULT = 15
 const STEP_LABELS = {
   goto: '打开页面', reload: '刷新', click: '点击', fill: '输入', select: '选择', press: '按键',
   dialog: '弹窗', new_page: '新标签页', call: '动作',
-  assert: '断言', wait: '等待', sleep: '固定等待', slider: '滑块验证', captcha: '验证码识别'
+  assert: '断言', wait: '等待', sleep: '固定等待', slider: '滑块验证', captcha: '验证码识别',
+  upload: '导入文件', download: '校验下载'
 }
 // 动作调用用紫色系（kind-action 在样式里单独定义）：它不是一种操作，
 // 而是「一串操作的入口」，跟任何一种原子步骤共色都会让人误读。
-const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger', call: 'action', slider: 'warning', captcha: 'warning' }
+const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger', call: 'action', slider: 'warning', captcha: 'warning', upload: 'primary', download: 'success' }
 const STATE_LABELS = {
   idle: '未开始', starting: '启动中', recording: '录制中', stopping: '停止中', stopped: '已停止',
   cancelled: '已取消', failed: '失败', idle_timeout: '超时已停止', closed: '浏览器已关闭'
@@ -2170,6 +2333,18 @@ const panelFloat = computed(() => panelMode.value && !!(session.value && session
 // 以后端为准（snapshot.panel_hidden），本地只做即时反馈——点完不必等下一次轮询才变窄。
 const panelHidden = ref(false)
 const panelHandle = computed(() => panelMode.value && panelHidden.value)
+// 谁负责弹「定位确认」。并排模式下面板窗口才是录制主界面，主配置页只是同一份会话的
+// 另一个视图：两个窗口都在轮询、都跑 trackLocConfirm，不加这个判断就会出现
+// 「面板先弹一次、配置页再弹一次」。没有面板窗口时（纯主窗口 / 嵌入模式）由本窗口弹。
+const locOwner = computed(() => {
+  if (panelMode.value || embedMode.value) return true
+  return !(session.value && session.value.panel)
+})
+// 主配置页不弹窗，但不能让人以为「什么都没发生」：面板被别的窗口盖住时，
+// 至少这里能看到还有几条待确认。计数直接读步骤状态，面板处理完会自动归零，
+// 不依赖本地队列（否则会留下已经处理过的旧条目）。
+const locPendingOnPanel = computed(() =>
+  locOwner.value ? 0 : steps.value.filter(s => needsLocConfirm(s, true)).length)
 
 // 并排时两个窗口的标题栏是唯一能分清「哪扇是面板」的地方：被测那扇叫目标站的名字，
 // 长得又都是 Chromium，不区分的话 Alt+Tab 全靠猜。
@@ -2299,6 +2474,8 @@ applyPanelQuery()
 const session = ref(null)
 const starting = ref(false)
 const stopping = ref(false)
+// 已经有步骤时点「开始」：先问一句保留还是覆盖，别默默清空。
+const startChoice = reactive({ visible: false })
 // 停止弹窗：确认 → 原地转圈 → 收尾完成 / 窗口消失。closing 时不允许关闭。
 const stopDialog = reactive({
   visible: false,
@@ -2313,6 +2490,8 @@ const closingBrowser = ref(false)
 // 插入「刷新页面」用的是命令通道（后端要真的刷一次浏览器），和断言草稿分开计数。
 const addingReload = ref(false)
 const draft = ref(null)
+// 导入文件用的原生 file input：只负责唤起系统选文件，选完立刻把字节传给后端。
+const uploadInput = ref(null)
 // 刚插入的那一步短暂高亮，用来「指认」插入结果
 const flashingNo = ref(0)
 let flashTimer = 0
@@ -2996,6 +3175,7 @@ function canAnswerLoc() {
 
 // 只清本地状态，不碰后端（后端这时可能已经不可用了）。
 function dropLocConfirm(reason) {
+  restoreLocPanel()
   if (!locConfirm.value && !locQueue.value.length) return
   locConfirm.value = null
   locQueue.value = []
@@ -3003,9 +3183,39 @@ function dropLocConfirm(reason) {
   if (reason) ElMessage.info(reason)
 }
 
+// 面板窗口只有 420~900 宽，弹窗 append-to-body 到窗口里就只能拿到 568，
+// 单列之下 1600 宽的帧缩到 0.33 倍——图上的字只剩 4px，等于没有图。
+// 所以弹窗一出现就把窗口临时放大到双栏宽度。恢复不放在这个 watch 里：
+// closeLocConfirm 会先置空、220ms 后才开下一条，在这里收窗口就会「缩回去再撑开」。
+// 只在并排模式（panel=1）这么做：嵌入模式和主窗口本来就够宽。
+let locPanelWide = false
+watch(locConfirm, async (val) => {
+  if (!panelMode.value || !val || locPanelWide) return
+  locPanelWide = true
+  try {
+    await api.expandRecordingPanel()
+  } catch (error) {
+    // 放大失败就退回窄窗口单列：弹窗本身还能用，不该因此拦住录制。
+    locPanelWide = false
+  }
+})
+
+// 弹窗全部处理完（队列空了）才把窗口摆回去。走这里的只有三处：最后一条点完、
+// dropLocConfirm（录制结束）、页面卸载。
+function restoreLocPanel() {
+  if (!locPanelWide) return
+  locPanelWide = false
+  api.restoreRecordingPanel().catch(() => {
+    // 会话已结束 / 窗口已经关了：没有可恢复的东西。
+  })
+}
+
 function trackLocConfirm(fresh, data) {
   // 停录/暂停期间不再弹：那已经不是「当场」了，硬弹只会打断收尾。
   if (data.status !== 'recording' || data.paused) return
+  // 有独立面板窗口时，这条队列归面板管；主配置页连排队都不要参与，
+  // 否则面板处理完、这边还留着一条旧的，切回来又弹一次。
+  if (!panelMode.value && !embedMode.value && data.panel) return
   if (!canAnswerLoc()) return
   const hits = fresh.filter(s => needsLocConfirm(s, true)).map(s => s.no)
   if (!hits.length) return
@@ -3025,6 +3235,11 @@ function startLocReview() {
   // 打开也只会是一张点不动的卡。
   if (!canAnswerLoc()) {
     ElMessage.info('浏览器已关闭，没法逐条确认了；可以在步骤行里看当时记下的定位')
+    return
+  }
+  // 弹窗归面板窗口：主配置页点这个按钮只会攒一条看不见的队列，直接说清楚去哪儿点。
+  if (!locOwner.value) {
+    ElMessage.info('逐条确认在录制面板窗口里进行：切到面板，点同一个按钮即可')
     return
   }
   locQueue.value = hits.filter(no => no !== locConfirm.value?.no)
@@ -3404,6 +3619,9 @@ async function closeLocConfirm() {
     window.setTimeout(() => openNextLocConfirm(auto), 220)
     return
   }
+  // 队列空了才算真的选完：把窗口摆回原来的宽度和位置。
+  // 还有下一条的话上面已经 return，窗口保持放大，下一条不用再跳一次。
+  restoreLocPanel()
   // 没有排队时把页面上的框清掉；行内准星还开着的话，框归它管。
   if (!peek.value.no) api.clearRecordingHighlight().catch(() => {})
 }
@@ -3529,10 +3747,28 @@ function onStartClick() {
     else configOpen.value = true
     return
   }
-  startRecording()
+  // 已经有步骤：点「开始」现在会清空它们，所以先问一句。
+  // 没有步骤（系统刚打开）就直接开面板，不打扰。
+  if (steps.value.length) {
+    startChoice.visible = true
+    return
+  }
+  startRecording(false)
 }
 
-async function startRecording() {
+// 继续录制：保留步骤，重开浏览器接着录。走的是后端的续录机制
+// （start_new 的 restore_steps），步骤从服务端完整 IR 取，不经过前端。
+function startContinue() {
+  startChoice.visible = false
+  startRecording(true)
+}
+
+function startFresh() {
+  startChoice.visible = false
+  startRecording(false)
+}
+
+async function startRecording(keepSteps = false) {
   const url = (config.baseUrl || '').trim()
   if (!/^https?:\/\//.test(url)) {
     ElMessage.warning('请先填写以 http:// 或 https:// 开头的录制起始地址')
@@ -3562,7 +3798,9 @@ async function startRecording() {
       // 这里带的是「当前实际宽度」：收起行时就是 420，展开时是记忆值。
       panel_width: panelWidth.value,
       // 录制窗口是独立浏览器 profile：主题不传过去，面板一定会掉回浅色。
-      theme: appTheme.value
+      theme: appTheme.value,
+      // 继续录制：让后端把当前会话的步骤带进新会话（保留编号、别名和定位）。
+      keep_steps: keepSteps
     })
     draft.value = null
     applySession(data)
@@ -4182,14 +4420,19 @@ function draftKindTypes(kind) {
   // 滑块没有「意图类型」可选：它就是一段固定流程，只有三个参数。
   if (kind === 'slider') return ['slider']
   if (kind === 'captcha') return ['captcha']
+  // 文件类同理：不是断言，只有自己的几个参数。
+  if (kind === 'upload') return ['upload']
+  if (kind === 'download') return ['download']
   return ASSERT_TYPES
 }
 
 const draftTypes = computed(() => draft.value ? draftKindTypes(draft.value.kind) : [])
 const draftTitle = computed(() => ({ assert: '添加断言', sleep: '固定等待', ready: '等待加载',
-  slider: '添加滑块验证', captcha: '添加验证码识别' })[draft.value?.kind] || '添加断言')
+  slider: '添加滑块验证', captcha: '添加验证码识别',
+  upload: '添加导入文件', download: '添加下载校验' })[draft.value?.kind] || '添加断言')
 const insertLabel = computed(() => ({ sleep: '插入固定等待', ready: '插入等待',
-  slider: '插入滑块步骤', captcha: '插入验证码步骤' })[draft.value?.kind] || '插入断言')
+  slider: '插入滑块步骤', captcha: '插入验证码步骤',
+  upload: '插入导入步骤', download: '插入下载校验' })[draft.value?.kind] || '插入断言')
 
 // 三档的差别只在一句话里，选哪档要能立刻看懂在等什么。
 const readyNote = computed(() => {
@@ -4264,6 +4507,16 @@ function openDraft(kind, afterNo = null) {
     captchaLength: 0,
     captchaAttempts: 2,
     captchaPicked: '',
+    // 导入文件：uploadAsset 是后端存好之后返回的资产描述（相对路径 + 体积 + 哈希）。
+    // 没选文件就插入会被拒绝，所以前端也先拦一道。
+    uploadAsset: null,
+    uploadName: '',
+    uploading: false,
+    // 校验下载：体积用 KB 填（字节数对人没意义），提交时再换算。
+    downloadName: '',
+    downloadMinKb: 1,
+    downloadParse: 'none',
+    downloadRows: 2,
     // 两个拾取按钮共用一个 picking 状态，用它区分这次点的是哪个。
     pickField: '',
     // 高级默认收起，不勾就是立即断言。默认 30 秒比框架默认的 5 秒实用；
@@ -4466,6 +4719,18 @@ function onInsertCommand(kind, afterNo) {
   openDraft(kind, afterNo)
 }
 
+// 工具栏两个下拉：插入类走 onInsertCommand（和行内「+」同一条路径），
+// 特殊能力走 openDraft。afterNo 传空表示追加到末尾。
+function onInsertTool(kind) {
+  if (!canEdit.value) return
+  onInsertCommand(kind, null)
+}
+
+function onMoreTool(kind) {
+  if (!canEdit.value) return
+  openDraft(kind)
+}
+
 async function insertReload(afterNo = null) {
   if (addingReload.value) return
   addingReload.value = true
@@ -4572,6 +4837,14 @@ function insertFromForm() {
     insertCaptchaStep()
     return
   }
+  if (draft.value?.kind === 'upload') {
+    insertUploadStep()
+    return
+  }
+  if (draft.value?.kind === 'download') {
+    insertDownloadStep()
+    return
+  }
   let intent
   try {
     intent = buildFormIntent(draft.value)
@@ -4630,9 +4903,113 @@ async function insertCaptchaStep() {
   }
 }
 
+function formatBytes(size) {
+  const value = Number(size) || 0
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`
+}
+
+// 回放报告里那一行文件摘要。三个字段拼一句，缺哪个就少哪个。
+function fileSummary(file) {
+  if (!file) return ''
+  const bits = []
+  if (file.name) bits.push(file.name)
+  if (file.size != null) bits.push(formatBytes(file.size))
+  if (file.rows != null) bits.push(`${file.rows} 行`)
+  return bits.join(' · ')
+}
+
+// 唤起系统的选文件对话框。选完不是「记下路径」，而是立刻把字节传进工作区：
+// 浏览器不会把本机绝对路径交出来，而且绝对路径换一台机器就断。
+function pickUploadFile() {
+  if (!uploadInput.value) return
+  // 先清空，否则连续选同一个文件时 change 不会触发。
+  uploadInput.value.value = ''
+  uploadInput.value.click()
+}
+
+async function onUploadPicked(event) {
+  const file = event.target.files && event.target.files[0]
+  if (!file || !draft.value) return
+  const current = draft.value
+  current.uploading = true
+  try {
+    const { data } = await api.uploadRecordingAsset(file)
+    // 上传期间用户可能已经关掉弹窗或换了类型，回来别再往旧草稿里写。
+    if (draft.value !== current) return
+    current.uploadAsset = data
+    current.uploadName = `${data.name} · ${formatBytes(data.size)}`
+    if (data.dedup) ElMessage.info('工作区里已经有这个文件了，直接复用')
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    current.uploading = false
+  }
+}
+
+async function insertUploadStep() {
+  const current = draft.value
+  if (!current.target) {
+    ElMessage.warning('请先拾取「选择文件」按钮所在的区域')
+    return
+  }
+  if (!current.uploadAsset) {
+    ElMessage.warning('请先选择要导入的文件')
+    return
+  }
+  current.inserting = true
+  try {
+    const { data } = await api.addRecordingUpload({
+      after_no: current.afterNo,
+      target: current.target,
+      file: current.uploadAsset,
+    })
+    applySession(data)
+    closeDraft()
+    ElMessage.success('已插入导入文件步骤')
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    current.inserting = false
+  }
+}
+
+async function insertDownloadStep() {
+  const current = draft.value
+  if (!current.target) {
+    ElMessage.warning('请先拾取触发下载的按钮')
+    return
+  }
+  const parse = current.downloadParse || 'none'
+  current.inserting = true
+  try {
+    const { data } = await api.addRecordingDownload({
+      after_no: current.afterNo,
+      target: current.target,
+      expect: {
+        name: (current.downloadName || '').trim(),
+        min_bytes: Math.round(Math.max(0, Number(current.downloadMinKb) || 0) * 1024),
+        parse,
+        // 不校验内容时行数要归零，否则后端会按「0 行也算要求」记一条没意义的约束。
+        min_rows: parse === 'none' ? 0 : Number(current.downloadRows) || 0,
+        timeout: 30,
+      },
+    })
+    applySession(data)
+    closeDraft()
+    ElMessage.success('已插入下载校验步骤')
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  } finally {
+    current.inserting = false
+  }
+}
+
 // 滑块拾取：优先用 id（短、稳），没有就退到录制时算好的绝对路径。
 // 绝对路径长一点，但不依赖 class 名；失效时只会退回自动识别，不会点错地方。
-function sliderSelectorFrom(snap) {  if (!snap) return ''
+function sliderSelectorFrom(snap) {
+  if (!snap) return ''
   if (snap.id) {
     try {
       return '#' + CSS.escape(snap.id)
@@ -4747,6 +5124,24 @@ function stepDescription(step) {
       const attempts = cfg.attempts == null ? 2 : cfg.attempts
       if (attempts > 0) bits.push(`失败重试 ${attempts} 次`)
       return `识别验证码并填入（${bits.join(' · ')}）`
+    }
+    case 'upload': {
+      const name = (step.file && step.file.name) || '文件'
+      const size = step.file && step.file.size ? `（${formatBytes(step.file.size)}）` : ''
+      return `导入 ${name}${size} → 「${step.target ? step.target.alias : '上传控件'}」`
+    }
+    // 下载：把「期望什么文件、要几行」写出来。只写「校验下载」等于没说。
+    case 'download': {
+      const cfg = step.expect || {}
+      const bits = []
+      if (cfg.name) bits.push(String(cfg.name))
+      if (cfg.parse && cfg.parse !== 'none') {
+        const unit = cfg.parse === 'xlsx' ? 'Excel' : 'CSV'
+        bits.push(`${unit} 至少 ${cfg.min_rows || 0} 行`)
+      }
+      if (cfg.min_bytes) bits.push(`≥ ${formatBytes(cfg.min_bytes)}`)
+      const tail = bits.length ? ` · ${bits.join(' · ')}` : ' · 有文件即可'
+      return `校验下载「${step.target ? step.target.alias : '按钮'}」${tail}`
     }
     case 'assert':
     case 'wait': return intentDescription(step.intent, step.target)
@@ -5533,6 +5928,8 @@ onUnmounted(() => {
   }
   // 页面里的框是浮层，不清掉会一直留在被测页面上。
   if (peek.value.no) api.clearRecordingHighlight().catch(() => {})
+  // 弹窗还开着就切走页面：不还原的话，这扇窗口会一直停在被放大过的宽度上。
+  restoreLocPanel()
 })
 
 // 展开的那条步骤被删掉、或者列表整体换掉时，把浮层一并收掉：
@@ -5967,6 +6364,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .toolbar-group :deep(.el-button) { display:inline-flex; align-items:center; justify-content:center; gap:5px; }
 .toolbar-group :deep(.el-button .el-icon + span) { margin-left:0; }
 .toolbar-group :deep(.el-button .el-icon) { font-size:15px; flex:none; }
+/* 下拉按钮尾部的小三角：和文字同色系但更淡，表示「还有一层」而不是装饰 */
+.toolbar-caret { font-size:9px; margin-left:3px; opacity:.55; line-height:1; }
 .toolbar-group :deep(.el-button:not(.is-disabled):hover) { background:var(--bg-card); border-color:var(--line-soft); color:var(--ink); box-shadow:0 1px 2px rgba(16,24,40,.08); }
 .toolbar-group :deep(.el-button.is-disabled) { background:transparent; border-color:transparent; color:var(--faint); }
 /* 实心按钮和激活态必须写在 ghost 悬停之后：选择器权重相同，靠顺序取胜 */
@@ -6016,7 +6415,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
    分组容器用 display:contents 退化成排版占位，按钮重新回到同一张网格里排队。 */
 .toolbar.is-lean {
   display:grid;
-  grid-template-columns:repeat(3, minmax(0, 1fr));
+  grid-template-columns:repeat(4, minmax(0, 1fr));
   gap:6px;
   align-items:stretch;
 }
@@ -6046,6 +6445,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 停止后浏览器还开着：这条提示必须常驻，否则用户会以为窗口是遗留的、直接关掉 */
 .keep-open-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:var(--accent-soft); color:var(--accent); font-size:12.5px; line-height:1.5; }
 .pause-hint { margin-top:12px; padding:9px 12px; border-radius:9px; background:var(--warn-soft); color:var(--warn); border:1px dashed var(--warn-soft); font-size:12.5px; line-height:1.5; }
+.loc-owner-hint { margin-top:12px; padding:8px 12px; border-radius:9px; background:var(--accent-soft); color:var(--accent); border:1px solid var(--accent-line); font-size:12.5px; line-height:1.5; }
 /* 解析器状态：一行 16px 的小字，就绪时几乎是背景音，只有启动中/不可用时才显眼 */
 .ask-hint { display:flex; align-items:center; gap:6px; margin-top:7px; font-size:11.5px; color:var(--muted); line-height:1.4; }
 .ask-hint .ask-dot { flex:none; width:6px; height:6px; border-radius:50%; background:var(--bg-active); }
@@ -6067,12 +6467,30 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .steps-empty-cta { margin-top:6px; }
 
 /* 时间线 */
-.timeline { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:8px; }
-.step { display:flex; gap:10px; align-items:flex-start; padding:10px 10px 10px 9px; border:1px solid var(--line-soft); border-radius:12px; background:var(--bg-card); transition:border-color .18s ease, box-shadow .18s ease, padding .22s ease, gap .22s ease; }
+.timeline { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:0; }
+/* 时间轴：卡片改成「一条线串起来的行」。左侧序号是节点，按步骤类型着色，
+   扫一眼能看出这一段是操作、动作还是校验；卡片边框去掉后密集步骤也不会碎。 */
+.step { display:flex; gap:11px; align-items:flex-start; padding:7px 8px 7px 0; position:relative;
+  border:0; border-radius:9px; background:transparent;
+  transition:background .15s ease, box-shadow .18s ease; }
+.step::before { content:''; position:absolute; left:12px; top:0; bottom:0; width:1.5px; background:color-mix(in srgb, var(--ink) 14%, transparent); }
+.step:first-child::before { top:13px; }
+.step:last-child::before { display:none; }
+.step:hover { background:var(--bg-hover); }
 .step:hover { border-color:var(--accent-line); box-shadow:0 4px 14px rgba(16,24,40,.06); }
 /* 不唯一现在是「可降级生成」，用琥珀色提示而不是红色阻断 */
-.step.is-blocked { border-color:var(--warn-line); background:var(--bg-card); }
-.step-no { flex-shrink:0; width:24px; height:24px; border-radius:50%; background:var(--accent-soft); color:var(--accent); font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums; }
+.step.is-blocked { background:color-mix(in srgb, var(--warn) 7%, transparent); }
+.step-no { flex-shrink:0; width:25px; height:25px; border-radius:50%; background:var(--bg-card);
+  border:1.5px solid var(--line-ctl); color:var(--muted); font-size:10.5px; font-weight:500;
+  display:flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums;
+  position:relative; z-index:1; }
+/* 节点色只区分四类，再多就花了：操作默认蓝，动作紫，校验绿，等待/特殊黄 */
+.step.type-call .step-no { color:#b39ddb; border-color:rgba(179,157,219,.34); background:rgba(179,157,219,.13); }
+.step.type-assert .step-no, .step.type-wait .step-no { color:var(--ok); border-color:var(--ok-line); background:var(--ok-soft); }
+.step.type-sleep .step-no, .step.type-ready .step-no,
+.step.type-slider .step-no, .step.type-captcha .step-no { color:var(--warn); border-color:var(--warn-line); background:var(--warn-soft); }
+.step.type-goto .step-no, .step.type-reload .step-no, .step.type-new_page .step-no { color:#8fb8e0; border-color:rgba(143,184,224,.32); background:rgba(143,184,224,.1); }
+.step.is-blocked .step-no { color:var(--warn); border-color:var(--warn); background:var(--warn-soft); }
 .step-body { flex:1; min-width:0; }
 .step-main { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .step-text { color:var(--ink); font-size:14px; line-height:1.5; word-break:break-word; }
@@ -6091,7 +6509,10 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .is-panel .step:focus-within .locator-code {
   display:block; flex-basis:100%; margin-top:2px; max-height:60px; overflow:auto;
 }
-.step-actions { display:flex; flex-direction:row; align-items:center; gap:2px; flex-shrink:0; }
+.step-actions { display:flex; flex-direction:row; align-items:center; gap:2px; flex-shrink:0;
+  opacity:.5; transition:opacity .15s ease; }
+/* 操作图标平时淡着，指针进到这一行才亮：一行里五个图标常驻太吵，压过正文了 */
+.step:hover .step-actions, .step:focus-within .step-actions { opacity:1; }
 /* 定位预览：行内小准星，点一下在浏览器里把匹配元素全框出来并编号 */
 .peek-btn { height:22px; width:22px; padding:0; margin-left:-2px; color:var(--muted); }
 .peek-btn:hover { color:var(--accent); background:var(--accent-soft); }
@@ -6206,10 +6627,32 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 高度跟着图走，不用 dialog.css 那个固定视口高度：
    横屏截图在固定 660 高的画布里只占 270，上下会空出两大块。 */
 .loc-dialog .dlg-split { height: auto; }
+
+/* 「已经有步骤」的选择弹窗：两个选项各带一句后果，别让人只看按钮名猜。 */
+.sc-head { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+.sc-title { font-size:15px; font-weight:500; color:var(--ink); }
+.sc-sub { font-size:12px; color:var(--muted); }
+.sc-body { display:flex; flex-direction:column; gap:9px; }
+.sc-opt { display:flex; gap:10px; padding:11px 12px; border:1px solid var(--line-soft); border-radius:10px; background:var(--bg-sunken); }
+.sc-dot { width:7px; height:7px; border-radius:50%; margin-top:6px; flex:none; }
+.sc-dot.is-keep { background:var(--ok); }
+.sc-dot.is-fresh { background:var(--danger); }
+.sc-name { font-size:13px; font-weight:500; color:var(--ink); }
+.sc-desc { margin-top:3px; font-size:12px; line-height:1.55; color:var(--muted); }
+.sc-foot { display:flex; align-items:center; }
+.sc-actions { margin-left:auto; display:flex; gap:8px; }
 /* 宽窗里给图 1.75 份：1600 宽的帧缩到 ~700 才勉强能读表格；窄了就退回单列。
    写进 min-width 里，否则会盖掉 dialog.css 在 900 以下改成单列的那条。 */
 @media (min-width: 981px) {
   .loc-dialog .dlg-split { grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); }
+  /* 放大后的面板窗口就是「一屏弹窗」，别再用通用弹窗那套 200px 预留：那套是给
+     表单弹窗留键盘和错误提示的。这里留 156 就够标题 + 按钮，省下的 44 全给图——
+     图是 16:10 的，高度每多 10px，能显示的画面宽就多 16px。 */
+  .loc-dialog .dlg-split { height: clamp(400px, calc(100dvh - 156px), 760px); }
+  .loc-dialog .dlg-panel { max-height: none; }
+  /* 放大后的面板窗口高度就是屏幕工作区（这台机 783 CSS）。弹窗整体再兜一道上限：
+     窗口被系统压矮时，footer 不该被顶到屏幕外面去。 */
+  .loc-dialog { max-height: calc(100dvh - 16px); }
 }
 .loc-dialog .dlg-panel { max-height: min(660px, calc(100dvh - 210px)); }
 /* 没图时左栏整块收起，列表占满：留一个空画布只会让人以为图没加载出来。 */
@@ -6344,7 +6787,13 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
    这里不能让画布撑满固定高度：聚焦后的截图是一条横带，撑满就会上下各留一大块灰。
    改成跟着图走，弹窗自己长高。 */
 @media (max-width: 980px) {
-  .loc-dialog .dlg-split { grid-template-columns: minmax(0, 1fr); }
+  .loc-dialog .dlg-split {
+    grid-template-columns: minmax(0, 1fr);
+    /* 单列时上下两块加起来会超过 split 的固定高度：600 宽面板里实测弹窗 818，
+       比 783 的屏幕还高，footer 直接被顶出屏幕。让内容区自己滚，标题和按钮留住。 */
+    max-height: calc(100dvh - 190px);
+    overflow-y: auto;
+  }
   .loc-dialog .dlg-viewer {
     height: auto; border-right: 0; border-bottom: 1px solid var(--line-soft);
   }
@@ -6420,6 +6869,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 按钮和下拉不能被 flex 压缩：不加这句，窄栏下「拾取」会被挤掉一半。 */
 .slider-field .el-button, .slider-field .el-select { flex:none; }
 .slider-body .poll-row { margin-top:2px; }
+/* 隐藏的原生文件选择器：只用来触发浏览器的选文件，界面上由「选择文件」按钮代劳 */
+.file-hidden { display:none; }
 .sleep-label { font-size:13px; color:var(--ink-2); }
 .sleep-unit { font-size:13px; color:var(--muted); }
 .sleep-hint { margin-left:4px; font-size:12px; color:var(--muted); }
@@ -6577,6 +7028,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .gen-replay-loc.is-empty { background:none; color:var(--faint); padding:1px 0; }
 .gen-replay-nth { flex:none; color:var(--warn); }
 .gen-replay-poll { flex:none; color:var(--accent); }
+/* 文件摘要比定位串长，允许它吃掉剩余宽度并截断：完整内容在 title 里 */
+.gen-replay-file { flex:1 1 120px; min-width:0; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* 失败原因是整句，独占一行，否则会把定位挤成省略号 */
 .gen-replay-why { flex-basis:100%; padding-left:27px; color:var(--danger); font-size:11.5px; line-height:1.5; }
 
@@ -6779,7 +7232,9 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 
 /* 调用卡：紫色系。它不是一种操作，而是「一串操作的入口」，
    和任何一种原子步骤共色都会被读成「又是一步点击」。 */
-.step.is-call { --call:#6d4bd8; --call-soft:rgba(109, 75, 216, .10); border-color:color-mix(in srgb, var(--call) 24%, var(--line-soft)); background:color-mix(in srgb, var(--call) 4%, var(--bg-card)); }
+/* 动作行不再铺底色：时间轴的紫色节点已经说明类型了，再叠一层底色像被选中。
+   变量留着——动作标签和实参 chips 还在用 --call / --call-soft。 */
+.step.is-call { --call:#6d4bd8; --call-soft:rgba(109, 75, 216, .10); }
 [data-theme="dark"] .step.is-call { --call:#a78bfa; --call-soft:rgba(167, 139, 250, .15); }
 .kind-action { background:var(--call-soft); color:var(--call); }
 .call-args { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:6px; }

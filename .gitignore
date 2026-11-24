@@ -77,6 +77,15 @@ shots/_*.txt
 shots/_*.log
 shots/_ab_out/
 shots/_dialog_styles.html
+
+# ---- docs/ 下的截图：会话里随手截的验证图，一次性产物 ----
+# 上面那组只覆盖 shots/，docs/ 从来没有被忽略过，所以一轮轮验证截图全堆在
+# git status 里。docs/ 根目录留给设计说明；已经跟踪的几张参考图不受影响
+# （忽略规则只挡未跟踪文件，不会取消已有文件的跟踪）。
+# 确实要把某张图放进仓库时，用 git add -f docs/xxx.png 显式加。
+docs/*.png
+docs/prototypes/*.png
+docs/exports/
 # opencode 每次调用生成的临时配置（含 MCP 定义），落在 cwd 时会被 git 看到
 opencode.emit-*.json
 

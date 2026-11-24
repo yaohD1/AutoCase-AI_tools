@@ -2002,12 +2002,14 @@ async function deleteKnowledgeFile(row) {
 }
 .tool-entry:hover .tool-entry-arrow { color: var(--accent); transform: translateX(3px); }
 
-/* 卡片：去掉投影，只留一条边。静止的容器不需要浮在页面上 */
+/* 卡片：一条边 + 一层 1px 极淡投影。
+   之前这里是「去掉投影，只留一条边」，但页底压深后单靠线不够把卡片从底色里分出来，
+   补一层几乎看不见的影子（5% 黑、1px 高）就够了，不参与层级表达 */
 .upload-card,
 .knowledge-card {
   border-radius: var(--radius-card);
   border: 1px solid var(--line-soft);
-  box-shadow: none;
+  box-shadow: var(--shadow-card);
   background: var(--bg-card);
 }
 
