@@ -324,6 +324,25 @@ class StepEditTest(unittest.TestCase):
         with self.assertRaises(RecordingError):
             session.update_step(1, {'seconds': 0})
 
+    def test_update_click_settle(self):
+        """点击的「执行前等待」：开、关、边界都走同一个入口。"""
+        session = self._session()
+        session.update_step(3, {'settle': {'timeout': 5}})
+        self.assertEqual(session._steps[2]['settle'], {'timeout': 5})
+        session.update_step(3, {'settle': None})
+        self.assertNotIn('settle', session._steps[2])
+
+    def test_update_click_settle_range(self):
+        session = self._session()
+        for bad in (0, 0.4, 361):
+            with self.assertRaises(RecordingError):
+                session.update_step(3, {'settle': {'timeout': bad}})
+        session.update_step(3, {'settle': {'timeout': 360}})
+        self.assertEqual(session._steps[2]['settle']['timeout'], 360)
+        # 非 click 步骤不接受这个字段，避免「给输入框加等待」这种无意义状态
+        with self.assertRaises(RecordingError):
+            session.update_step(2, {'settle': {'timeout': 5}})
+
     def test_move_to_reorders_by_position(self):
         session = self._session()
         session.move_step_to(3, 0)

@@ -210,6 +210,14 @@ batchDeleteTestcases(ids) {
       timeout: 240000
     })
   },
+  // 只枚举指定文件：生成完脚本跳过来定位用它。不吃 discover 的 2 分钟缓存，
+  // 也不受「测试用例层 / tests」这类目录约定限制。
+  listTestCasesIn(workspace, files) {
+    return api.get('/automation/testrun/cases', {
+      params: { workspace, files: (files || []).join(',') },
+      timeout: 240000
+    })
+  },
   listTestRuns(workspace, limit = 20) {
     return api.get('/automation/testrun/runs', { params: { workspace, limit } })
   },
@@ -344,6 +352,21 @@ batchDeleteTestcases(ids) {
   // 刷新页面要后端点一次浏览器（录制中会真的刷），所以有独立接口，超时给宽一点。
   addRecordingReload(afterNo = null) {
     return api.post('/automation/recording/reload', { after_no: afterNo }, { timeout: 30000 })
+  },
+  // 关闭浏览器步骤：只往步骤列表里加一条声明，录制中的浏览器不会被真的关掉。
+  // 路径放在 /steps/ 下，和「关掉录制浏览器」的 /recording/close 区分开。
+  addRecordingClose(afterNo = null) {
+    return api.post('/automation/recording/steps/close', { after_no: afterNo }, { timeout: 30000 })
+  },
+  // 后置处理：和封装同一个弹窗（同一套参数表），区别只在这次调用生成到收尾位置。
+  setRecordingTeardown(steps, name, desc = '', params = []) {
+    return api.post('/automation/recording/teardown', { steps, name, desc, params })
+  },
+  updateRecordingTeardownArgs(args) {
+    return api.patch('/automation/recording/teardown', { args })
+  },
+  clearRecordingTeardown() {
+    return api.delete('/automation/recording/teardown')
   },
   // 滑块验证：没有目标元素，只有容器选择器（可空）、重试次数、单次超时。
   addRecordingSlider(payload) {

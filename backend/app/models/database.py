@@ -78,6 +78,13 @@ def migrate_db(app: Flask):
             cols = [r[1] for r in cur.fetchall()]
             if 'map_md' not in cols:
                 cur.execute("ALTER TABLE project_memories ADD COLUMN map_md TEXT")
+        # 录制存档的后置处理：老库没有这一列，按需补。
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recording_drafts'")
+        if cur.fetchone():
+            cur.execute("PRAGMA table_info(recording_drafts)")
+            cols = [r[1] for r in cur.fetchall()]
+            if 'teardown_json' not in cols:
+                cur.execute("ALTER TABLE recording_drafts ADD COLUMN teardown_json TEXT")
         # 模型配置改由 opencode.models.json 提供，旧的纯 API 配置表直接丢掉。
         # 里面的数据是早期手填的、早已失效；留着只会让「到底哪份在生效」更难判断。
         cur.execute("DROP TABLE IF EXISTS ai_configs")

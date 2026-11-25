@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 LIBDOC_TIMEOUT = 120
@@ -48,28 +49,77 @@ def _run(cmd, timeout, cwd=None):
         raise ToolchainError('无法执行 %s：%s' % (cmd[0], exc))
 
 
+def _arg_name(node):
+    """从 XML spec 的一个 `<arg>` 里取参数名。
+
+    两代写法不一样：
+      · RF 3.x 把名字和默认值写在一起 —— `<arg>path=None</arg>`
+      · RF 4.0 起拆成子节点 —— `<arg><name>path</name><default>None</default></arg>`
+    只取名字，默认值对写脚本没用。
+    """
+    name = node.find('name')
+    if name is not None and (name.text or '').strip():
+        return name.text.strip()
+    text = ''.join(node.itertext()).strip()
+    return text.split('=', 1)[0].strip()
+
+
+def _read_spec(path):
+    """把 libdoc 的 XML spec 读成 {library, version, keywords}。"""
+    root = ET.parse(path).getroot()
+    keywords = []
+    for kw in root.iter('kw'):
+        name = (kw.get('name') or '').strip()
+        if not name:
+            continue
+        keywords.append({
+            'name': name,
+            'args': [arg for arg in (_arg_name(node) for node in kw.iter('arg')) if arg],
+        })
+    return {
+        'library': root.get('name'),
+        'version': (root.findtext('version') or '').strip() or None,
+        'keywords': keywords,
+    }
+
+
+def _libdoc_error(library, result):
+    """把 libdoc 的报错翻成一句能照着处理的话。"""
+    detail = _tail(result.stderr or result.stdout)
+    low = detail.lower()
+    if 'no module named robot' in low:
+        return '目标环境的 Python 里没有 robotframework，无法导出 %s 关键字' % library
+    if "no module named '%s'" % library.lower() in low or 'no module named %s' % library.lower() in low:
+        return '目标环境没有安装 %s，无法导出关键字清单' % library
+    if 'format must be' in low:
+        return '目标环境的 Robot Framework 版本太老，libdoc 不支持导出该格式：%s' % detail
+    return '导出 %s 关键字失败（目标环境是否已安装？）：%s' % (library, detail)
+
+
 def export_keywords(python, library='SeleniumLibrary'):
     """导出库的关键字与参数名。需要目标环境已安装该库。
 
     这里会导入库本身（不是项目代码），用于拿到关键字 API，是 spike 中记录的有意例外。
     """
     tmp = tempfile.mkdtemp(prefix='autocase-libdoc-')
-    out = os.path.join(tmp, 'lib.json')
+    out = os.path.join(tmp, 'lib.xml')
     try:
-        result = _run([python, '-m', 'robot.libdoc', library, out], LIBDOC_TIMEOUT)
+        # 必须显式指定 XML，不能靠文件后缀猜：
+        #   · RF 3.x 的 libdoc 只能出 HTML/XML，给 .json 后缀会直接报
+        #     「Format must be 'HTML' or 'XML', got 'JSON'」，整轮生成中止；
+        #   · RF 7 又不再按后缀推断 JSON，会退回 HTML，还多要一个 markdown 依赖。
+        # XML 是 3.x 到 7.x 都稳的那一个。
+        result = _run([python, '-m', 'robot.libdoc', '--format', 'XML', library, out], LIBDOC_TIMEOUT)
         if result.returncode != 0:
-            raise ToolchainError('导出 %s 关键字失败（目标环境是否已安装？）：%s' % (library, _tail(result.stderr or result.stdout)))
-        with open(out, encoding='utf-8') as handle:
-            data = json.load(handle)
-    except ValueError as exc:
-        raise ToolchainError('关键字清单无法解析：%s' % exc)
+            raise ToolchainError(_libdoc_error(library, result))
+        try:
+            data = _read_spec(out)
+        except (ET.ParseError, OSError) as exc:
+            raise ToolchainError('关键字清单无法解析：%s' % exc)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    keywords = [
-        {'name': kw['name'], 'args': [arg['name'] for arg in kw.get('args', [])]}
-        for kw in data.get('keywords', [])
-    ]
-    return {'library': data.get('name') or library, 'version': data.get('version'), 'keywords': keywords}
+    data['library'] = data.get('library') or library
+    return data
 
 
 def dryrun(python, path, cwd=None):

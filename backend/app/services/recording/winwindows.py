@@ -304,6 +304,22 @@ def pid_of_window(hwnd):
     return int(got.value)
 
 
+def window_title(hwnd):
+    """窗口标题。同一个浏览器进程里有多个窗口时，用它认出哪个是录制面板。
+
+    Playwright 兜底打开的面板页和被测页面在一个进程里，CDP 又拿不到新 context
+    的 windowId，只能按标题认人。
+    """
+    if not _IS_WIN or not hwnd:
+        return ''
+    buf = ctypes.create_unicode_buffer(256)
+    try:
+        _user32.GetWindowTextW(hwnd, buf, 256)
+    except Exception:
+        return ''
+    return buf.value
+
+
 def kill_tree(pid):
     """连同子进程一起杀掉。Chromium 是多进程的，只杀根进程会留下渲染进程和窗口。"""
     if not _IS_WIN or not pid:

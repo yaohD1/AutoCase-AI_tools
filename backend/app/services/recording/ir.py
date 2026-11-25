@@ -5,7 +5,10 @@
 
 STEP_TYPES = ('goto', 'reload', 'click', 'fill', 'select', 'press', 'dialog',
               'new_page', 'assert', 'wait', 'sleep', 'call', 'slider', 'captcha',
-              'upload', 'download')
+              'upload', 'download',
+              # 关掉被测浏览器。录制时不会真的关（关了就录不下去了），它只是一条
+              # 「这里该结束浏览器」的声明，真正执行在生成出的脚本/回放之外。
+              'close')
 
 # 下载后要校验到什么程度。none 只看「有文件、体积过线」；
 # xlsx / csv 用 zipfile 与 csv 模块直接数行，不引第三方依赖。

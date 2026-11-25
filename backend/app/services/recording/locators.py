@@ -533,6 +533,43 @@ def build_specs(snap):
     return specs
 
 
+def hydrate_target(target):
+    """把存档里被剥掉的定位 spec 装回去，返回补上的候选条数。
+
+    草稿存的是前端视图（见 ir.public_step）：candidates / primary 只剩展示用的
+    kind / desc / count，spec 被丢掉。续录后生成任务书和回放都要真定位，
+    轻则写不出脚本，重则直接 KeyError。
+
+    快照没丢，所以按录制时同一套 build_specs 重建，再按 (kind, desc) 装回去：
+    desc 是渲染结果，同一份快照重建出来的字符串与录制时逐字相同（实测 30/30）。
+    匹配不上的候选保持原样——宁可上层报「请重新拾取」，也不要塞一条猜的定位。
+    """
+    if not isinstance(target, dict):
+        return 0
+    snap = target.get('snap')
+    if not isinstance(snap, dict) or not snap:
+        return 0
+    try:
+        rebuilt = {(spec['kind'], spec['desc']): spec for spec in build_specs(snap)}
+    except (TypeError, ValueError, KeyError):
+        # 快照来自旧版本或人工改过，字段类型不对：不因为一条坏数据卡住整个续录。
+        return 0
+    filled = 0
+    for item in target.get('candidates') or []:
+        if not isinstance(item, dict) or item.get('spec'):
+            continue
+        spec = rebuilt.get((item.get('kind'), item.get('desc')))
+        if spec is not None:
+            item['spec'] = spec
+            filled += 1
+    primary = target.get('primary')
+    if isinstance(primary, dict) and not primary.get('spec'):
+        spec = rebuilt.get((primary.get('kind'), primary.get('desc')))
+        if spec is not None:
+            primary['spec'] = spec
+    return filled
+
+
 def id_spec(snap):
     """快照里的稳定 id → `locator('#id')`。
 

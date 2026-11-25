@@ -82,7 +82,11 @@ def _locator(page, target, framework=PW_FRAMEWORK):
     chosen = choose_locator(target, framework)
     if not chosen:
         raise ReplayError('目标没有可用的定位')
-    spec = chosen['spec']
+    spec = chosen.get('spec')
+    if not spec:
+        # 老存档续录：候选只剩展示字段，没有能拿去查页面的表达式。
+        # 不能猜一条（猜错就是点错元素），直接说清怎么恢复。
+        raise ReplayError('这一步的目标缺少定位信息（存档续录可能没带上），请重新拾取该元素')
     locator = build_locator(root, spec)
     index = chosen.get('index')
     if index is not None and chosen.get('count', 1) > 1:
@@ -328,6 +332,11 @@ def _run_step(step, page, framework=PW_FRAMEWORK, workspace=None, run_dir=None):
         # 和 goto 不等价：这里要的正是「重新加载当前文档」，而不是重新请求一个地址。
         page.reload(wait_until='domcontentloaded')
         return None, None
+    if kind == 'close':
+        # 不真的关：回放的浏览器是调试器自己的，关掉之后后面的步骤（包括后置处理）
+        # 全部落到已关闭的会话上，报出来的失败会指向「定位失效」这个错误方向。
+        # 这一步在回放里要验证的只是「存在且写法对」，真正的关闭由调用方收尾。
+        return None, None
     if kind == 'click':
         loc, chosen = _locator(page, step['target'], framework)
         loc.click()
@@ -384,6 +393,8 @@ def _step_label(step):
     kind = step.get('type')
     if kind == 'reload':
         return '刷新当前页面'
+    if kind == 'close':
+        return '关闭浏览器'
     if kind == 'press':
         return '按键：%s' % (step.get('value') or '')
     if kind == 'dialog':
@@ -513,6 +524,29 @@ def _run(steps, framework, headless, on_step, workspace=None):
 def replay(steps, headless=True, framework=PW_FRAMEWORK, actions=None, workspace=None):
     """steps 为 RecordingSession.ir() 的结果。返回执行过的步骤数。失败抛 ReplayError。"""
     return _run(_expand(steps, actions), framework, headless, None, workspace=workspace)
+
+
+def teardown_steps(teardown, after_no=0):
+    """把后置处理展开成可执行的原子步骤，接在流程末尾。
+
+    「跑一遍」必须执行后置：它常常是「退出登录」「清理测试数据」这类收尾，不做的话
+    浏览器会带着登录态和脏数据跑到下一段；而且后置本身也是要验证的步骤——生成出来的
+    脚本里它会执行，回放却不跑，等于两套结论。
+
+    后置的子步骤本来就不带页面引用（动作定义 clean 过），编号接着流程往下排，
+    报告里是一段连续的步骤。
+    """
+    if not teardown:
+        return []
+    action = teardown.get('action') or {}
+    out = []
+    for index, sub in enumerate(action.get('steps') or [], 1):
+        item = dict(sub)
+        item['no'] = after_no + index
+        # 标记一下：调用方要把它映射成「没有对应录制步骤」。
+        item['_teardown'] = True
+        out.append(item)
+    return out
 
 
 def _expand(steps, actions):

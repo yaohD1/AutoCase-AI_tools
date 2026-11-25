@@ -137,14 +137,17 @@ def _tied_range(steps, start, end):
     return start, end
 
 
-def group(steps, nos, name, desc='', params=None, action_id=None):
+def group(steps, nos, name, desc='', params=None, action_id=None, min_steps=2):
     """把连续的若干步替换成一个 call 步骤。返回 (新 steps, 动作定义)。
 
     params 每项 `{step, key, label, field}`，step 是原步骤号；为空表示不参数化，
     子步骤原样保留（值写死）。
+
+    min_steps 默认 2：封装动作至少要两步，一步的「动作」没有复用价值，直接留在
+    流程里更清楚。后置处理传 1 —— 只用来收尾的「退出登录」常常就一步。
     """
-    if not isinstance(nos, (list, tuple)) or len(nos) < 2:
-        raise ActionError('至少要选两步才能封装')
+    if not isinstance(nos, (list, tuple)) or len(nos) < min_steps:
+        raise ActionError('至少要选%s步才能封装' % ('两' if min_steps > 1 else '一'))
     index = {}
     for i, step in enumerate(steps):
         index[step.get('no')] = i

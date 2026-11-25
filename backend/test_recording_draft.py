@@ -23,23 +23,39 @@ Path(os.environ['AUTOMATION_WORKSPACE_ROOT'], 'proj').mkdir(parents=True, exist_
 from app import create_app  # noqa: E402
 from app.models import db  # noqa: E402
 from app.models.recording_draft import RecordingDraft  # noqa: E402
-from app.services.recording import drafts  # noqa: E402
+from app.services.recording import drafts, emit, ir, locators  # noqa: E402
 from app.services.recording.session import RecordingSession  # noqa: E402
+from test_support import reset_database  # noqa: E402
 
-STEP = {
-    'no': 1, 'type': 'click', 'text': None, 'value': None, 'page_index': 0,
-    'source': 'record', 'label': None, 'url': None, 'intent': None, 'dialog': None,
-    'target': {
-        'snap': {'tag': 'button', 'role': 'button', 'name': '登录', 'css': '#ok'},
-        'candidates': [{'kind': 'role', 'desc': "getByRole('button', { name: '登录' })",
-                        'count': 1, 'index': None, 'relation': 'self'}],
-        'primary': {'kind': 'role', 'desc': "getByRole('button', { name: '登录' })", 'count': 1},
-        'status': 'unique', 'alias': '登录按钮', 'count': 1,
-        # 只服务录制当场的大字段：存档必须剥掉，否则一份草稿能胀到几十兆。
-        'shot': 'data:image/jpeg;base64,AAAA',
-        'matches': [{'text': '登录', 'tag': 'button'}],
-    },
+# 录制时的完整目标：candidates / primary 都带 spec，才是能拿去查询页面的定位。
+_SNAP = {
+    'tag': 'button', 'role': 'button', 'role_attr': 'button', 'name': '登录',
+    'text': '登录', 'css': '#ok', 'id': 'login-btn',
 }
+
+
+def _recorded_step(snap=None, no=1):
+    """按真实录制链路造一步：候选由 build_specs 生成，每条都带 spec。"""
+    snap = dict(snap or _SNAP)
+    candidates = [{'kind': spec['kind'], 'desc': spec['desc'], 'count': 1,
+                   'index': None, 'relation': 'self', 'spec': spec}
+                  for spec in locators.build_specs(snap)]
+    return {
+        'no': no, 'type': 'click', 'text': None, 'value': None, 'page_index': 0,
+        'source': 'record', 'label': None, 'url': None, 'intent': None, 'dialog': None,
+        'target': {
+            'snap': snap,
+            'candidates': candidates,
+            'primary': dict(candidates[0]),
+            'status': 'unique', 'alias': '登录按钮', 'count': 1,
+            # 只服务录制当场的大字段：存档必须剥掉，否则一份草稿能胀到几十兆。
+            'shot': 'data:image/jpeg;base64,AAAA',
+            'matches': [{'text': '登录', 'tag': 'button'}],
+        },
+    }
+
+
+STEP = _recorded_step()
 
 
 class FakeSession(object):
@@ -55,6 +71,9 @@ class FakeSession(object):
     def snapshot(self):
         return {'steps': copy.deepcopy(self._steps), 'picks': []}
 
+    def ir(self):
+        return [ir.replay_view(s) for s in self._steps]
+
 
 class DraftServiceTest(unittest.TestCase):
     @classmethod
@@ -65,8 +84,7 @@ class DraftServiceTest(unittest.TestCase):
 
     def setUp(self):
         with self.app.app_context():
-            db.drop_all()
-            db.create_all()
+            reset_database()
 
     def test_save_strips_heavy_fields(self):
         with self.app.app_context():
@@ -79,6 +97,14 @@ class DraftServiceTest(unittest.TestCase):
             # 定位靠的是 snap，这个必须留着，否则续录后生成不出候选定位。
             self.assertEqual(target['snap']['name'], '登录')
             self.assertEqual(target['alias'], '登录按钮')
+
+    def test_save_keeps_locator_spec(self):
+        """存档必须保留定位 spec：续录后生成任务书、回放都要拿它去查页面。"""
+        with self.app.app_context():
+            draft = drafts.save(FakeSession(), {'title': '登录流程'})
+            target = draft.steps()[0]['target']
+            self.assertEqual(target['candidates'][0]['spec']['method'], 'get_by_role')
+            self.assertEqual(target['primary']['spec']['args'], ['button'])
 
     def test_save_twice_updates_same_row(self):
         with self.app.app_context():
@@ -128,6 +154,34 @@ class DraftServiceTest(unittest.TestCase):
         session._restore([])
         self.assertEqual(session._steps, [])
 
+    def test_restore_hydrates_spec_for_old_draft(self):
+        """老存档只剩前端视图（candidates 没有 spec），续录要按快照把定位补回来。
+
+        线上症状：RF 框架续录后点「生成任务书」，emit._fmt 取 candidate['spec']
+        直接 KeyError('spec') → 500「服务器内部错误：'spec'」。
+        """
+        public = ir.public_step(copy.deepcopy(STEP))
+        self.assertNotIn('spec', public['target']['candidates'][0])
+        session = RecordingSession.__new__(RecordingSession)
+        session._steps = []
+        session._alias_keys = {}
+        session._restore([public])
+        target = session._steps[0]['target']
+        self.assertTrue(all(c.get('spec') for c in target['candidates']))
+        info = emit._locator_info(target, 'robot-selenium')
+        self.assertIsNotNone(info)
+        self.assertFalse(info.get('missing_spec'))
+        self.assertTrue(info['locator'].startswith('xpath='))
+
+    def test_prepare_reports_unlocated_step(self):
+        """确实补不出定位时，报「第 N 步请重新拾取」，而不是让 KeyError 冒到全局 500。"""
+        public = ir.public_step(copy.deepcopy(STEP))
+        root = os.path.join(os.environ['AUTOMATION_WORKSPACE_ROOT'], 'proj')
+        with self.assertRaises(emit.EmitError) as ctx:
+            emit._prepare(root, [public], 'robot-selenium', '', {})
+        self.assertIn('第 1 步', str(ctx.exception))
+        self.assertIn('缺少定位信息', str(ctx.exception))
+
 
 class DraftRouteTest(unittest.TestCase):
     @classmethod
@@ -138,8 +192,7 @@ class DraftRouteTest(unittest.TestCase):
 
     def setUp(self):
         with self.app.app_context():
-            db.drop_all()
-            db.create_all()
+            reset_database()
         RecordingSession._current = None
 
     def test_save_requires_a_session(self):

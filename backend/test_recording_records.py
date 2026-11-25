@@ -145,11 +145,59 @@ class RecordRouteTest(unittest.TestCase):
     def tearDown(self):
         self.ctx.pop()
 
+    def test_close_step_route_is_separate_from_close_browser(self):
+        """插入「关闭浏览器」步骤不能打到「关掉录制浏览器」那个同名接口上。
+
+        两个路径曾经都叫 /recording/close，先注册的那个会赢——插入步骤会变成真关浏览器。
+        """
+        called = {}
+        session = RecordingSession._current
+        session.add_close_step = lambda after_no=None: called.update(kind='step', after=after_no) or {'ok': True}
+        session.close_browser = lambda: called.update(kind='browser') or {'ok': True}
+
+        r = self.client.post('/api/automation/recording/steps/close', json={'after_no': 3})
+        self.assertEqual(200, r.status_code, r.get_json())
+        self.assertEqual({'kind': 'step', 'after': 3}, called)
+
+        called.clear()
+        r = self.client.post('/api/automation/recording/close')
+        self.assertEqual(200, r.status_code, r.get_json())
+        self.assertEqual({'kind': 'browser'}, called)
+
+    def test_teardown_routes_forward_to_session(self):
+        seen = {}
+        session = RecordingSession._current
+        session.set_teardown = (lambda nos, name, desc='', params=None:
+                                seen.update(kind='set', nos=nos, name=name)
+                                or {'ok': True})
+        session.update_teardown_args = (lambda args:
+                                        seen.update(kind='args', args=args) or {'ok': True})
+        session.clear_teardown = lambda: seen.update(kind='clear') or {'ok': True}
+
+        r = self.client.post('/api/automation/recording/teardown',
+                             json={'steps': [1, 2], 'name': '收尾', 'params': []})
+        self.assertEqual(200, r.status_code, r.get_json())
+        self.assertEqual({'kind': 'set', 'nos': [1, 2], 'name': '收尾'}, seen)
+
+        seen.clear()
+        r = self.client.patch('/api/automation/recording/teardown', json={'args': {'u': 'a'}})
+        self.assertEqual(200, r.status_code, r.get_json())
+        self.assertEqual({'kind': 'args', 'args': {'u': 'a'}}, seen)
+
+        seen.clear()
+        r = self.client.delete('/api/automation/recording/teardown')
+        self.assertEqual(200, r.status_code, r.get_json())
+        self.assertEqual('clear', seen['kind'])
+
+    def test_teardown_route_rejects_empty_steps(self):
+        r = self.client.post('/api/automation/recording/teardown', json={'steps': [], 'name': 'x'})
+        self.assertEqual(400, r.status_code)
+
     def _fake_generate(self, content):
         def generate(runner, workspace, model, steps, framework, target_path, title, python=None,
                      overwrite=False, plan=None, plan_feedback=None, progress=None,
                      storage_state=None, memory=None, session=None, write_scope='exact',
-                     actions=None):
+                     actions=None, teardown=None):
             path = Path(workspace) / target_path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)

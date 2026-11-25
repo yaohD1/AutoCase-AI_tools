@@ -35,7 +35,7 @@ from app.services.recording.ask_pool import STOP_DELAY_SECONDS as ASK_STOP_DELAY
 from app.services.recording.ask_pool import AskPool, disabled_snapshot
 from app.services.recording.locators import (PW_SEMANTIC_KINDS, RF_SEMANTIC_KINDS,
                                              best_effort, build_locator, build_specs,
-                                             narrowest, pick_for, pool_for, rank,
+                                             hydrate_target, narrowest, pick_for, pool_for, rank,
                                              rf_row_scoped_specs, row_scoped_spec,
                                              stale_check, status_of)
 
@@ -347,7 +347,7 @@ NAV_FROM_CLICK_SECONDS = 1.5
 STEP_TITLES = {'goto': '打开', 'reload': '刷新', 'click': '点击', 'fill': '输入', 'select': '选择',
                'press': '按键', 'dialog': '弹窗',
                'new_page': '标签页', 'assert': '断言', 'wait': '等待', 'sleep': '等待',
-               'slider': '滑块验证', 'captcha': '验证码识别'}
+               'slider': '滑块验证', 'captcha': '验证码识别', 'close': '关闭浏览器'}
 STATUS_LABELS = {'unique': '唯一定位', 'fragile': '结构定位', 'ambiguous': '定位不唯一', 'stale': '定位已变化'}
 STATUS_TONES = {'unique': 'ok', 'fragile': 'warn', 'ambiguous': 'bad'}
 # 就地编辑允许改的字段：只改「值」，不动定位（换元素走拾取）。
@@ -363,6 +363,8 @@ EDITABLE_FIELDS = {
     # 改成 0 秒会从等待退回立即断言，step type 跟着变。
     'assert': ('timeout', 'interval', 'reload'),
     'wait': ('timeout', 'interval', 'reload'),
+    # 点击的「执行前等待」：先等这一步的元素出现，再点它。空值表示关掉。
+    'click': ('settle',),
 }
 MAX_VALUE_LENGTH = 500
 # 文本框里这些键只改文本或移光标，结果由紧随其后的 fill 全量表达（见 _press_only_edits_text）。
@@ -432,7 +434,7 @@ class RecordingSession(object):
                  panel_ratio=0.45, hud_panel=False, embed_url=None,
                  ask_daemon=None, ask_model=None, ask_config=None, workspace=None,
                  framework=None, panel_float=False, panel_width=520,
-                 restore_steps=None, draft_id=None, theme=None):
+                 restore_steps=None, draft_id=None, theme=None, restore_teardown=None):
         self.id = uuid.uuid4().hex
         self.base_url = base_url
         # 这次录制要按哪个框架生成。以前它只活在前端 state 和面板 URL 里，后端每次请求
@@ -530,7 +532,10 @@ class RecordingSession(object):
         self._draft_id = draft_id
         # 恢复后浏览器的第一次导航对应存档里的「打开页面」，不能再记一条 goto。
         self._restored = False
-        self._restore(restore_steps or [])
+        # 后置处理：{'action': <动作 id>, 'args': {...}}，指向动作库里一个具名动作。
+        # 它不在 _steps 里，所以不参与编号、拖拽和定位复核；只在生成和回放时被追加。
+        self._teardown = None
+        self._restore(restore_steps or [], restore_teardown)
         self._wired = set()
         self._last_url = {}
         # frame id → 当前 document 的身份（performance.timeOrigin）。同一个 document
@@ -579,7 +584,7 @@ class RecordingSession(object):
                   panel_ratio=0.45, hud_panel=False, embed_url=None,
                   ask_daemon=None, ask_model=None, ask_config=None, workspace=None,
                   framework=None, panel_float=False, panel_width=520,
-                  restore_steps=None, draft_id=None, theme=None):
+                  restore_steps=None, draft_id=None, theme=None, restore_teardown=None):
         with cls._current_lock:
             current = cls._current
             if current is not None and current.status in ('starting', 'recording'):
@@ -592,7 +597,8 @@ class RecordingSession(object):
                       ask_daemon=ask_daemon, ask_model=ask_model, ask_config=ask_config,
                       workspace=workspace, framework=framework,
                       panel_float=panel_float, panel_width=panel_width,
-                      restore_steps=restore_steps, draft_id=draft_id, theme=theme)
+                      restore_steps=restore_steps, draft_id=draft_id, theme=theme,
+                      restore_teardown=restore_teardown)
         with cls._current_lock:
             cls._current = session
         session._thread.start()
@@ -806,6 +812,8 @@ class RecordingSession(object):
                 'picks': picks,
                 # 具名动作库：前端用它渲染调用卡的名字、动作库抽屉和封装弹窗的参数表。
                 'actions': self.actions_snapshot(),
+                # 后置处理：null 表示没设。设了之后它是收尾用的动作，不在 steps 里。
+                'teardown': self.teardown_snapshot(),
                 # 动作库有没有落盘。没选工作区时是 False，界面上要说明「只在本次有效」。
                 # 绕过 __init__ 造的会话没有 workspace 属性，一律走 getattr。
                 'actions_saved': bool(getattr(self, 'workspace', None)),
@@ -952,7 +960,7 @@ class RecordingSession(object):
             return ('locator', primary['desc'], id(frame))
         return ('path', snap.get('css') or '', snap.get('tag') or '', id(frame))
 
-    def _restore(self, steps):
+    def _restore(self, steps, teardown=None):
         """把存档的步骤灌回会话（续录）。
 
         存档里没有 `_frame` / `_doc`——那是 Playwright 的页面对象，不能序列化。
@@ -962,10 +970,17 @@ class RecordingSession(object):
         别名要预占：`_alias_for` 靠 `_alias_keys` 判重，不预占的话续录的新元素会
         撞上旧别名，生成时两个不同元素叫同一个名字。
         """
+        # 后置处理先恢复：它指向的动作定义要先进库，否则前端拿到的只有 id。
+        self._restore_teardown(teardown)
         if not steps:
             return
         self._steps = [copy.deepcopy(s) for s in steps]
         self._renumber()
+        # 老存档存的是前端视图（ir.public_step），candidates 里的定位 spec 被剥掉了：
+        # 续录后生成任务书会直接 KeyError('spec')，回放也会在 chosen['spec'] 上崩。
+        # 快照还在，按它把定位重建回来；新存档本身带 spec，这一步是空操作。
+        for step in self._steps:
+            hydrate_target((step.get('target') or {}))
         # 浏览器马上就会打开起始地址，那次导航对应存档里的第一步，标记一下别重复记。
         self._restored = bool(self._steps)
         for step in self._steps:
@@ -1013,6 +1028,8 @@ class RecordingSession(object):
         """
         def build():
             steps = getattr(self, '_steps', []) or []
+            ref = getattr(self, '_teardown', None) or {}
+            teardown_id = ref.get('action')
             return [{
                 'id': action['id'],
                 'name': action['name'],
@@ -1020,6 +1037,8 @@ class RecordingSession(object):
                 'params': [dict(p) for p in action.get('params') or []],
                 'steps': len(action.get('steps') or []),
                 'calls': len(actions_mod.calls_of(steps, action['id'])),
+                # 这个动作是不是正被当成后置用。被占用时不能删，界面上也要标一下。
+                'used_as': 'teardown' if action['id'] == teardown_id else None,
             } for action in (getattr(self, '_actions', None) or {}).values()]
 
         lock = getattr(self, '_lock', None)
@@ -1055,6 +1074,152 @@ class RecordingSession(object):
             self._renumber()
         self._schedule_hud()
         return self.snapshot()
+
+    # ---- 后置处理 ----
+    # 后置是一段「不在流程里执行」的动作：用户选中录制好的几步，把它设成 Test Teardown /
+    # afterEach。它必须由「具名动作」承载，这样生成侧才有名字可写进 Settings，
+    # 解封、参数替换、动作库复用也都直接复用既有实现。
+    #
+    # 步骤搬走而不是复制：留在流程里会执行两次（一次是正常步骤、一次是收尾），
+    # 而且后置里的点击/输入往往依赖前面的页面状态，重复跑一次没有意义。
+
+    def set_teardown(self, nos, name, desc='', params=None):
+        """把选中的连续步骤搬进后置处理。"""
+        with self._lock:
+            if getattr(self, '_teardown', None):
+                raise RecordingError('已经设过后置处理，请先解除再重设')
+            if len(self._actions) >= actions_mod.MAX_ACTIONS:
+                raise RecordingError('动作库最多 %d 个，请先删掉不用的' % actions_mod.MAX_ACTIONS)
+            try:
+                # 后置允许只选一步：「退出登录」这种收尾常常就一个点击。
+                steps, action = actions_mod.group(
+                    self._steps, nos, name, desc=desc, params=params, min_steps=1)
+            except actions_mod.ActionError as exc:
+                raise RecordingError(str(exc))
+            call = next((s for s in steps
+                         if s.get('type') == 'call' and s.get('action') == action['id']), None)
+            args = dict((call or {}).get('args') or {})
+            # 刚生成的调用节点要从流程里摘掉：后置只在收尾时执行一次。
+            self._steps = [s for s in steps if s is not call]
+            self._actions[action['id']] = action
+            self._teardown = {'action': action['id'], 'args': args}
+            self._renumber()
+        self._save_actions()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def clear_teardown(self):
+        """解除后置，并把它的子步骤还原到流程末尾。
+
+        动作定义留在动作库里（和「解封」一致）：用户解除了绑定，不代表要扔掉这段封装，
+        下次还可能直接插进来或再挂回去。
+        """
+        with self._lock:
+            ref = getattr(self, '_teardown', None)
+            if not ref:
+                raise RecordingError('没有后置处理')
+            action = self._actions.get(ref.get('action')) or {}
+            block = [copy.deepcopy(s) for s in action.get('steps') or []]
+            self._teardown = None
+            if block:
+                for sub in block:
+                    sub['no'] = 0
+                self._steps.extend(block)
+                self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def update_teardown_args(self, args):
+        """改后置这次用的实参。只允许动作声明过的键，和调用点同一套规则。"""
+        if not isinstance(args, dict):
+            raise RecordingError('args 必须是对象')
+        with self._lock:
+            ref = getattr(self, '_teardown', None)
+            if not ref:
+                raise RecordingError('没有后置处理')
+            action = self._actions.get(ref.get('action')) or {}
+            keys = [p['key'] for p in action.get('params') or []]
+            unknown = sorted(set(args) - set(keys))
+            if unknown:
+                raise RecordingError('这个后置动作没有这些参数：%s' % '、'.join(unknown))
+            merged = dict(ref.get('args') or {})
+            for key in keys:
+                if key not in args:
+                    continue
+                value = args.get(key)
+                value = '' if value is None else str(value)
+                if len(value) > MAX_VALUE_LENGTH:
+                    raise RecordingError('参数 %s 的值最长 %d 个字符' % (key, MAX_VALUE_LENGTH))
+                merged[key] = value
+            ref['args'] = merged
+        self._schedule_hud()
+        return self.snapshot()
+
+    def teardown_definition(self):
+        """生成与存档用的完整定义：动作（含子步骤与定位）+ 这次用的实参。
+
+        返回 deep copy：生成在另一个线程跑，写手执行期间用户还可能改录制。
+        """
+        def build():
+            ref = getattr(self, '_teardown', None)
+            if not ref:
+                return None
+            action = (getattr(self, '_actions', None) or {}).get(ref.get('action'))
+            if action is None:
+                # 动作被删了就没有可生成的东西，别让下游拿到半份定义。
+                return None
+            return {'action': actions_mod.clean(action), 'args': dict(ref.get('args') or {})}
+
+        lock = getattr(self, '_lock', None)
+        if lock is None:
+            return build()
+        with lock:
+            return build()
+
+    def teardown_snapshot(self):
+        """给前端的后置视图：名字、参数、实参、子步骤（只用于展示）。"""
+        def build():
+            ref = getattr(self, '_teardown', None)
+            if not ref:
+                return None
+            action = (getattr(self, '_actions', None) or {}).get(ref.get('action'))
+            if action is None:
+                return {
+                    'action': ref.get('action'), 'name': ref.get('args', {}).get('_label') or '后置处理',
+                    'desc': '', 'params': [], 'args': dict(ref.get('args') or {}),
+                    'missing': True, 'steps': 0, 'items': [],
+                }
+            return {
+                'action': ref.get('action'),
+                'name': action.get('name') or '后置处理',
+                'desc': action.get('desc') or '',
+                'params': [dict(p) for p in action.get('params') or []],
+                'args': dict(ref.get('args') or {}),
+                'missing': False,
+                'steps': len(action.get('steps') or []),
+                'items': [ir.public_step(s) for s in (action.get('steps') or [])],
+            }
+
+        lock = getattr(self, '_lock', None)
+        if lock is None:
+            return build()
+        with lock:
+            return build()
+
+    def _restore_teardown(self, definition):
+        """续录时恢复后置。动作定义随存档一起带回来，动作库缺它就补进去。"""
+        if not isinstance(definition, dict):
+            return
+        action = definition.get('action')
+        if not isinstance(action, dict) or not action.get('id') or not action.get('name'):
+            return
+        known = getattr(self, '_actions', None)
+        if known is None:
+            return
+        # 动作库里已有同 id 的不覆盖：库里那份可能被用户改过名或改过说明。
+        if action['id'] not in known:
+            known[action['id']] = actions_mod.clean(action)
+        self._teardown = {'action': action['id'], 'args': dict(definition.get('args') or {})}
 
     def insert_call(self, action_id, args=None, after_no=None):
         """插入一次调用。args 缺的键用「第一次调用时的值」补齐，省得每次重填。"""
@@ -1142,6 +1307,8 @@ class RecordingSession(object):
             action = self._actions.get(action_id)
             if action is None:
                 raise RecordingError('动作不存在')
+            if (getattr(self, '_teardown', None) or {}).get('action') == action_id:
+                raise RecordingError('动作「%s」正在当后置处理用，请先解除后置再删' % action['name'])
             calls = actions_mod.calls_of(self._steps, action_id)
             if calls:
                 raise RecordingError('动作「%s」还在第 %s 步被调用，请先解封再删'
@@ -1273,6 +1440,19 @@ class RecordingSession(object):
                 # 等待时长决定它到底是「立即断言」还是「等到成立」，类型跟着变，
                 # 生成端才能挑对模板（expect 一次 vs Wait Until / expect.poll）。
                 step['type'] = ir.step_type_for_intent(merged['type'], merged)
+            elif kind == 'click':
+                settle = changes.get('settle')
+                if settle in (None, False):
+                    step.pop('settle', None)
+                else:
+                    raw = settle.get('timeout') if isinstance(settle, dict) else settle
+                    try:
+                        seconds = float(raw)
+                    except (TypeError, ValueError):
+                        raise RecordingError('等待时间必须是数字')
+                    if not 0.5 <= seconds <= 360:
+                        raise RecordingError('等待时间需在 0.5 ~ 360 秒之间')
+                    step['settle'] = {'timeout': seconds}
             else:  # fill / select
                 value = changes.get('value')
                 if not isinstance(value, str):
@@ -1400,6 +1580,21 @@ class RecordingSession(object):
         if thread is None or not thread.is_alive() or getattr(self, '_closed', False):
             return self._add_reload(after_no)
         return self._call('reload', after_no=after_no)
+
+    def add_close_step(self, after_no=None):
+        """插入一步「关闭浏览器」。
+
+        和「刷新」不同，这一步**不会真的去关浏览器**——关了这次录制就结束了，后面的
+        操作再也录不到。它只是一条声明：生成出的脚本走到这里时结束浏览器。所以录制中
+        和停止后都只改列表，没有命令通道。
+        """
+        with self._lock:
+            step = ir.make_step('close', no=0, source='manual',
+                                page_index=self._page_index_near(after_no))
+            self._insert_step(step, after_no)
+            self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
 
     def add_slider_step(self, config=None, after_no=None):
         """插入一步「滑块验证」。
@@ -2091,8 +2286,12 @@ class RecordingSession(object):
         """
         if not self._panel_url or self._browser is None:
             return
+        # 先把被测窗口定下来：面板一开，同一个进程里就有两个 Chrome 窗口了，
+        # 再靠 find_windows(pid)[0] 认主窗口有可能认到面板上（下面认领面板时要
+        # 用它做排除基准）。
+        self._main_hwnd = self._main_window_hwnd()
         if self._open_panel_app():
-            self.layout_windows()
+            self._layout_panel_with_retry('app')
             return
         try:
             # no_viewport：让页面跟随窗口大小，而不是被固定 viewport 框住。
@@ -2102,7 +2301,8 @@ class RecordingSession(object):
             page = self._panel_context.new_page()
             page.goto(self._panel_url, wait_until='domcontentloaded', timeout=15000)
             self._panel_page = page
-        except Exception:
+        except Exception as exc:
+            logger.warning('面板窗口打不开，退回单窗口录制：%s', exc)
             self._panel_page = None
             try:
                 if self._panel_context is not None:
@@ -2111,7 +2311,73 @@ class RecordingSession(object):
                 pass
             self._panel_context = None
             return
-        self.layout_windows()
+        # 这条兜底路径的窗口和被测页在同一个浏览器进程里，但 CDP 的
+        # Browser.getWindowForTarget 对新 context 的页面不保证可用（实测报
+        # "No web contents in the target"）。以前异常被 except: pass 吞掉、
+        # layout_windows 还返回 True，用户看到的就是「被测窗口缩了一点、面板没出来」。
+        # 这里先用 Win32 把窗口认出来，之后走和 --app 同一条原生摆位。
+        if self._adopt_panel_window():
+            self._layout_panel_with_retry('playwright')
+        else:
+            logger.warning('面板页已打开，但在浏览器进程里没找到它对应的窗口，改用 CDP 摆位')
+            # 认不出窗口就别硬摆（会把别人的窗口挪走）。至少把面板页提到前台，
+            # 用户能看到「又开了一个窗口」，而不是以为面板根本没出来。
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+            self._layout_panel_with_retry('cdp')
+
+    def _adopt_panel_window(self, timeout=2.0):
+        """给 Playwright 兜底打开的面板页找到它对应的顶层窗口。
+
+        同一个浏览器进程里现在有两个窗口：被测页和面板页。只按标题认面板
+        （前端 panel=1 时把 document.title 设成「AutoCase 录制面板」）；
+        标题没出来就等，实在等不到时只在「恰好只有一个候选」的情况下才认——
+        猜错窗口比不认更糟：会把被测窗口当成面板摆到右边，两扇窗口叠在一起。
+        """
+        pid = self._browser_pid()
+        if not pid:
+            return False
+        main = self._main_hwnd or self._main_window_hwnd()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            wins = [h for h in winwindows.find_windows(pid) if h != main]
+            titled = next((h for h in wins if '录制面板' in winwindows.window_title(h)), None)
+            if titled:
+                self._panel_hwnd = titled
+                return True
+            time.sleep(0.1)
+        wins = [h for h in winwindows.find_windows(pid) if h != main]
+        if len(wins) == 1:
+            self._panel_hwnd = wins[0]
+            return True
+        if wins:
+            logger.warning('面板窗口认不出来：进程 %s 下有 %d 个候选窗口', pid, len(wins))
+        return False
+
+    def _layout_panel_with_retry(self, how, delays=(0.0, 0.4, 1.0)):
+        """把面板摆到右边，失败就重试几次。
+
+        窗口刚创建时 Win32 的边框尺寸还没定，第一遍 move_visible 可能算歪；被测
+        窗口从最大化还原也要几百毫秒。这些都是几百毫秒内自愈的，不该让用户自己
+        去任务栏把面板点出来——那正是「面板有时候不出来」的现场。
+        """
+        for attempt, delay in enumerate(delays):
+            if delay:
+                time.sleep(delay)
+            try:
+                if self.layout_windows():
+                    return True
+            except Exception:
+                logger.warning('面板摆位异常（第 %d 次）', attempt + 1, exc_info=True)
+        logger.warning('面板窗口没能并排（%s），只把它提到前面，位置可能不理想', how)
+        # 摆位失败时至少别让面板躺在最大化窗口下面。
+        try:
+            self._raise_pair(self._main_window_hwnd())
+        except Exception:
+            pass
+        return False
 
     # ---- 调试回放窗口（独立 context，不进录制步骤）----
 
@@ -2232,11 +2498,34 @@ class RecordingSession(object):
                 return path
         return self._chromium_path
 
+    def _panel_window_position(self):
+        """预定位：让面板第一帧就出现在屏幕右侧，返回 (x, y)，单位 DIP。
+
+        后面的 Win32 摆位失败时（窗口还没就绪、被测窗口还在从最大化还原），
+        这层兜底能保证面板不会正好落在屏幕中央、被最大化的被测窗口完全盖住——
+        那正是用户看到的「面板没出来」。坐标只求「靠右且可见」，不追求精确，
+        紧接着的摆位会校准。
+        """
+        try:
+            main = self._main_window_hwnd()
+            area = winwindows.work_area(main) if main else None
+            if not area:
+                return None
+            ax, ay, aw, ah = area
+            scale = (winwindows.scale(main) if main else 1.0) or 1.0
+            # work_area 是物理像素，--window-position 是 DIP。取工作区 55% 处：
+            # 即使 Chromium 的边框换算差出几十像素，窗口也仍在屏内、靠右半边。
+            x = int(max(0, ax / scale + (aw / scale) * 0.55))
+            return x, int(max(0, ay / scale))
+        except Exception:
+            return None
+
     def _open_panel_app(self):
         """用 --app 起一个无壳浏览器当面板窗口。成功返回 True。"""
         exe = self._panel_browser()
         if not winwindows.available() or self._headless or not exe:
             return False
+        position = self._panel_window_position()
         before = winwindows.all_windows()
         try:
             self._panel_profile = tempfile.mkdtemp(prefix='autocase-panel-')
@@ -2251,6 +2540,9 @@ class RecordingSession(object):
                  # 降到几乎停止，点把手回来时要白等一秒。关掉遮挡检测，出屏也照常渲染。
                  '--disable-features=CalculateNativeWinOcclusion',
                  '--window-size=%d,900' % self._panel_css_width()]
+                # 启动参数里就把窗口定到右侧：即使后续 Win32 摆位没成功，
+                # 面板也不会正好开在屏幕正中、被最大化页面盖住。
+                + (['--window-position=%d,%d' % position] if position else [])
                 # 只有 AutoCase 自己跑在 https 上（自签名证书）才需要放行；平时是
                 # http://localhost，加了这个参数反而会被挂一条黄色安全警告条。
                 + (['--ignore-certificate-errors'] if self._panel_url.startswith('https') else []),
@@ -2392,13 +2684,15 @@ class RecordingSession(object):
             panel_w = max(360, int(total_w * self._panel_ratio))
             main_w = max(480, total_w - panel_w - gap)
             panel_w = total_w - main_w - gap
-            self._set_window_bounds(main, {'left': 0, 'top': 0, 'width': main_w, 'height': total_h})
+            moved_main = self._set_window_bounds(
+                main, {'left': 0, 'top': 0, 'width': main_w, 'height': total_h})
+            moved_panel = False
             if self._panel_page is not None:
-                self._set_window_bounds(
+                moved_panel = self._set_window_bounds(
                     self._panel_page,
-                    {'left': main_w + gap, 'top': 0, 'width': max(320, panel_w), 'height': total_h}
-                )
-            return True
+                    {'left': main_w + gap, 'top': 0, 'width': max(320, panel_w), 'height': total_h})
+            # 两扇都摆到位才算成功：以前无条件 True，面板没动也会报「已重新并排」。
+            return bool(moved_main and moved_panel)
         except Exception:
             return False
 
@@ -2610,17 +2904,22 @@ class RecordingSession(object):
         if not winwindows.available() or self._embed or self._headless:
             return False
         if not getattr(self, '_panel_hwnd', 0):
+            logger.debug('面板并排跳过：还没有面板窗口句柄')
             return False
         if not winwindows.prepare(self._panel_hwnd):
             # 面板窗口被用户关掉了：别再按旧句柄摆位，走兜底分支即可。
+            logger.debug('面板并排跳过：面板窗口不可用（可能已被关闭）')
             return False
         main = self._main_window_hwnd()
         if not main:
+            logger.debug('面板并排跳过：找不到被测窗口句柄')
             return False
         if not winwindows.prepare(main):
+            logger.debug('面板并排跳过：被测窗口没能从最大化/最小化还原')
             return False
         area = winwindows.work_area(main) or winwindows.work_area(self._panel_hwnd)
         if not area:
+            logger.debug('面板并排跳过：拿不到工作区')
             return False
         ax, ay, aw, ah = area
 
@@ -2797,6 +3096,11 @@ class RecordingSession(object):
 
     @staticmethod
     def _set_window_bounds(page, bounds):
+        """用 CDP 摆一个窗口，返回是否真的设上了。
+
+        以前异常一律吞掉、调用方无条件 return True：面板窗口没动，界面照样提示
+        「已重新并排」。现在把失败如实返回，让上层去重试或报错。
+        """
         try:
             cdp = page.context.new_cdp_session(page)
             info = cdp.send('Browser.getWindowForTarget')
@@ -2805,8 +3109,10 @@ class RecordingSession(object):
                 'bounds': dict(bounds, windowState='normal')
             })
             cdp.detach()
-        except Exception:
-            pass
+            return True
+        except Exception as exc:
+            logger.warning('CDP 摆位失败：%s', exc)
+            return False
 
     @staticmethod
     def _maximize(page):
@@ -2876,6 +3182,8 @@ class RecordingSession(object):
             title = step.get('url') or ('新标签页' if kind == 'new_page' else '')
         elif kind == 'reload':
             title = '刷新页面'
+        elif kind == 'close':
+            title = '关闭浏览器'
         elif kind == 'sleep':
             title = '固定等待'
         elif kind == 'press':

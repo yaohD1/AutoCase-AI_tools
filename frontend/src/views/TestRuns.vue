@@ -18,6 +18,24 @@
       </div>
     </div>
 
+    <!-- 从「生成脚本」跳过来时的定位条：说明勾了哪个文件，并给一个重扫的出口。
+         找不到文件也留在这里说清楚——静默退化会让人以为是自己点错了。 -->
+    <div v-if="focus.file" :class="['run-focus', { 'is-missing': !!focus.missing }]">
+      <span class="run-focus-tag">来自刚才的生成</span>
+      <span class="run-focus-text">
+        <template v-if="focus.missing">
+          没在用例列表里找到 <b>{{ baseName(focus.missing) }}</b>，可能刚写完还没被解析出来
+        </template>
+        <template v-else>
+          已勾选 <b>{{ baseName(focus.file) }}</b><template v-if="focus.cases"> · {{ focus.cases }} 条用例</template>，确认后点「执行所选用例」
+        </template>
+      </span>
+      <button type="button" class="run-focus-act" :disabled="focus.scanning" @click="rescanFocus">
+        {{ focus.scanning ? '正在扫描…' : '重新扫描' }}
+      </button>
+      <button type="button" class="run-focus-act is-quiet" @click="clearFocus">知道了</button>
+    </div>
+
     <!-- 三栏：目录 / 文件（含用例）/ 报告。
          原来是「目录 + 文件 + 用例」挤在一列，508 条用例时根本找不到文件；
          把目录单独拆一列之后，一列只看一层，勾选状态跨目录保留。 -->
@@ -105,7 +123,7 @@
             {{ searching ? `没有匹配「${keyword}」的用例` : '这个目录下没有文件' }}
           </div>
 
-          <div v-for="file in fileGroups" :key="file.path" class="file-group">
+          <div v-for="file in fileGroups" :key="file.path" :class="['file-group', { 'is-focus': isFocused(file.path) }]">
             <div :class="['file-row', { 'is-open': isFileOpen(file.path) }]">
               <el-checkbox
                 size="small"
@@ -430,7 +448,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Download, Refresh, Search } from '@element-plus/icons-vue'
@@ -464,6 +482,9 @@ const history = ref([])
 // 运行记录面板：默认展开；默认只看当前工作区（换项目后不至于把别人的记录混进来）。
 const historyOpen = ref(true)
 const historyScope = ref('workspace')
+// 生成完脚本跳过来时的定位状态：file 是相对工作区的路径，cases 是勾上的条数。
+// missing 非空表示「文件确实写了，但这一次没枚举出来」，提示条要换个说法。
+const focus = reactive({ file: '', cases: 0, missing: '', scanning: false })
 let pollTimer = null
 
 // 报告区的筛选状态。换一次运行就重置——上一批的标签在下一批里往往不存在，
@@ -655,11 +676,13 @@ const selectedDirs = computed(() => {
   return dirs.size
 })
 
-onMounted(() => {
+onMounted(async () => {
   workspace.value = pickWorkspace()
   if (!workspace.value) return
-  loadCases()
+  await loadCases()
   loadHistory()
+  // 定位放在全量枚举之后：目录树已经建好，才切得了目录、也才滚得到那一行。
+  await applyFocus()
 })
 
 onBeforeUnmount(() => {
@@ -675,6 +698,89 @@ function pickWorkspace() {
   } catch {
     return ''
   }
+}
+
+function normalizedPath(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/^\.\//, '')
+}
+
+function isFocused(path) {
+  return !!focus.file && normalizedPath(path) === focus.file
+}
+
+// 生成完成跳过来时，把「哪个文件、哪几条用例」变成页面上的勾选状态。
+// 不做静默失败：找不到就在提示条里说清楚，并留一个重新扫描。
+async function applyFocus() {
+  const file = typeof route.query.file === 'string' ? normalizedPath(route.query.file.trim()) : ''
+  if (!file) return
+  focus.file = file
+  focus.cases = 0
+  focus.missing = ''
+
+  let hits = cases.value.filter(item => normalizedPath(item.file) === file)
+  if (!hits.length) {
+    // 刚写出的文件可能不在刚才那次枚举里（2 分钟缓存、或不在约定目录下）：按文件补一次。
+    hits = await fetchFocused(file)
+  }
+  if (!hits.length) {
+    focus.missing = file
+    return
+  }
+
+  // 侧栏目录跟着切过去，否则中间列被目录过滤成空——勾上了也看不见。
+  const dir = hits[0].dir || ''
+  activeFolder.value = dir && folderRows.value.some(row => row.path === dir) ? dir : ''
+  expandedFiles.add(hits[0].file)
+  toggleMany(hits, true)
+  focus.cases = hits.length
+  await revealFocused()
+}
+
+async function fetchFocused(file) {
+  focus.scanning = true
+  try {
+    const { data } = await api.listTestCasesIn(workspace.value, [file])
+    const incoming = data.cases || []
+    // 合并进全量列表：目录树和计数仍然对，新文件也能出现在中间列。
+    const known = new Set(cases.value.map(item => item.id))
+    for (const item of incoming) {
+      if (known.has(item.id)) continue
+      cases.value.push(item)
+      known.add(item.id)
+    }
+    if ((data.missing || []).length) focus.missing = data.missing[0]
+    return incoming
+  } catch (error) {
+    focus.missing = file
+    ElMessage.error(errorText(error))
+    return []
+  } finally {
+    focus.scanning = false
+  }
+}
+
+async function revealFocused() {
+  await nextTick()
+  const row = document.querySelector('.file-group.is-focus')
+  if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
+
+async function rescanFocus() {
+  if (!focus.file || focus.scanning) return
+  const hits = await fetchFocused(focus.file)
+  if (!hits.length) return
+  focus.missing = ''
+  activeFolder.value = ''
+  expandedFiles.add(hits[0].file)
+  toggleMany(hits, true)
+  focus.cases = hits.length
+  await revealFocused()
+}
+
+function clearFocus() {
+  focus.file = ''
+  focus.cases = 0
+  focus.missing = ''
 }
 
 function baseName(path) {
@@ -1188,6 +1294,40 @@ function errorText(error) {
 }
 .head-link:hover { color: var(--accent); }
 
+/* 从「生成脚本」跳过来时的定位条：说明勾了哪个文件，并给一个重扫的出口。
+   找不到文件换成警告色——静默退化会让人以为是自己点错了。 */
+.run-focus {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-card);
+  background: var(--accent-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.run-focus.is-missing { border-color: var(--warn-line); background: var(--warn-soft); }
+.run-focus-tag { flex: none; color: var(--accent); font-weight: 600; }
+.run-focus.is-missing .run-focus-tag { color: var(--warn); }
+.run-focus-text { min-width: 0; color: var(--ink-2); }
+.run-focus-text b { color: var(--ink); font-weight: 600; }
+.run-focus-act {
+  flex: none;
+  margin-left: auto;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.run-focus-act.is-quiet { margin-left: 0; color: var(--muted); }
+.run-focus-act:disabled { color: var(--muted); cursor: default; }
+
 .run-shell {
   flex: 1;
   min-height: 0;
@@ -1336,6 +1476,11 @@ function errorText(error) {
 }
 .file-row:hover { background: var(--bg-hover); }
 .file-row.is-open { background: var(--bg-sunken); }
+/* 刚生成的那一份：左侧一条实色竖条 + 淡底，扫一眼就知道该看哪一行。 */
+.file-group.is-focus .file-row {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 .file-label {
   display: flex;
   align-items: center;

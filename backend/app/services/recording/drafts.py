@@ -52,7 +52,10 @@ def save(session, config=None, title=None):
     """把当前会话存成一条草稿；同一条会话再次保存时覆盖原来那条。"""
     config = config or {}
     snapshot = session.snapshot()
-    steps = _lean_steps(snapshot.get('steps'))
+    # 存完整 IR 而不是 snapshot['steps']：后者是给前端渲染的视图，会把
+    # target.candidates 的定位 spec 剥掉，续录后生成任务书 / 回放就拿不到真定位
+    # （RF 会直接 KeyError('spec')）。ir() 只是去掉 _frame 这类页面对象，不碰 spec。
+    steps = _lean_steps(session.ir())
     draft = None
     draft_id = getattr(session, '_draft_id', None)
     if draft_id:
@@ -71,6 +74,11 @@ def save(session, config=None, title=None):
     draft.python = _clean(config.get('python'), 1000)
     draft.step_count = len(steps)
     draft.steps_json = json.dumps(steps, ensure_ascii=False)
+    # 后置处理跟步骤一起走。存的是「动作定义 + 实参」而不是一个 id：
+    # 动作库是项目级的，换了工作区这条引用就指向空气，存档里必须自带一份。
+    read_teardown = getattr(session, 'teardown_definition', None)
+    teardown = read_teardown() if callable(read_teardown) else None
+    draft.teardown_json = json.dumps(teardown, ensure_ascii=False) if teardown else None
     # 可引用元素（拾取入库的）跟着走：续录后断言还能引用到它们。同样剥掉大字段。
     picks = snapshot.get('picks') or []
     draft.picks_json = json.dumps(
@@ -99,6 +107,10 @@ def delete(draft):
 def steps_of(draft):
     return draft.steps()
 
+
+def teardown_of(draft):
+    """存档里的后置处理定义；没有就是 None。"""
+    return draft.teardown()
 
 def touch(draft):
     """续录时把「最近使用」顶上去，列表按它排序。"""

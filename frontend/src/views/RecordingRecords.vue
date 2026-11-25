@@ -162,7 +162,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onActivated, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
@@ -199,8 +199,18 @@ const wantedId = ref(typeof route.query.id === 'string' ? `generation:${route.qu
 const pendingCount = computed(() => records.value.filter(item => item.kind !== 'draft' && item.status === 'generated').length)
 
 onMounted(load)
+// 这一页在 keep-alive 里：从录制页存档后返回，手里还是离开时那份列表和详情。
+// 首次激活紧跟 onMounted（那时已经拉过），跳过；之后的每次激活都重新同步。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  load(true)
+})
 
-async function load() {
+async function load(force = false) {
   loading.value = true
   try {
     // 两个来源合成一个列表：录制存档（没录完的）和生成记录（已写文件的）。
@@ -214,10 +224,17 @@ async function load() {
       ...(draftRows.data.drafts || []).map(row => ({ ...row, kind: 'draft', key: `draft:${row.id}` }))
     ].sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')))
     records.value = merged
-    // 默认选中最新一条：避免右半屏永远是「选择一条记录」的空态。
-    const target = merged.find(item => item.key === wantedId.value) || merged[0]
-    if (target && (!selected.value || selected.value.key !== target.key)) await openRecord(target)
-    if (!target) selected.value = null
+    // 优先留住你正在看的那条：列表会重排，key 不会。只有它被删掉了才退回第一条，
+    // 空列表才给空态——避免右半屏永远是「选择一条记录」。
+    const kept = selected.value && merged.find(item => item.key === selected.value.key)
+    const target = kept || merged.find(item => item.key === wantedId.value) || merged[0]
+    if (!target) {
+      selected.value = null
+      return
+    }
+    // force：同一条也要重新取详情。只比 key 的话，覆盖保存过的存档永远显示旧步骤
+    // （曾经就是「左边 5 步、右边 7 步」）。
+    if (force || !selected.value || selected.value.key !== target.key) await openRecord(target)
   } catch (error) {
     ElMessage.error(errorText(error))
   } finally {
@@ -226,8 +243,8 @@ async function load() {
 }
 
 async function reload() {
-  if (selected.value) wantedId.value = selected.value.key
-  await load()
+  // 列表和详情一起重取，否则刷新只更新左半边。
+  await load(true)
 }
 
 async function openRecord(item) {
@@ -238,8 +255,10 @@ async function openRecord(item) {
       return
     }
     const { data } = await api.getRecordingGeneration(item.id)
+    // 后台刷新同一条记录时别覆盖用户已经改过的提交说明。
+    const same = selected.value && selected.value.key === `generation:${data.id}`
     selected.value = { ...data, kind: 'generation', key: `generation:${data.id}` }
-    commitMessage.value = `录制生成：${data.title || data.target_path}`
+    if (!same) commitMessage.value = `录制生成：${data.title || data.target_path}`
   } catch (error) {
     ElMessage.error(errorText(error))
   }

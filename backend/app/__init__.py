@@ -11,7 +11,13 @@ from app.models.database import init_db
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
-    
+    # 数据库地址必须在每次 create_app 时重新读：Config 的类属性在 import 那一刻就固化了，
+    # 而测试是「先 import app、后设 DATABASE_URL」——多个测试文件一起跑时，后设的那个
+    # 不会生效，接下来一句 db.drop_all() 打到的就是真实库。2026-11-24 就是这样清过一次。
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+
     CORS(app)
     init_db(app)
     with app.app_context():

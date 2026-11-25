@@ -4,6 +4,7 @@
 前端按 `GET /runs/<id>` 轮询；进度走内存，结果落库。
 """
 import logging
+import time
 from pathlib import Path
 
 from flask import Blueprint, Response, current_app, jsonify, request, send_file
@@ -37,10 +38,19 @@ def _workspace(value):
 
 @testrun_bp.route('/automation/testrun/cases', methods=['GET'])
 def list_cases():
-    """列出可执行用例。refresh=1 强制重新解析（默认缓存 2 分钟）。"""
+    """列出可执行用例。refresh=1 强制重新解析（默认缓存 2 分钟）。
+
+    files=a.robot,b.robot 时只解析这几个文件：不读缓存、也不按目录约定扫描。
+    生成完脚本立刻跳过来定位就用它——刚写出的文件既不在缓存里，也可能不在
+    「测试用例层 / tests」这些约定目录下。
+    """
     try:
         workspace = _workspace(request.args.get('workspace'))
-        data = runner.discover(workspace, force=request.args.get('refresh') in ('1', 'true'))
+        files = [item.strip() for item in (request.args.get('files') or '').split(',') if item.strip()]
+        if files:
+            data = runner.cases_in(workspace, files)
+        else:
+            data = runner.discover(workspace, force=request.args.get('refresh') in ('1', 'true'))
     except runner.RunnerError as exc:
         return jsonify({'error': str(exc)}), 400
     except Exception as exc:  # noqa: BLE001
@@ -49,12 +59,14 @@ def list_cases():
     return jsonify({
         'workspace': data['root'],
         'framework': data['framework'],
-        'note': data['note'],
+        'note': data.get('note'),
+        # 请求了但这些文件里没解析出用例：前端据此提示「重新扫描」，不当作整页失败。
+        'missing': data.get('missing') or [],
         'cases': [
             {key: value for key, value in case.items() if not key.startswith('_')}
             for case in data['cases']
         ],
-        'discovered_at': data['discovered_at'],
+        'discovered_at': data.get('discovered_at') or time.time(),
     })
 
 

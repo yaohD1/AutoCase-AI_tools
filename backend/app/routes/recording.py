@@ -15,7 +15,7 @@ from app.services.automation_generator import AutomationScriptGenerator
 from app.services.opencode_runner import OpenCodeRunner
 from app.models import db
 from app.models.recording_generation import RecordingGeneration
-from app.services.recording import assets, debug, detect, drafts, emit, guard, records, replay
+from app.services.recording import assets, debug, detect, drafts, emit, guard, records, replay, runner
 from app.services.recording import emit_session, intent, memory, progress, verify
 from app.services.recording.ask_pool import AskUnavailable
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
@@ -466,6 +466,37 @@ def ungroup_recording_step(no):
     return _mutate(lambda session: session.ungroup_step(no))
 
 
+@recording_bp.route('/automation/recording/teardown', methods=['POST'])
+def set_recording_teardown():
+    """把选中的连续步骤设成后置处理（Test Teardown / afterEach）。
+
+    和封装同一个弹窗、同一套参数表：后置也是「一个具名动作 + 一次调用」，
+    区别只在这次调用不待在流程里，而是生成到收尾位置。
+    """
+    body = request.get_json(silent=True) or {}
+    nos = body.get('steps')
+    if not isinstance(nos, list) or not nos:
+        return _error('缺少要设为后置的步骤编号', 400)
+    params = body.get('params')
+    if params is not None and not isinstance(params, list):
+        return _error('params 必须是数组', 400)
+    return _mutate(lambda session: session.set_teardown(
+        nos, body.get('name'), desc=body.get('desc') or '', params=params or []))
+
+
+@recording_bp.route('/automation/recording/teardown', methods=['PATCH'])
+def update_recording_teardown():
+    """只改后置这次用的实参；子步骤要改就解除后置，改完重新设。"""
+    body = request.get_json(silent=True) or {}
+    return _mutate(lambda session: session.update_teardown_args(body.get('args') or {}))
+
+
+@recording_bp.route('/automation/recording/teardown', methods=['DELETE'])
+def clear_recording_teardown():
+    """解除后置，子步骤还原到流程末尾。动作定义仍留在动作库。"""
+    return _mutate(lambda session: session.clear_teardown())
+
+
 @recording_bp.route('/automation/recording/steps/<int:no>/args', methods=['PATCH'])
 def update_recording_call_args(no):
     """改这一次调用的实参。只接受动作声明过的参数名。"""
@@ -720,6 +751,28 @@ def add_recording_reload():
         return _error(str(exc), 400)
 
 
+@recording_bp.route('/automation/recording/steps/close', methods=['POST'])
+def add_recording_close():
+    """插入一步「关闭浏览器」。
+
+    录制中的浏览器**不会**被真的关掉（关了就录不下去了），这一步只是声明：
+    生成的脚本走到这里时结束浏览器。要不要再补平台收尾由生成侧决定。
+
+    路径故意放在 /steps/ 下：上面那个 `/recording/close` 是「关掉录制用的浏览器」，
+    两个同路径的话先注册的那个会赢，插入步骤会变成真关浏览器。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        after_no = body.get('after_no')
+        after_no = int(after_no) if after_no is not None else None
+        return jsonify(session.add_close_step(after_no)), 200
+    except (RecordingError, TypeError, ValueError) as exc:
+        return _error(str(exc), 400)
+
+
 @recording_bp.route('/automation/recording/intent', methods=['POST'])
 def parse_recording_intent():
     """用所选模型把自然语言描述解析为意图。只返回预览，不写入录制。"""
@@ -949,6 +1002,8 @@ def _prepare_generation(body):
         'steps': session.ir(),
         # 动作定义跟着一起走：规划和写手都要知道「这几个 call 背后是什么」。
         'actions': session.action_definitions(),
+        # 后置处理（Test Teardown / afterEach）。它不在 steps 里，生成侧要单独拿到。
+        'teardown': session.teardown_definition(),
         # 登录态只在「跑一遍」时用：注入到临时配置里，不写进用户仓库、不返回给前端。
         # 浏览器已经关掉也可能有（停止时抓过一份），所以这里取的是缓存而不是活对象。
         'storage_state': session.storage_state(),
@@ -1017,7 +1072,7 @@ def generate_recording():
             storage_state=ctx['storage_state'],
             memory=memory.for_writer(profile) if profile else None,
             session=session, write_scope=write_scope,
-            actions=ctx['actions'],
+            actions=ctx['actions'], teardown=ctx['teardown'],
         )
         progress.mark('record')
         record = records.create(
@@ -1025,6 +1080,20 @@ def generate_recording():
             target_abs.read_bytes(), steps, result.get('reply'),
         )
         result['generation_id'] = record.id
+        # 前端要凭这两个字段把用户送到执行页，并提前勾好刚写出的脚本：
+        # workspace 给绝对路径（别让前端猜），test_cases 是这一份文件里的用例。
+        # 枚举失败只返回空列表——脚本已经写成功了，不能因为列不出用例把它判成失败。
+        result['workspace'] = str(ctx['workspace'])
+        result['test_cases'] = []
+        result['test_missing'] = []
+        if ctx['framework'] == emit.RF_FRAMEWORK:
+            try:
+                focused = runner.cases_in(str(ctx['workspace']), [target_path])
+                result['test_cases'] = focused['cases']
+                result['test_missing'] = focused['missing']
+            except Exception:  # noqa: BLE001
+                logger.warning('生成完成但按文件枚举用例失败：%s', target_path, exc_info=True)
+                result['test_missing'] = [target_path]
         result['session'] = (session.snapshot() if session is not None
                              else {'reused': False, 'scope': 'exact'})
         progress.PROGRESS.finish(result)
@@ -1163,6 +1232,11 @@ def start_debug_replay():
     for step in steps:
         if step.get('_action'):
             step['_session_no'] = None
+    # 后置处理接在最后：它不在 IR 里，但「跑一遍」必须执行（退出登录、清理数据这类收尾）。
+    extra = replay.teardown_steps(session.teardown_definition(), after_no=len(steps))
+    for step in extra:
+        step['_session_no'] = None
+    steps = steps + extra
     try:
         runner = debug.start(
             steps,
@@ -1400,6 +1474,7 @@ def resume_recording_draft(draft_id):
             workspace=_recording_workspace(body),
             framework=body.get('framework') or None,
             restore_steps=steps,
+            restore_teardown=drafts.teardown_of(draft),
             draft_id=draft.id,
             theme=(body.get('theme') or '').strip().lower() or None,
         )

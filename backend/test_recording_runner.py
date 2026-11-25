@@ -22,6 +22,7 @@ from app import create_app  # noqa: E402
 from app.models import db  # noqa: E402
 from app.models.test_run import TestRun  # noqa: E402
 from app.services.recording import report_html, runner  # noqa: E402
+from test_support import reset_database  # noqa: E402
 
 
 def _pw_report(status='passed', attachments=None, error=None, line=6):
@@ -186,6 +187,36 @@ class JsonBlobTest(unittest.TestCase):
         self.assertIsNone(runner._json_blob('boom: config error'))
 
 
+class CasesInTest(unittest.TestCase):
+    """按文件枚举：生成完跳执行页靠它，坏路径只进 missing，不能整页报错。"""
+
+    def test_missing_files_are_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            got = runner.cases_in(tmp, ['nope.robot', '..' + _SLASH + 'escape.robot'])
+        self.assertEqual(got['cases'], [])
+        self.assertIn('nope.robot', got['missing'])
+        self.assertIn('..' + _SLASH + 'escape.robot', got['missing'])
+
+    def test_file_unparsable_reports_missing(self):
+        """文件在、但解析不出来（环境缺库、语法没被 RF 认出来）只记 missing，不掀桌子。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'a.robot').write_text('*** Test Cases ***\n案例\n    Log    1\n', encoding='utf-8')
+            with mock.patch.object(runner, '_framework', return_value='robot-selenium'), \
+                    mock.patch.object(runner, '_rf_python', return_value='/usr/bin/python'), \
+                    mock.patch.object(runner, '_rf_rows', side_effect=runner.RunnerError('boom')):
+                got = runner.cases_in(tmp, ['a.robot'])
+        self.assertEqual(got['cases'], [])
+        self.assertIn('a.robot', got['missing'])
+
+    def test_no_python_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'a.robot').write_text('*** Test Cases ***\n案例\n    Log    1\n', encoding='utf-8')
+            with mock.patch.object(runner, '_framework', return_value='robot-selenium'), \
+                    mock.patch.object(runner, '_rf_python', return_value=None):
+                with self.assertRaises(runner.RunnerError):
+                    runner.cases_in(tmp, ['a.robot'])
+
+
 class RouteTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -200,8 +231,7 @@ class RouteTest(unittest.TestCase):
 
     def setUp(self):
         with self.app.app_context():
-            db.drop_all()
-            db.create_all()
+            reset_database()
 
     def test_workspace_outside_root_rejected(self):
         r = self.client.get('/api/automation/testrun/cases', query_string={'workspace': 'C:/Windows'})
@@ -222,6 +252,20 @@ class RouteTest(unittest.TestCase):
         data = r.get_json()
         self.assertEqual(data['framework'], 'playwright-ts')
         self.assertNotIn('_private', data['cases'][0])
+
+    def test_cases_files_param_uses_cases_in(self):
+        fake = {'framework': 'robot-selenium', 'root': '/ws', 'missing': [],
+                'cases': [{'id': 'rf|a.robot|x', 'file': 'a.robot', 'title': 'x',
+                           'file_total': 1, '_private': 'hidden'}]}
+        with mock.patch.object(runner, 'cases_in', return_value=fake) as patched:
+            r = self.client.get('/api/automation/testrun/cases',
+                                query_string={'workspace': 'proj', 'files': 'a.robot'})
+        self.assertEqual(r.status_code, 200)
+        patched.assert_called_once()
+        # 指定文件时必须走按文件枚举：discover 的缓存会把刚写出的文件挡住。
+        self.assertEqual(r.get_json()['cases'][0]['id'], 'rf|a.robot|x')
+        self.assertNotIn('_private', r.get_json()['cases'][0])
+        self.assertEqual(r.get_json()['missing'], [])
 
     def test_create_run_rejects_unknown_selection(self):
         fake = {'framework': 'playwright-ts', 'root': '/ws', 'note': None, 'discovered_at': 1,
@@ -304,8 +348,7 @@ class PersistBudgetTest(unittest.TestCase):
 
     def setUp(self):
         with self.app.app_context():
-            db.drop_all()
-            db.create_all()
+            reset_database()
 
     def _rows(self):
         steps = [{'title': '第 %d 步' % i, 'category': 'pw:api', 'duration_ms': 10,

@@ -591,22 +591,17 @@
                       title="插入刷新步骤，并实际刷新浏览器">刷新</button>
               <button type="button" class="panel-tool" :disabled="!canEdit" @click="openDraft('assert')"
                       title="判断页面状态是否成立">断言</button>
-              <el-dropdown trigger="click" placement="bottom-start" :disabled="!canEdit" @command="openDraft">
-                <button type="button" class="panel-tool" :disabled="!canEdit" title="等待加载（推荐）/ 固定等待">等待</button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item command="ready">等待加载</el-dropdown-item>
-                    <el-dropdown-item command="sleep">固定等待</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
+              <button type="button" class="panel-tool" :disabled="!canEdit"
+                      title="插入固定等待：无条件等指定秒数" @click="openDraft('sleep')">等待</button>
               <el-dropdown trigger="click" placement="bottom-end" @command="onPanelTool">
                 <button type="button" class="panel-tool" title="封装 / 动作库 / 关闭浏览器">更多</button>
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="pack" :disabled="!canEdit || !steps.length">{{ selectMode ? '取消封装' : '封装选中的步骤' }}</el-dropdown-item>
                     <el-dropdown-item command="library" :disabled="!steps.length">动作库</el-dropdown-item>
-                    <el-dropdown-item v-if="canCloseBrowser" command="close" :disabled="closingBrowser" divided>关闭浏览器</el-dropdown-item>
+                    <el-dropdown-item command="close-step" :disabled="!canEdit" divided
+                                      title="往流程里加一步「关闭浏览器」；不会关掉当前录制的浏览器">插入关闭浏览器步骤</el-dropdown-item>
+                    <el-dropdown-item v-if="canCloseBrowser" command="close" :disabled="closingBrowser">关闭浏览器</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -651,9 +646,28 @@
 
           <span class="toolbar-sep"></span>
 
-          <!-- 插入与特殊能力收进两个下拉：这一排原本 8 个按钮平铺，和「开始」一样重，
-               主次分不出来。常用的留在外面，一次点开就能选，和之前一样是两步。 -->
+          <!-- 主窗口把这一排收进两个下拉：原本 8 个按钮平铺，和「开始」一样重，主次分不出来。
+               面板 / 嵌入模式不走这套：窗口只有 600 宽、操作又都在这一步里发生，
+               多一层下拉就是每次多一次点击，所以那边保持原来那排平铺按钮。 -->
           <div class="toolbar-group">
+            <template v-if="compactMode">
+              <el-button
+                :icon="Refresh"
+                :disabled="!canEdit"
+                :loading="addingReload"
+                :title="isRecording ? '插入刷新步骤，并实际刷新浏览器' : '插入刷新步骤（已停止录制，不会真刷新）'"
+                @click="insertReload()"
+              >
+                刷新页面
+              </el-button>
+              <el-button :icon="CircleCheck" :disabled="!canEdit" title="判断页面状态是否成立；可设「等到成立」" @click="openDraft('assert')">添加断言</el-button>
+              <el-button :icon="Clock" :disabled="!canEdit" title="无条件等待指定秒数" @click="openDraft('sleep')">固定等待</el-button>
+              <el-button :icon="Pointer" :disabled="!canEdit" title="用视觉模型找缺口并拖动；限拼图缺口型" @click="openDraft('slider')">滑块验证</el-button>
+              <el-button :icon="Postcard" :disabled="!canEdit" title="用视觉模型识别字符并填入；支持数字、字母、算术" @click="openDraft('captcha')">验证码</el-button>
+              <el-button :icon="Upload" :disabled="!canEdit" title="把工作区里的文件塞进上传控件；不会弹出系统文件对话框" @click="openDraft('upload')">导入文件</el-button>
+              <el-button :icon="Download" :disabled="!canEdit" title="等文件真正落地，再校验文件名、体积和行数" @click="openDraft('download')">校验下载</el-button>
+            </template>
+            <template v-else>
             <el-dropdown trigger="click" placement="bottom-start" @command="onInsertTool">
               <el-button :icon="Plus" :disabled="!canEdit" title="插入断言 / 等待加载 / 固定等待 / 刷新页面">
                 插入<span class="toolbar-caret">▾</span>
@@ -661,11 +675,13 @@
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="assert" :disabled="!canEdit" title="判断页面状态是否成立；可设「等到成立」">添加断言</el-dropdown-item>
-                  <el-dropdown-item command="ready" :disabled="!canEdit" title="等待页面加载到指定状态，比固定等待可靠">等待加载</el-dropdown-item>
-                  <el-dropdown-item command="sleep" :disabled="!canEdit" title="无条件等待指定秒数；加载请用「等待加载」">固定等待</el-dropdown-item>
+                  <el-dropdown-item command="sleep" :disabled="!canEdit" title="无条件等待指定秒数">固定等待</el-dropdown-item>
                   <!-- 刷新只由这里添加：SPA 一次刷新会触发多个导航事件，自动检测分不清真假 -->
                   <el-dropdown-item command="reload" :disabled="!canEdit" divided
                                     :title="isRecording ? '插入刷新步骤，并实际刷新浏览器' : '插入刷新步骤（已停止录制，不会真刷新）'">刷新页面</el-dropdown-item>
+                  <!-- 关闭浏览器是「脚本收尾」的声明：录制中的浏览器不会因为这一步被关掉 -->
+                  <el-dropdown-item command="close" :disabled="!canEdit"
+                                    title="插入关闭浏览器步骤：生成的脚本走到这里结束浏览器；录制中的浏览器不会被关掉">关闭浏览器</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -684,6 +700,7 @@
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
+            </template>
           </div>
 
           <span class="toolbar-sep"></span>
@@ -978,6 +995,30 @@
               </template>
             </div>
             <div v-if="!selectMode" class="step-actions">
+              <!-- 点击的「执行前等待」：打开后先等这个元素出现，再点它。
+                   只给 click，别的类型没有「等自己再动」这层语义。 -->
+              <span v-if="step.type === 'click'" class="settle-ctrl">
+                <el-button
+                  text
+                  :icon="Timer"
+                  :class="['settle-toggle', { 'is-on': step.settle }]"
+                  :disabled="!canEdit"
+                  :title="step.settle ? `执行前最多等 ${step.settle.timeout} 秒` : '加执行前等待：先等这个元素出现再点'"
+                  @click.stop="toggleSettle(step)"
+                />
+                <el-input-number
+                  v-if="step.settle"
+                  :model-value="step.settle.timeout"
+                  :min="0.5"
+                  :max="360"
+                  :step="0.5"
+                  size="small"
+                  controls-position="right"
+                  class="settle-input"
+                  @click.stop
+                  @change="value => setStepSettle(step, value)"
+                />
+              </span>
               <!-- 动作调用没有定位可编辑：改的是实参，或者解封回原始步骤 -->
               <template v-if="step.type === 'call'">
                 <el-button
@@ -1009,9 +1050,9 @@
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="assert">插入断言</el-dropdown-item>
-                    <el-dropdown-item command="ready">插入等待加载</el-dropdown-item>
                     <el-dropdown-item command="sleep">插入固定等待</el-dropdown-item>
                     <el-dropdown-item command="reload" divided>插入刷新页面</el-dropdown-item>
+                    <el-dropdown-item command="close">插入关闭浏览器</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -1042,6 +1083,35 @@
           </li>
         </ol>
 
+        <!-- 后置处理：收尾动作（Test Teardown / afterEach），不在步骤列表里按顺序执行。
+             放在列表末尾是因为它跑在整个流程之后；用例失败也会执行，这正是要它的原因。 -->
+        <div v-if="teardown" class="teardown-card">
+          <div class="td-head">
+            <span class="td-tag">后置</span>
+            <span class="td-name">{{ teardown.name }}</span>
+            <span class="td-count">{{ teardown.steps }} 步</span>
+            <span v-if="teardown.missing" class="td-warn">动作已删除</span>
+            <div class="td-actions">
+              <el-button v-if="teardown.params.length" text :icon="EditPen" :disabled="!canEdit"
+                         title="改后置处理的参数值" @click="openTeardownArgs" />
+              <el-button text :icon="Unlock" :disabled="!canEdit"
+                         title="解除后置：把这几步还原到流程末尾（动作定义保留）" @click="clearTeardown" />
+            </div>
+          </div>
+          <div v-if="teardown.params.length" class="td-args">
+            <span v-for="param in teardown.params" :key="param.key" class="td-arg">
+              {{ param.label || param.key }}：{{ (teardown.args || {})[param.key] || '—' }}
+            </span>
+          </div>
+          <ol class="td-steps">
+            <li v-for="(item, index) in teardown.items" :key="index">
+              <span class="td-no">{{ index + 1 }}</span>
+              <span class="td-text">{{ stepDescription(item) }}</span>
+            </li>
+          </ol>
+          <p class="td-hint">用例失败也会执行；生成时写进 Test Teardown / afterEach，浏览器收尾由平台保证。</p>
+        </div>
+
         <!-- 多选操作条：只认连续区间。中间跳过一步再合体，展开后的顺序就不是用户看到的顺序了。 -->
         <div v-if="selectMode" class="select-bar">
           <div class="select-info">
@@ -1050,7 +1120,10 @@
           </div>
           <div class="select-actions">
             <el-button size="small" @click="toggleSelectMode">取消</el-button>
-            <el-button size="small" type="primary" :disabled="!canGroup" @click="openGroupDialog">封装为动作</el-button>
+            <el-button size="small" :disabled="!canTeardown" @click="openGroupDialog('teardown')">
+              {{ teardown ? '已有后置' : '设为后置' }}
+            </el-button>
+            <el-button size="small" type="primary" :disabled="!canGroup" @click="openGroupDialog('action')">封装为动作</el-button>
           </div>
         </div>
 
@@ -1679,6 +1752,8 @@
             <el-button size="small" type="primary" plain @click="$router.push({ path: '/recording/records', query: { id: shownResult.generation_id } })">
               查看生成记录
             </el-button>
+            <!-- 弹窗关掉之后这里仍是唯一出口：生成完最自然的下一步就是真跑一遍。 -->
+            <el-button size="small" type="primary" @click="goTestRun">去执行测试</el-button>
             <span class="field-hint">预览内容 · 提交 Git · 撤销写入</span>
           </div>
         </div>
@@ -1822,6 +1897,7 @@
               <span v-if="planData" class="plan-head-meta">
                 {{ planSteps.length }} 步<template v-if="planReusable.length"> · 复用 {{ planReusable.length }} 项</template>
               </span>
+              <span v-if="planStale" class="chip-warn">步骤已变</span>
               <span class="plan-sheet-tip">选中正文可单独提意见</span>
               <button type="button" class="plan-sheet-close" title="关闭（Esc）" @click="closePlanSheet">✕</button>
             </header>
@@ -1842,151 +1918,173 @@
             </div>
 
             <div v-if="planData" class="plan-sheet-body">
-              <div ref="planBody" class="plan-sheet-main" @mouseup="onPlanSelect" @mousedown="clearSelTip">
+              <!-- 目录：只做定位，不放操作。滚到哪高亮哪，读长文时不至于迷路。 -->
+              <nav class="plan-outline" aria-label="任务书目录">
+                <button
+                  v-for="sec in planSections"
+                  :key="sec.id"
+                  type="button"
+                  :class="['plan-outline-item', { 'is-on': planActiveSection === sec.id }]"
+                  @click="scrollPlanTo(sec.id)"
+                >
+                  <span class="plan-outline-no">{{ sec.no }}</span>
+                  <span class="plan-outline-label">{{ sec.title }}</span>
+                  <span v-if="sec.count !== null" :class="['plan-outline-count', { 'is-warn': sec.tone === 'warn' }]">{{ sec.count }}</span>
+                </button>
+              </nav>
+
+              <div
+                ref="planBody"
+                class="plan-doc"
+                @mouseup="onPlanSelect"
+                @mousedown="clearSelTip"
+                @scroll.passive="onPlanScroll"
+              >
                 <div v-if="planStale" class="plan-stale">
                   录制步骤已经变了，这份任务书对不上。请重新规划后再执行。
                 </div>
 
-                <div class="plan-block">
-                  <div class="plan-block-title">项目风格</div>
-                  <div class="plan-kv"><span>runner</span><b>{{ planStyle.runner || '—' }}</b></div>
-                  <div class="plan-kv"><span>断言</span><b>{{ planStyle.assertion || '—' }}</b></div>
-                  <div v-if="planStyle.import_sample" class="plan-kv">
-                    <span>import</span><code>{{ planStyle.import_sample }}</code>
-                  </div>
-                  <div v-if="planStyle.notes" class="plan-style-note">{{ planStyle.notes }}</div>
-                </div>
+                <section id="plan-style" class="plan-sec" data-plan-anchor="style">
+                  <h3 class="plan-h"><span class="plan-h-no">{{ planSecNo('style') }}</span>项目风格</h3>
+                  <dl class="plan-fields">
+                    <dt>runner</dt><dd>{{ planStyle.runner || '—' }}</dd>
+                    <dt>断言</dt><dd>{{ planStyle.assertion || '—' }}</dd>
+                    <template v-if="planStyle.import_sample">
+                      <dt>import</dt><dd><code>{{ planStyle.import_sample }}</code></dd>
+                    </template>
+                    <dt>复用</dt>
+                    <dd>{{ planReusable.length ? planReusable.length + ' 项已封装动作，见下一节' : '无，' + planSteps.length + ' 步全部手写' }}</dd>
+                  </dl>
+                  <p v-if="planStyle.notes" class="plan-style-note">{{ planStyle.notes }}</p>
+                </section>
 
-                <div class="plan-block">
-                  <div class="plan-block-title">可复用的封装</div>
-                  <div v-if="!planReusable.length" class="field-hint">
-                    未找到可复用封装，全部手写
-                  </div>
-                  <ul v-else class="plan-reuse">
+                <section v-if="planReusable.length" id="plan-reuse" class="plan-sec" data-plan-anchor="reuse">
+                  <h3 class="plan-h">
+                    <span class="plan-h-no">{{ planSecNo('reuse') }}</span>可复用的封装
+                    <span class="plan-h-hint">{{ planReusable.length }} 项</span>
+                  </h3>
+                  <ul class="plan-reuse">
                     <li v-for="(item, idx) in planReusable" :key="idx">
                       <code>{{ item.symbol || item.file || item }}</code>
                       <span v-if="item.file && item.symbol" class="plan-reuse-file">{{ item.file }}</span>
                       <span v-if="item.usage" class="plan-reuse-use">{{ item.usage }}</span>
                     </li>
                   </ul>
-                </div>
+                </section>
 
-                <div class="plan-block">
-                  <div class="plan-block-title">逐步做法（{{ planSteps.length }} 步）</div>
-                  <table class="plan-steps">
-                    <tr v-for="step in planSteps" :key="step.no">
-                      <td class="plan-step-no">{{ step.no }}</td>
-                      <td :class="['plan-step-action', { reuse: step.action === 'reuse' }]">
-                        {{ step.action === 'reuse' ? '复用' : '手写' }}
-                      </td>
-                      <td class="plan-step-note">{{ step.note || step.target || '—' }}</td>
-                    </tr>
-                  </table>
-                </div>
+                <section id="plan-steps" class="plan-sec" data-plan-anchor="steps">
+                  <h3 class="plan-h">
+                    <span class="plan-h-no">{{ planSecNo('steps') }}</span>逐步做法
+                    <span class="plan-h-hint">{{ planSteps.length }} 步 · {{ planWriteMode }}</span>
+                  </h3>
+                  <ol class="plan-steplist">
+                    <li
+                      v-for="step in planSteps"
+                      :key="step.no"
+                      class="plan-steplist-item"
+                      :data-plan-anchor="'step-' + step.no"
+                    >
+                      <span class="plan-steplist-no">{{ String(step.no).padStart(2, '0') }}</span>
+                      <span class="plan-steplist-text">
+                        {{ step.note || step.target || '—' }}
+                        <span v-if="step.action === 'reuse'" class="plan-step-flag">复用</span>
+                      </span>
+                      <button
+                        v-if="notesOfStep(step.no)"
+                        type="button"
+                        class="plan-step-note-badge"
+                        :title="notesOfStep(step.no) + ' 条意见，跳到意见列表'"
+                        @click.prevent="scrollPlanTo('notes')"
+                      >{{ notesOfStep(step.no) }}</button>
+                    </li>
+                  </ol>
+                </section>
 
-                <div v-if="planRisks.length" class="plan-block">
-                  <div class="plan-block-title">风险</div>
-                  <ul class="plan-risks">
-                    <li v-for="(item, idx) in planRisks" :key="idx">{{ item }}</li>
+                <section v-if="planRisks.length" id="plan-risks" class="plan-sec" data-plan-anchor="risks">
+                  <h3 class="plan-h">
+                    <span class="plan-h-no">{{ planSecNo('risks') }}</span>风险
+                    <span class="plan-h-hint is-warn">{{ planRisks.length }} 条</span>
+                  </h3>
+                  <ul class="plan-risklist">
+                    <li v-for="(item, idx) in planRisks" :key="idx"><span class="plan-riskdot"></span>{{ item }}</li>
                   </ul>
-                </div>
+                </section>
 
-                <div v-if="planNeeds.length" class="plan-block">
-                  <div class="plan-block-title">还想改这些文件（这次没有权限，只记录）</div>
-                  <ul class="plan-risks">
+                <section v-if="planNeeds.length" id="plan-needs" class="plan-sec" data-plan-anchor="needs">
+                  <h3 class="plan-h">
+                    <span class="plan-h-no">{{ planSecNo('needs') }}</span>待补文件
+                    <span class="plan-h-hint">这次没有权限，只记录</span>
+                  </h3>
+                  <ul class="plan-risklist">
                     <li v-for="(item, idx) in planNeeds" :key="idx">
-                      {{ item.path }}<span v-if="item.reason"> — {{ item.reason }}</span>
+                      <span class="plan-riskdot is-plain"></span>{{ item.path }}<span v-if="item.reason" class="plan-need-reason"> — {{ item.reason }}</span>
                     </li>
                   </ul>
+                </section>
+
+                <section id="plan-notes" class="plan-sec" data-plan-anchor="notes">
+                  <h3 class="plan-h">
+                    <span class="plan-h-no">{{ planSecNo('notes') }}</span>你的意见
+                    <span class="plan-h-hint">{{ planNotes.length ? planNotes.length + ' 条' : '暂无' }}</span>
+                  </h3>
+                  <p v-if="!planNotes.length" class="plan-empty">
+                    选中正文任意一段，就地写意见。无意见可直接执行，意见随写入一起提交。
+                  </p>
+                  <ul v-else class="plan-notelist">
+                    <li v-for="note in planNotes" :key="note.id" :class="['plan-notecard', { 'is-flash': flashNoteId === note.id }]">
+                      <div class="plan-notecard-head">
+                        <span v-if="note.anchorLabel" class="plan-note-anchor">{{ note.anchorLabel }}</span>
+                        <button type="button" class="plan-note-del" @click="removeNote(note.id)">删除</button>
+                      </div>
+                      <div v-if="note.quote" class="plan-quote">{{ note.quote }}</div>
+                      <div class="plan-note-body">{{ note.comment }}</div>
+                    </li>
+                  </ul>
+                  <button type="button" class="plan-add-note" @click="openNote('', '')">补充整体意见</button>
+                </section>
+              </div>
+            </div>
+
+            <!-- 决策条固定在底部：读到第几步都能直接执行，不用滚到末尾找按钮。 -->
+            <div v-if="planData" class="plan-doc-foot">
+              <div v-if="planSuggestion && !planTargetChosen" class="plan-suggest-bar">
+                <span>规划建议改到 <code>{{ planSuggestion }}</code></span>
+                <el-button size="small" type="warning" plain @click="adoptSuggestion">采用这个路径</el-button>
+              </div>
+              <div class="plan-foot-row">
+                <div class="plan-foot-target">
+                  <span class="plan-foot-label">写入</span>
+                  <template v-if="!planTargetEditing">
+                    <code class="plan-foot-path">{{ planTarget || '—' }}</code>
+                    <span v-if="planTargetChosen" class="plan-path-badge">AI 选定</span>
+                    <button type="button" class="plan-foot-edit" title="改写入位置" @click="startEditPlanTarget">
+                      <el-icon><EditPen /></el-icon>
+                    </button>
+                  </template>
+                  <template v-else>
+                    <el-input
+                      v-model="planTargetDraft"
+                      class="plan-foot-input"
+                      size="small"
+                      placeholder="工作区相对路径，如 tests/login.spec.ts"
+                      @keyup.enter="savePlanTarget"
+                    />
+                    <el-button size="small" type="primary" @click="savePlanTarget">确定</el-button>
+                    <el-button size="small" text @click="cancelEditPlanTarget">取消</el-button>
+                  </template>
+                </div>
+                <div class="plan-foot-actions">
+                  <span class="plan-foot-hint">仅写目标文件 · 校验失败保留文件</span>
+                  <el-button size="small" :loading="planRunning" :disabled="generating" @click="runPlan(true)">重新规划</el-button>
+                  <el-button size="small" type="primary" :loading="writing" :disabled="!canExecute" @click="executePlan(false)">按此执行</el-button>
                 </div>
               </div>
-
-              <aside class="plan-sheet-side">
-                <div class="plan-side-scroll">
-                  <div class="plan-block">
-                    <div class="plan-block-title">
-                      写入位置
-                      <span v-if="planTargetChosen" class="plan-path-badge">AI 按项目约定选的</span>
-                    </div>
-                    <div v-if="!planTargetEditing" class="plan-target">
-                      <code>{{ planTarget || '—' }}</code>
-                      <el-button
-                        class="plan-target-edit-btn"
-                        text
-                        size="small"
-                        :icon="EditPen"
-                        title="改写入位置"
-                        @click="startEditPlanTarget"
-                      />
-                    </div>
-                    <div v-else class="plan-target-edit">
-                      <el-input
-                        v-model="planTargetDraft"
-                        size="small"
-                        placeholder="工作区相对路径，如 tests/login.spec.ts"
-                        @keyup.enter="savePlanTarget"
-                      />
-                      <div class="plan-target-edit-btns">
-                        <el-button size="small" type="primary" @click="savePlanTarget">确定</el-button>
-                        <el-button size="small" text @click="cancelEditPlanTarget">取消</el-button>
-                      </div>
-                    </div>
-                    <div v-if="planTargetError" class="plan-target-error">{{ planTargetError }}</div>
-                    <div v-if="planResult.reason" class="plan-suggest-reason">{{ planResult.reason }}</div>
-                    <div v-if="planTargetChanged" class="plan-target-changed">
-                      位置已手动修改 · 相对 import 可能失效，建议重新规划
-                    </div>
-                    <div v-if="planSuggestion && !planTargetChosen" class="plan-suggest">
-                      <div class="plan-suggest-title">
-                        规划建议改到 <code>{{ planSuggestion }}</code>
-                      </div>
-                      <el-button size="small" type="warning" plain @click="adoptSuggestion">采用这个路径</el-button>
-                    </div>
-                    <div class="field-hint">
-                      本次唯一写入点 · 需「按此执行」授权
-                    </div>
-                  </div>
-
-                  <div class="plan-notes">
-                    <div class="plan-block-title">
-                      你的意见
-                      <span v-if="planNotes.length" class="plan-notes-count">{{ planNotes.length }} 条</span>
-                    </div>
-                    <div v-if="!planNotes.length" class="field-hint">
-                      无意见可直接执行；意见随写入提交
-                    </div>
-                    <div v-for="note in planNotes" :key="note.id" class="plan-note">
-                      <div v-if="note.quote" class="plan-quote">「{{ note.quote }}」</div>
-                      <div class="plan-note-body">{{ note.comment }}</div>
-                      <button type="button" class="plan-note-del" @click="removeNote(note.id)">删除</button>
-                    </div>
-                    <el-button size="small" text @click="openNote('')">补充整体意见</el-button>
-                  </div>
-                </div>
-
-                <div class="plan-side-foot">
-                  <div class="plan-actions">
-                    <el-button size="small" :loading="planRunning" :disabled="generating" @click="runPlan(true)">
-                      重新规划
-                    </el-button>
-                    <el-button
-                      size="small"
-                      type="primary"
-                      :loading="writing"
-                      :disabled="!canExecute"
-                      @click="executePlan(false)"
-                    >
-                      按此执行
-                    </el-button>
-                  </div>
-                  <div v-if="!canExecute && executeBlockReason" class="gen-block-reason">
-                    <span class="gen-block-dot"></span>{{ executeBlockReason }}
-                  </div>
-                  <div v-else-if="!writing" class="field-hint">
-                    仅写目标文件；校验失败保留文件并报错
-                  </div>
-                </div>
-              </aside>
+              <div v-if="planTargetError" class="plan-target-error">{{ planTargetError }}</div>
+              <div v-if="planTargetChanged" class="plan-target-changed">位置已手动修改 · 相对 import 可能失效，建议重新规划</div>
+              <div v-if="planResult.reason" class="plan-foot-reason">{{ planResult.reason }}</div>
+              <div v-if="!canExecute && executeBlockReason" class="gen-block-reason">
+                <span class="gen-block-dot"></span>{{ executeBlockReason }}
+              </div>
             </div>
           </section>
         </div>
@@ -1994,34 +2092,119 @@
     </div>
     </div>
 
+      <!-- 选文意见：气泡贴在被选中的那一段下方，不再弹居中对话框——
+           对话框会把正文整个盖住，写完也看不出这条意见挂在哪。 -->
       <Teleport to="body">
-        <button
-          v-if="selTip.visible"
-          type="button"
-          class="plan-sel-tip"
-          :style="{ left: selTip.x + 'px', top: selTip.y + 'px' }"
-          @mousedown.prevent
-          @click="openNote(selTip.text)"
+        <div
+          v-if="noteComposer.open"
+          :class="['note-pop', { 'is-above': noteComposer.above }]"
+          :style="{ left: noteComposer.x + 'px', top: noteComposer.y + 'px' }"
+          @mousedown.stop
         >
-          就这段写意见
-        </button>
+          <div class="note-pop-head">
+            <span class="note-pop-title">{{ noteComposer.anchorLabel ? noteComposer.anchorLabel + ' · 意见' : '对任务书的意见' }}</span>
+            <button type="button" class="note-pop-close" title="关闭（Esc）" @click="closeNoteComposer">✕</button>
+          </div>
+          <div v-if="noteComposer.quote" class="note-pop-quote">{{ noteComposer.quote }}</div>
+          <textarea
+            ref="noteInput"
+            v-model="noteComposer.comment"
+            class="note-pop-input"
+            maxlength="800"
+            placeholder="填写修改要求或补充说明"
+          ></textarea>
+          <div class="note-pop-foot">
+            <span class="note-pop-count">{{ noteComposer.comment.length }}/800</span>
+            <el-button size="small" text @click="closeNoteComposer">取消</el-button>
+            <el-button size="small" type="primary" @click="saveNote">添加意见</el-button>
+          </div>
+        </div>
       </Teleport>
 
-      <el-dialog v-model="noteDialog.visible" title="对任务书的意见" width="520px" append-to-body>
-        <div v-if="noteDialog.quote" class="plan-quote">「{{ noteDialog.quote }}」</div>
-        <el-input
-          v-model="noteDialog.comment"
-          type="textarea"
-          :rows="4"
-          maxlength="800"
-          show-word-limit
-          placeholder="如：必须用 getByRole，勿用 getByText"
-        />
-        <template #footer>
-          <el-button @click="noteDialog.visible = false">取消</el-button>
-          <el-button type="primary" @click="saveNote">添加意见</el-button>
-        </template>
-      </el-dialog>
+      <!-- 执行进度：后端一直在报阶段，这里把它摊开成「第几步、在做什么」。
+           关掉窗口不取消生成，进度会继续显示在面板底部。 -->
+      <Teleport to="body">
+        <div v-if="emitModal.open" class="emit-modal-mask">
+          <section class="emit-modal" role="dialog" aria-modal="true" aria-labelledby="emit-modal-title">
+            <header class="emit-modal-head">
+              <span id="emit-modal-title" class="emit-modal-title">{{ emitModalTitle }}</span>
+              <span class="emit-modal-meta">{{ emitStageLabel }}<template v-if="emitModalElapsed"> · 已用 {{ emitModalElapsed }}</template></span>
+              <button type="button" class="emit-modal-close" title="关闭（生成会继续）" @click="dismissEmitModal">✕</button>
+            </header>
+            <div class="emit-modal-sub">
+              <template v-if="planTarget">
+                写入 <code>{{ planTarget }}</code><span class="emit-modal-sep">·</span>{{ emitModalNote }}
+              </template>
+              <template v-else>正在准备写入目标文件</template>
+            </div>
+
+            <div class="emit-modal-body">
+              <div v-if="emitModalFailed" class="emit-error">
+                <div class="emit-error-title">{{ emitModalFailed.message }}</div>
+                <ul v-if="emitModalFailed.details && emitModalFailed.details.length" class="emit-error-list">
+                  <li v-for="(item, idx) in emitModalFailed.details" :key="idx">{{ detailText(item) }}</li>
+                </ul>
+              </div>
+
+              <div v-if="emitModalResult" class="emit-result">
+                <div class="emit-result-title">{{ emitResultTitle }}</div>
+                <div class="emit-result-text">{{ emitResultText }}</div>
+              </div>
+
+              <div v-if="emitModalResult" class="emit-next">
+                <div class="emit-next-head">
+                  <span class="emit-next-title">下一步 · 执行测试</span>
+                  <span class="emit-next-meta">{{ emitNextMeta }}</span>
+                </div>
+                <div class="emit-next-text">{{ emitNextText }}</div>
+              </div>
+
+              <ol class="emit-flow">
+                <li
+                  v-for="(stage, idx) in emitStages"
+                  :key="stage.id"
+                  :class="['emit-stage', 'is-' + emitStageState(idx)]"
+                >
+                  <span class="emit-stage-dot">
+                    <template v-if="emitStageState(idx) === 'done'">✓</template>
+                    <template v-else-if="emitStageState(idx) === 'failed'">✕</template>
+                    <i v-else-if="emitStageState(idx) === 'running'" class="emit-spin"></i>
+                  </span>
+                  <div class="emit-stage-main">
+                    <div class="emit-stage-title">{{ stage.title }}</div>
+                    <div class="emit-stage-log">{{ emitStageLine(idx) }}</div>
+                    <div v-if="emitStageState(idx) === 'running'" class="emit-stage-rail"><i></i></div>
+                  </div>
+                  <span v-if="emitStageState(idx) === 'running'" class="emit-stage-live" :title="'本阶段已用 ' + emitStageElapsed">{{ emitStageElapsed }}</span>
+                </li>
+              </ol>
+            </div>
+
+            <footer class="emit-modal-foot">
+              <template v-if="emitModalConfirm">
+                <span class="emit-foot-warn">停止后这一轮会中断，已经写出的文件保留</span>
+                <el-button text @click="emitModalConfirm = false">继续等待</el-button>
+                <el-button type="danger" :loading="emitCancelling" @click="doCancelEmit">停止</el-button>
+              </template>
+              <template v-else-if="emitModalRunning">
+                <el-button text type="danger" @click="emitModalConfirm = true">停止生成</el-button>
+                <span class="emit-foot-hint">关掉窗口不影响生成，进度会留在面板底部</span>
+              </template>
+              <template v-else-if="emitModalFailed">
+                <el-button @click="dismissEmitModal">关闭</el-button>
+                <span class="emit-foot-hint">已写入的文件会保留，上一版快照可还原</span>
+                <el-button type="primary" :loading="writing" @click="retryEmit">重新生成</el-button>
+              </template>
+              <template v-else>
+                <el-button @click="dismissEmitModal">关闭</el-button>
+                <span class="emit-foot-hint">结果已写回面板</span>
+                <el-button @click="showEmitResult">查看结果</el-button>
+                <el-button type="primary" @click="goTestRun">去执行测试</el-button>
+              </template>
+            </footer>
+          </section>
+        </div>
+      </Teleport>
 
       <!-- 定位详情：这一步采用的定位 + 它此刻在当前页面上的状态。
            打开时后端会把匹配元素框出来（只给数字不画框，等于没验证），关掉即撤。 -->
@@ -2098,7 +2281,7 @@
            断言和点击没有「可替换的值」，硬塞进来只会让表单变长。 -->
       <el-dialog
         v-model="groupDialog.visible"
-        title="封装为动作"
+        :title="groupDialog.mode === 'teardown' ? '设为后置处理' : '封装为动作'"
         width="min(520px, calc(100vw - 24px))"
         :close-on-click-modal="false"
         append-to-body
@@ -2106,8 +2289,9 @@
       >
         <div class="gd-body">
           <div class="gd-field">
-            <span class="gd-label">动作名</span>
-            <el-input v-model="groupDialog.name" size="small" maxlength="40" placeholder="如：登录、新增记录" />
+            <span class="gd-label">{{ groupDialog.mode === 'teardown' ? '后置名' : '动作名' }}</span>
+            <el-input v-model="groupDialog.name" size="small" maxlength="40"
+                      :placeholder="groupDialog.mode === 'teardown' ? '如：收尾、退出登录' : '如：登录、新增记录'" />
           </div>
           <div class="gd-field">
             <span class="gd-label">说明</span>
@@ -2133,6 +2317,7 @@
           </div>
           <div class="gd-preview">
             包含 {{ groupDialog.steps.length }} 步 · {{ groupDialog.params.filter(p => p.on).length }} 个参数
+            <template v-if="groupDialog.mode === 'teardown'"> · 从流程里搬走，收尾时执行</template>
             <template v-if="groupDialog.noWorkspace"> · 没选工作区，动作只在本次录制有效</template>
           </div>
         </div>
@@ -2144,7 +2329,7 @@
             :loading="groupDialog.busy"
             :disabled="!groupDialog.name.trim()"
             @click="submitGroup"
-          >封装并替换这 {{ groupDialog.steps.length }} 步</el-button>
+          >{{ groupDialog.mode === 'teardown' ? '设为后置并使用这' : '封装并替换这' }} {{ groupDialog.steps.length }} 步</el-button>
         </template>
       </el-dialog>
 
@@ -2268,13 +2453,13 @@ const READY_LABELS = { load: '整页加载完', domcontentloaded: 'HTML 解析�
 const READY_TIMEOUT_DEFAULT = 15
 const STEP_LABELS = {
   goto: '打开页面', reload: '刷新', click: '点击', fill: '输入', select: '选择', press: '按键',
-  dialog: '弹窗', new_page: '新标签页', call: '动作',
+  dialog: '弹窗', new_page: '新标签页', call: '动作', close: '关闭浏览器',
   assert: '断言', wait: '等待', sleep: '固定等待', slider: '滑块验证', captcha: '验证码识别',
   upload: '导入文件', download: '校验下载'
 }
 // 动作调用用紫色系（kind-action 在样式里单独定义）：它不是一种操作，
 // 而是「一串操作的入口」，跟任何一种原子步骤共色都会让人误读。
-const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger', call: 'action', slider: 'warning', captcha: 'warning', upload: 'primary', download: 'success' }
+const STEP_TONES = { goto: 'info', reload: 'warning', click: 'primary', fill: 'primary', select: 'primary', press: 'primary', dialog: 'warning', new_page: 'info', assert: 'success', wait: 'warning', sleep: 'danger', call: 'action', slider: 'warning', captcha: 'warning', upload: 'primary', download: 'success', close: 'danger' }
 const STATE_LABELS = {
   idle: '未开始', starting: '启动中', recording: '录制中', stopping: '停止中', stopped: '已停止',
   cancelled: '已取消', failed: '失败', idle_timeout: '超时已停止', closed: '浏览器已关闭'
@@ -2489,6 +2674,7 @@ let stopDialogTimer = null
 const closingBrowser = ref(false)
 // 插入「刷新页面」用的是命令通道（后端要真的刷一次浏览器），和断言草稿分开计数。
 const addingReload = ref(false)
+const addingClose = ref(false)
 const draft = ref(null)
 // 导入文件用的原生 file input：只负责唤起系统选文件，选完立刻把字节传给后端。
 const uploadInput = ref(null)
@@ -2512,9 +2698,89 @@ const planNotes = ref([])        // 用户选中任务书片段写的意见
 // 塞在里面只能来回滚。所以正文搬到浮层：面板里留一行状态，宽屏里读、右侧拍板。
 const planSheetOpen = ref(false)
 const planBody = ref(null)
-const noteDialog = reactive({ visible: false, quote: '', comment: '' })
-const selTip = reactive({ visible: false, x: 0, y: 0, text: '' })
+const noteInput = ref(null)
+// 选文意见：气泡贴在被选中的那一段下方。anchorId 记「这条意见挂在哪」，
+// 用于在步骤行尾显示编号、以及在意见卡上标出「第 3 步」。
+const noteComposer = reactive({
+  open: false, x: 0, y: 0, above: false,
+  quote: '', comment: '', anchorId: '', anchorLabel: ''
+})
+const flashNoteId = ref(0)
+let flashNoteTimer = 0
 let noteSeq = 0
+// 目录高亮：滚动时算一次，不监听每个 section。
+const planActiveSection = ref('style')
+let planScrollLockUntil = 0
+// 写脚本的方式只分三种，直接由复用条数算，不额外让模型说明。
+const planWriteMode = computed(() => {
+  const total = planSteps.value.length
+  const reuse = planSteps.value.filter(s => s.action === 'reuse').length
+  if (!total) return '—'
+  if (!reuse) return '全部手写'
+  return reuse === total ? '全部复用' : `复用 ${reuse} 步`
+})
+// 章节是动态的：没有复用 / 没有风险时不占编号，目录和正文用的是同一份。
+const planSections = computed(() => {
+  const list = [{ id: 'style', title: '项目风格', count: null }]
+  if (planReusable.value.length) list.push({ id: 'reuse', title: '可复用的封装', count: planReusable.value.length })
+  list.push({ id: 'steps', title: '逐步做法', count: planSteps.value.length })
+  if (planRisks.value.length) list.push({ id: 'risks', title: '风险', count: planRisks.value.length, tone: 'warn' })
+  if (planNeeds.value.length) list.push({ id: 'needs', title: '待补文件', count: planNeeds.value.length })
+  list.push({ id: 'notes', title: '你的意见', count: planNotes.value.length })
+  return list.map((item, index) => ({ ...item, no: String(index + 1).padStart(2, '0') }))
+})
+function planSecNo(id) {
+  const found = planSections.value.find(item => item.id === id)
+  return found ? found.no : ''
+}
+function planSectionOffset(host, id) {
+  const el = host.querySelector('#plan-' + id)
+  if (!el) return null
+  return el.getBoundingClientRect().top - host.getBoundingClientRect().top + host.scrollTop
+}
+function scrollPlanTo(id) {
+  const host = planBody.value
+  if (!host) return
+  const top = planSectionOffset(host, id)
+  if (top === null) return
+  // 点目录是我们自己在滚：这段时间别让 onPlanScroll 抢走高亮。
+  // 短文档滚不到目标位置时会直接到底，高亮就会跳去最后一节，看着像点错了。
+  planScrollLockUntil = Date.now() + 600
+  host.scrollTo({ top: Math.max(0, top - 6), behavior: 'smooth' })
+  planActiveSection.value = id
+}
+function onPlanScroll() {
+  const host = planBody.value
+  if (!host) return
+  if (Date.now() < planScrollLockUntil) return
+  const sections = planSections.value
+  if (!sections.length) return
+  // 滚到底就认定最后一节：最后一段往往顶不到视口上沿，否则高亮会一直停在前一节。
+  if (host.scrollTop + host.clientHeight >= host.scrollHeight - 4) {
+    planActiveSection.value = sections[sections.length - 1].id
+    return
+  }
+  // 40 是给标题上方的留白：标题刚露头就该算「读到这一节了」。
+  const line = host.scrollTop + 40
+  let current = sections[0].id
+  for (const section of sections) {
+    const top = planSectionOffset(host, section.id)
+    if (top !== null && top <= line) current = section.id
+  }
+  planActiveSection.value = current
+}
+function notesOfStep(no) {
+  return planNotes.value.filter(note => note.anchorId === 'step-' + no).length
+}
+function anchorLabelOf(anchorId) {
+  if (!anchorId) return ''
+  if (anchorId.indexOf('step-') === 0) return '第 ' + anchorId.slice(5) + ' 步'
+  const map = {
+    style: '项目风格', reuse: '可复用的封装', steps: '逐步做法',
+    risks: '风险', needs: '待补文件', notes: '你的意见'
+  }
+  return map[anchorId] || ''
+}
 // 调试回放：另开一个**独立窗口**看，录制页和被测 iframe 都不动。
 // 之前用 router.push 在同一个标签页跳，嵌入模式的被测页会被直接卸载，
 // 退出后只能回到一个没有 iframe 的录制页，看起来像「莫名多了个页面」。
@@ -2768,6 +3034,204 @@ const shownResult = computed(() => {
   if (emit.value.status === 'done' && emit.value.result
       && emit.value.result.generation_id !== local.generation_id) return emit.value.result
   return local
+})
+
+// ---- 执行进度弹窗 ----
+// 后端按 11 个阶段推进（见 progress.py），这里合并成 6 个用户能理解的步骤：
+// 太细的（detect / snapshot）没人关心，太粗的（整个写入）又看不出在干什么。
+// 每步下面那行小字：后端这个阶段带了 detail 就用 detail，没带就用「这一步实际在做什么」兜底。
+const EMIT_STAGES = [
+  { id: 'prepare', title: '检查录制步骤与定位', stages: ['prepare'] },
+  { id: 'scan', title: '识别项目框架与工具链', stages: ['detect', 'snapshot'] },
+  { id: 'writing', title: 'AI 写脚本', stages: ['writing'] },
+  { id: 'validate', title: '校验脚本', stages: ['check', 'validate', 'repair'] },
+  { id: 'run', title: '真实执行一遍', stages: ['run', 'run_repair'] },
+  { id: 'record', title: '登记生成记录', stages: ['record'] }
+]
+// 模板里用同名数组，避免出现「定义了大写常量、模板引用小写变量」这种静默渲染失败。
+// Robot Framework 这条链路生成时不真跑（录制侧只有 Playwright），「真实执行一遍」
+// 永远停在未开始；留着这一步只会让人以为哪里漏了。真跑交给「执行测试」页。
+const emitStages = computed(() => {
+  const framework = writing.value
+    ? config.framework
+    : (shownResult.value?.framework || config.framework)
+  return framework === 'robot-selenium'
+    ? EMIT_STAGES.filter(item => item.id !== 'run')
+    : EMIT_STAGES
+})
+const emitModal = reactive({ open: false })
+const emitCancelling = ref(false)
+// 停止是大动作：确认放在弹窗里，别叠一层系统对话框（它会被弹窗盖住）。
+const emitModalConfirm = ref(false)
+// 每个阶段最后一句 detail：阶段走完后它还要留在界面上，不然只剩一句干巴巴的标题。
+const emitStageLogs = reactive({})
+
+function fileBaseName(path) {
+  const text = String(path || '')
+  const cut = text.lastIndexOf('/')
+  return cut >= 0 ? text.slice(cut + 1) : text
+}
+function stageGroupOf(stage) {
+  const found = EMIT_STAGES.find(item => item.stages.indexOf(stage) >= 0)
+  return found ? found.id : ''
+}
+function emitStageFallback(id) {
+  if (id === 'prepare') {
+    const pending = blockers.value.length
+    return `${planSteps.value.length} 步 · ${pending ? pending + ' 步待确认' : '无待确认'}`
+  }
+  if (id === 'scan') return `${frameworkName(config.framework)} · 已记录快照`
+  if (id === 'writing') return `写入 ${fileBaseName(planTarget.value) || '目标文件'}`
+  if (id === 'validate') return '语法校验 + 静态检查'
+  if (id === 'run') return `${planSteps.value.length} 步 · 跑通才算完成`
+  if (id === 'record') return '记录路径、校验结果与改动文件'
+  return ''
+}
+const emitGroupIndex = computed(() => {
+  if (emit.value.status === 'done') return emitStages.value.length
+  const stage = emit.value.stage
+  if (!stage) return -1
+  return emitStages.value.findIndex(item => item.stages.indexOf(stage) >= 0)
+})
+const emitModalRunning = computed(() => emitModal.open && writing.value)
+const emitModalFailed = computed(() => (emitModal.open && !writing.value && shownError.value) || null)
+const emitModalResult = computed(() => {
+  if (!emitModal.open || writing.value || shownError.value) return null
+  return shownResult.value
+})
+const emitModalTitle = computed(() => {
+  if (emitModalRunning.value) return '正在生成脚本'
+  if (emitModalFailed.value) return '生成失败'
+  if (emitModalResult.value) return '已生成脚本'
+  return '生成脚本'
+})
+const emitStageLabel = computed(() => {
+  if (emit.value.status === 'done') return `${emitStages.value.length} 个阶段全部完成`
+  const index = emitGroupIndex.value
+  if (index < 0) return '正在准备'
+  return `第 ${Math.min(index + 1, emitStages.value.length)} / ${emitStages.value.length} 阶段`
+})
+const emitModalElapsed = computed(() => (emitModal.open ? elapsedText.value : ''))
+const emitModalNote = computed(() => {
+  if (emitModalRunning.value) return '只写这一个文件'
+  if (emitModalFailed.value) return '文件保留'
+  return '结果已写回面板'
+})
+const emitStageElapsed = computed(() => {
+  const at = emit.value.stage_at
+  if (!at) return ''
+  const seconds = Math.max(0, Math.round(nowTick.value - at))
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`
+})
+const emitResultTitle = computed(() => {
+  const result = emitModalResult.value
+  if (!result) return ''
+  if (result.run && result.run.ran) {
+    return result.run.ok ? '校验通过 · 真实执行通过' : '校验通过 · 用例未通过'
+  }
+  return result.validated ? '校验通过 · 未真实执行' : '已写入文件'
+})
+const emitResultText = computed(() => {
+  const result = emitModalResult.value
+  if (!result) return ''
+  const parts = []
+  // 标题已经说了「校验通过 / 真实执行通过」，这里只补细节，不重复那句结论。
+  if (result.run && result.run.ran) {
+    parts.push(result.run.ok ? `${result.run.total || 1} 个用例通过` : '用例未通过')
+    if (result.run.ok && result.run.duration_ms) parts.push(`${(result.run.duration_ms / 1000).toFixed(1)}s`)
+  } else {
+    parts.push(result.validated ? '文件已通过静态校验' : '未做校验')
+  }
+  if (result.degraded && result.degraded.length) parts.push(`${result.degraded.length} 步降级定位`)
+  if (result.outside && result.outside.length) parts.push(`另有 ${result.outside.length} 个文件被改动`)
+  return parts.join(' · ')
+})
+// 生成完成后唯一的下一步：去执行测试页真跑一遍。
+// 不在这里直接开跑——RF 用不了录制侧的登录态，先让人看一眼脚本开头有没有登录。
+const emitNextMeta = computed(() => {
+  const result = emitModalResult.value
+  if (!result) return ''
+  const name = fileBaseName(result.path)
+  const count = (result.test_cases || []).length
+  return count ? `${name} · ${count} 条用例` : name
+})
+const emitNextText = computed(() => {
+  const result = emitModalResult.value
+  if (!result) return ''
+  if (result.framework === 'robot-selenium') {
+    return '使用项目 venv 实际运行测试，测试产物将保存至 AutoCase 目录。'
+  }
+  return '在目标项目中实际运行测试，失败用例的截图与步骤耗时将保存至 AutoCase 目录。'
+})
+function goTestRun() {
+  // 弹窗和面板结果卡共用这一个入口：弹窗关掉之后 result 仍然在 panel 上。
+  const result = emitModalResult.value || shownResult.value
+  if (!result || !result.path) return
+  const query = {
+    workspace: result.workspace || config.workspace.trim(),
+    file: result.path,
+    from: 'generate'
+  }
+  emitModal.open = false
+  router.push({ path: '/recording/runs', query })
+}
+function emitStageState(index) {
+  if (emit.value.status === 'done' || emitModalResult.value) return 'done'
+  const current = emitGroupIndex.value
+  if (emitModalFailed.value) {
+    if (index === current) return 'failed'
+    return index < current ? 'done' : 'pending'
+  }
+  if (index < current) return 'done'
+  if (index === current) return 'running'
+  return 'pending'
+}
+function emitStageLine(index) {
+  const stage = emitStages.value[index]
+  if (!stage) return ''
+  const currentId = stageGroupOf(emit.value.stage)
+  if (stage.id === currentId && emit.value.detail) return emit.value.detail
+  if (emitStageLogs[stage.id]) return emitStageLogs[stage.id]
+  return emitStageFallback(stage.id)
+}
+function openEmitModal() {
+  Object.keys(emitStageLogs).forEach(key => { delete emitStageLogs[key] })
+  emitModal.open = true
+}
+function dismissEmitModal() {
+  emitModal.open = false
+  emitModalConfirm.value = false
+  if (writing.value) ElMessage.info('生成继续，进度会留在面板底部')
+}
+function showEmitResult() {
+  emitModal.open = false
+  nextTick(() => {
+    const card = document.querySelector('.gen-result')
+    if (card && card.scrollIntoView) card.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  })
+}
+async function retryEmit() {
+  if (writing.value) return
+  emitModal.open = true
+  await executePlan(true)
+}
+// detail 是这一阶段「正在做什么」的唯一实时来源：阶段切换后它就不再更新，
+// 所以每来一条就按阶段存下来，走完的步骤才不会只剩标题。
+watch(() => emit.value.detail, (detail) => {
+  if (!detail) return
+  const id = stageGroupOf(emit.value.stage)
+  if (id) emitStageLogs[id] = detail
+})
+// 新一轮开跑：上一轮残留的阶段说明必须清掉，否则会出现「已经写完了还写着读项目」。
+watch(() => emit.value.status, (status, prev) => {
+  if (status === 'running' && prev !== 'running') {
+    Object.keys(emitStageLogs).forEach(key => { delete emitStageLogs[key] })
+  }
+})
+// 刷新时如果生成还在跑，主窗口直接把进度摊开；面板窗口不放，
+// 它本身就是录制时贴边的小窗，再盖一层弹窗什么都看不见了。
+watch(writing, (running) => {
+  if (running && !emitModal.open && !compactMode.value) openEmitModal()
 })
 
 // ---- 任务书（plan）----
@@ -4006,17 +4470,22 @@ async function togglePause() {
 // 多选只认连续区间：中间跳过一步再合体，展开后的顺序就不是用户看到的那个顺序了。
 const selectMode = ref(false)
 const pickedNos = ref([])
-const groupDialog = reactive({ visible: false, busy: false, name: '', desc: '', params: [], steps: [], noWorkspace: false })
-const argsDialog = reactive({ visible: false, busy: false, no: 0, name: '', rows: [] })
+const groupDialog = reactive({ visible: false, busy: false, name: '', desc: '', params: [], steps: [], noWorkspace: false, mode: 'action' })
+const argsDialog = reactive({ visible: false, busy: false, kind: 'call', no: 0, name: '', rows: [] })
 const actionLib = reactive({ open: false })
 
 const actions = computed(() => session.value?.actions || [])
+// 后置处理：null 表示没设。它不在 steps 里，单独渲染在列表末尾。
+const teardown = computed(() => session.value?.teardown || null)
 const pickedSorted = computed(() => [...pickedNos.value].sort((a, b) => a - b))
 const pickContiguous = computed(() => {
   const nos = pickedSorted.value
   return nos.length < 2 || nos[nos.length - 1] - nos[0] + 1 === nos.length
 })
 const canGroup = computed(() => pickedSorted.value.length >= 2 && pickContiguous.value)
+// 后置可以只选一步：「退出登录」这种收尾常常就一个点击。
+// 已经有后置时按钮置灰，要换就解除后重设——两段后置在生成侧没有表达方式。
+const canTeardown = computed(() => pickedSorted.value.length >= 1 && pickContiguous.value && !teardown.value)
 const pickHint = computed(() => {
   if (!pickedNos.value.length) return '点步骤行选中，至少两步'
   if (!pickContiguous.value) return '选中的步骤中间断开了，只能封装连续的一段'
@@ -4046,6 +4515,19 @@ function onRowClick(step) {
 }
 
 function onSelectKeydown(event) {
+  if (event.key === 'Escape' && emitModal.open) {
+    dismissEmitModal()
+    return
+  }
+  if (event.key === 'Escape' && picking.value) {
+    // 拾取是模态：先退拾取，再轮到抽屉 / 封装选择。
+    // 被测页面里也有一份同样的监听（recorder.js），但那只在焦点落在浏览器窗口时生效；
+    // 用户点完工具栏那颗按钮，焦点还在面板/主窗口上，所以这里必须也有一条。
+    // 两边都只是把同一个后端开关关掉，不各自维护状态。
+    if (groupDialog.visible || argsDialog.visible) return
+    togglePick(false)
+    return
+  }
   if (event.key === 'Escape' && configOpen.value) {
     // 抽屉是最外那层浮层，Esc 先收它；弹窗开着时让弹窗自己处理。
     if (groupDialog.visible || argsDialog.visible) return
@@ -4099,8 +4581,9 @@ function defaultActionName(picked) {
   return alias.replace(/(按钮|按键|链接|button|btn|link)$/i, '').trim()
 }
 
-function openGroupDialog() {
-  if (!canGroup.value) return
+function openGroupDialog(mode = 'action') {
+  const ready = mode === 'teardown' ? canTeardown.value : canGroup.value
+  if (!ready) return
   const picked = steps.value.filter((step) => pickedSorted.value.includes(step.no))
   if (picked.some((step) => step.type === 'call')) {
     ElMessage.warning('这段里有动作调用，不能把调用再封装一次；先解封它')
@@ -4120,7 +4603,8 @@ function openGroupDialog() {
       value: step.value
     })
   }
-  groupDialog.name = defaultActionName(picked)
+  groupDialog.mode = mode
+  groupDialog.name = defaultActionName(picked) || (mode === 'teardown' ? '收尾' : '')
   groupDialog.desc = ''
   groupDialog.params = params
   groupDialog.steps = picked.map((step) => ({ no: step.no, type: step.type }))
@@ -4138,17 +4622,17 @@ async function submitGroup() {
   }
   groupDialog.busy = true
   try {
-    const { data } = await api.groupRecordingAction(
-      groupDialog.steps.map((step) => step.no),
-      groupDialog.name.trim(),
-      groupDialog.desc.trim(),
-      params
-    )
+    const nos = groupDialog.steps.map((step) => step.no)
+    const { data } = groupDialog.mode === 'teardown'
+      ? await api.setRecordingTeardown(nos, groupDialog.name.trim(), groupDialog.desc.trim(), params)
+      : await api.groupRecordingAction(nos, groupDialog.name.trim(), groupDialog.desc.trim(), params)
     applySession(data)
     groupDialog.visible = false
     selectMode.value = false
     pickedNos.value = []
-    ElMessage.success(`已封装为「${groupDialog.name.trim()}」`)
+    ElMessage.success(groupDialog.mode === 'teardown'
+      ? `已设为后置处理「${groupDialog.name.trim()}」`
+      : `已封装为「${groupDialog.name.trim()}」`)
   } catch (error) {
     ElMessage.error(errorText(error))
   } finally {
@@ -4246,6 +4730,7 @@ async function ungroupStep(step) {
 function openArgsDialog(step) {
   const action = callAction(step)
   if (!action) return
+  argsDialog.kind = 'call'
   argsDialog.no = step.no
   argsDialog.name = action.name
   argsDialog.rows = action.params.map((param) => ({
@@ -4255,12 +4740,27 @@ function openArgsDialog(step) {
   argsDialog.visible = true
 }
 
+// 后置处理只有一个（不像动作调用有多个调用点），所以不需要 no。
+function openTeardownArgs() {
+  if (!teardown.value) return
+  argsDialog.kind = 'teardown'
+  argsDialog.no = 0
+  argsDialog.name = teardown.value.name
+  argsDialog.rows = (teardown.value.params || []).map((param) => ({
+    key: param.key,
+    value: (teardown.value.args || {})[param.key] ?? ''
+  }))
+  argsDialog.visible = true
+}
+
 async function submitArgs() {
   const args = {}
   for (const row of argsDialog.rows) args[row.key] = row.value
   argsDialog.busy = true
   try {
-    const { data } = await api.updateRecordingCallArgs(argsDialog.no, args)
+    const { data } = argsDialog.kind === 'teardown'
+      ? await api.updateRecordingTeardownArgs(args)
+      : await api.updateRecordingCallArgs(argsDialog.no, args)
     applySession(data)
     argsDialog.visible = false
   } catch (error) {
@@ -4270,9 +4770,39 @@ async function submitArgs() {
   }
 }
 
+async function clearTeardown() {
+  if (!teardown.value) return
+  try {
+    const { data } = await api.clearRecordingTeardown()
+    applySession(data)
+    // 子步骤被还原到列表末尾，滚过去让用户看到它去哪了。
+    const last = steps.value.length ? steps.value[steps.value.length - 1].no : null
+    if (last) revealStep(last)
+    ElMessage.success('已解除后置处理，步骤已还原到流程末尾')
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
 async function removeStep(no) {
   try {
     const { data } = await api.deleteRecordingStep(no)
+    applySession(data)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  }
+}
+
+// 点击的「执行前等待」：空值表示关掉，数字表示先等这么多秒再点。
+// 存进 IR 的 settle 字段，生成脚本时翻译成 Wait Until Element Is Visible（等这一步自己的元素）。
+function toggleSettle(step) {
+  setStepSettle(step, step.settle ? null : 5)
+}
+
+async function setStepSettle(step, timeout) {
+  const settle = timeout ? { timeout: Number(timeout) } : null
+  try {
+    const { data } = await api.updateRecordingStep(step.no, { settle })
     applySession(data)
   } catch (error) {
     ElMessage.error(errorText(error))
@@ -4690,6 +5220,8 @@ function onPanelTool(command) {
     actionLib.open = true
     return
   }
+  // 「插入关闭浏览器步骤」和「关闭浏览器」是两件事：前者只加一条步骤声明。
+  if (command === 'close-step') return insertClose(null)
   if (command === 'close') return closeBrowser()
 }
 
@@ -4716,6 +5248,7 @@ async function expandPanel() {
 // 行内「+」的四个入口：刷新走独立通道，其余三种打开草稿卡。
 function onInsertCommand(kind, afterNo) {
   if (kind === 'reload') return insertReload(afterNo)
+  if (kind === 'close') return insertClose(afterNo)
   openDraft(kind, afterNo)
 }
 
@@ -4742,6 +5275,22 @@ async function insertReload(afterNo = null) {
     ElMessage.error(errorText(error))
   } finally {
     addingReload.value = false
+  }
+}
+
+// 关闭浏览器步骤：和「关闭浏览器」按钮不是一回事——按钮结束这次录制，这一步只是往
+// 流程里加一条「脚本走到这里结束浏览器」的声明，录制中的浏览器不会被关掉。
+async function insertClose(afterNo = null) {
+  if (addingClose.value) return
+  addingClose.value = true
+  try {
+    const { data } = await api.addRecordingClose(afterNo)
+    applySession(data)
+    revealInserted(afterNo)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    addingClose.value = false
   }
 }
 
@@ -5102,6 +5651,8 @@ function stepDescription(step) {
       return message ? `弹窗「${message}」→ 点${action}` : `弹窗 → 点${action}`
     }
     case 'new_page': return '切换到新打开的标签页'
+    // 关浏览器只是一条收尾声明：录制里的浏览器不会因为这一步被关掉。
+    case 'close': return '关闭浏览器'
     // 名字后面跟「调用」，一眼能和普通步骤区分：这一步本身什么都不做。
     case 'call': return `调用动作「${step.label || '未命名'}」`
     case 'sleep': return `固定等待 ${step.intent ? step.intent.seconds : ''} 秒`
@@ -5466,7 +6017,7 @@ function closePlanSheet() {
   planSheetOpen.value = false
   document.body.style.overflow = sheetBodyOverflow || ''
   sheetBodyOverflow = ''
-  clearSelTip()
+  closeNoteComposer()
   focusSheetWindow(false)
 }
 
@@ -5477,8 +6028,18 @@ function focusSheetWindow(open) {
 
 function onSheetKeydown(event) {
   if (event.key !== 'Escape' || !planSheetOpen.value) return
-  // 意见弹窗开着就先让它关：Esc 逐层退回，别一下把整份任务书也关掉。
-  if (noteDialog.visible) return
+  // 进度弹窗压在最上面：Esc 先收它（生成继续），别顺手把任务书也关了。
+  if (emitModal.open) {
+    dismissEmitModal()
+    event.stopPropagation()
+    return
+  }
+  // 意见气泡开着就先让它关：Esc 逐层退回，别一下把整份任务书也关掉。
+  if (noteComposer.open) {
+    closeNoteComposer()
+    event.stopPropagation()
+    return
+  }
   event.stopPropagation()
   closePlanSheet()
 }
@@ -5495,9 +6056,56 @@ watch(isStopped, (stopped) => {
 
 // ---- 任务书：选中片段写意见 ----
 // 不用自定义富文本：任务书本身是普通 DOM，浏览器选区就够用。
-// 选中后浮出一个小按钮，点它把这一段原文带进意见框，用户只写「要改成什么」。
+// 选完直接在选区下方弹出气泡，不用先点一下按钮、也不用再弹一个居中对话框。
+// 意见会记下选区落在哪一步，正文行尾显示编号，右栏（现在是文末意见区）能对上号。
+// 气泡尺寸写在这里而不是量 DOM：第一次打开时元素还没渲染，量不到高度。
+const NOTE_POP_W = 340
+const NOTE_POP_H = 236
+
+function closeNoteComposer() {
+  noteComposer.open = false
+  noteComposer.comment = ''
+}
+
 function clearSelTip() {
-  selTip.visible = false
+  if (noteComposer.open) closeNoteComposer()
+}
+
+// 点在气泡外面就收：任务书很长，用户可能直接去滚下一段。
+function onDocMouseDown(event) {
+  if (!noteComposer.open) return
+  if (event.target && event.target.closest && event.target.closest('.note-pop')) return
+  closeNoteComposer()
+}
+
+function placeNoteComposer(rect, anchorId) {
+  const margin = 12
+  // 优先贴在选区下方；下方不够就翻到上方，两个方向都放不下时贴着底边。
+  let x = rect ? rect.left + rect.width / 2 - 80 : (window.innerWidth - NOTE_POP_W) / 2
+  x = Math.min(Math.max(margin, x), window.innerWidth - NOTE_POP_W - margin)
+  let y = rect ? rect.bottom + 10 : window.innerHeight - NOTE_POP_H - 48
+  let above = false
+  if (rect && y + NOTE_POP_H > window.innerHeight - margin) {
+    // 下面放不下就翻到选区上方，箭头方向跟着翻，不然会指着反方向。
+    y = Math.max(margin, rect.top - NOTE_POP_H - 10)
+    above = true
+  }
+  y = Math.min(Math.max(margin, y), window.innerHeight - NOTE_POP_H - margin)
+  noteComposer.x = x
+  noteComposer.y = y
+  noteComposer.above = above
+  noteComposer.anchorId = anchorId || ''
+  noteComposer.anchorLabel = anchorLabelOf(anchorId)
+}
+
+function openComposer(text, rect, anchorId) {
+  noteComposer.quote = text || ''
+  noteComposer.comment = ''
+  noteComposer.open = true
+  placeNoteComposer(rect, anchorId)
+  nextTick(() => {
+    if (noteInput.value) noteInput.value.focus()
+  })
 }
 
 function onPlanSelect() {
@@ -5512,33 +6120,44 @@ function onPlanSelect() {
     clearSelTip()
     return
   }
-  // 选区必须完全落在任务书正文里，别把「意见列表」或页面别处的文字带进来。
+  // 选区必须完全落在任务书正文里，别把页面别处的文字带进来。
   if (!root.contains(selection.anchorNode) || !root.contains(selection.focusNode)) {
     clearSelTip()
     return
   }
+  // 顺着选区起点往上找最近的锚点，意见就知道自己挂在哪一步 / 哪一节。
+  const node = selection.anchorNode
+  const el = node && (node.nodeType === 3 ? node.parentElement : node)
+  const host = el && el.closest ? el.closest('[data-plan-anchor]') : null
+  const anchorId = host ? host.getAttribute('data-plan-anchor') : ''
   const rect = selection.getRangeAt(0).getBoundingClientRect()
-  selTip.text = text.slice(0, 400)
-  selTip.x = Math.min(Math.max(12, rect.left + rect.width / 2 - 62), window.innerWidth - 150)
-  selTip.y = Math.max(12, rect.top - 38)
-  selTip.visible = true
+  openComposer(text.slice(0, 400), rect, anchorId)
 }
 
+// 整体意见没有选区可依，从按钮位置往上方铺，避免挡住底部决策条。
 function openNote(quote) {
-  noteDialog.quote = quote || ''
-  noteDialog.comment = ''
-  noteDialog.visible = true
-  selTip.visible = false
+  openComposer(quote || '', null, '')
 }
 
 function saveNote() {
-  const comment = noteDialog.comment.trim()
+  const comment = noteComposer.comment.trim()
   if (!comment) {
-    ElMessage.warning('写一句你的要求，再添加')
+    ElMessage.warning('填写修改要求，再添加')
     return
   }
-  planNotes.value.push({ id: ++noteSeq, quote: noteDialog.quote, comment })
-  noteDialog.visible = false
+  const note = {
+    id: ++noteSeq,
+    quote: noteComposer.quote,
+    comment,
+    anchorId: noteComposer.anchorId,
+    anchorLabel: noteComposer.anchorLabel
+  }
+  planNotes.value.push(note)
+  closeNoteComposer()
+  ElMessage.success('已添加意见')
+  flashNoteId.value = note.id
+  if (flashNoteTimer) clearTimeout(flashNoteTimer)
+  flashNoteTimer = setTimeout(() => { flashNoteId.value = 0 }, 1200)
 }
 
 function removeNote(id) {
@@ -5646,14 +6265,33 @@ async function runPlan(replan) {
 // ---- 写入：只从任务书的「按此执行」进来 ----
 // 取消当前规划 / 生成：后端 abort 会话并杀掉 serve，进度条随即落定。
 // 兜底路径（会话已失效、退回一次性生成）收不到取消信号，如实告诉用户。
-async function cancelEmit() {
+// 真正发请求。弹窗里已经就地确认过，面板那颗「取消」还要自己问一次。
+async function doCancelEmit() {
+  emitCancelling.value = true
   try {
     const { data } = await api.cancelRecordingEmit()
-    if (data.cancelled) ElMessage.info('已取消')
+    if (data.cancelled) ElMessage.info('已请求停止，等当前这一步收尾')
     else ElMessage.info('这一轮走的是兜底路径，没法中途取消，请稍等它结束')
   } catch (error) {
     ElMessage.error(errorText(error))
+  } finally {
+    emitCancelling.value = false
+    emitModalConfirm.value = false
   }
+}
+
+async function cancelEmit() {
+  // 停的是正在进行的一轮生成：中途打断会留下半成品文件，值得确认一次。
+  try {
+    await ElMessageBox.confirm(
+      '停止后这一轮生成会中断，已经写出的文件会保留。',
+      '停止生成',
+      { confirmButtonText: '停止', cancelButtonText: '继续等待', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  await doCancelEmit()
 }
 
 async function executePlan(overwrite) {
@@ -5689,6 +6327,8 @@ async function executePlan(overwrite) {
     return
   }
   localPending.value = true
+  // 一点执行就把进度弹窗打开：请求最慢要两三分钟，按钮转圈说明不了「现在在写还是在跑」。
+  openEmitModal()
   // 点击到服务端任务起来之间有最多一次轮询的间隔，先把节奏提上来，进度条立刻有反应。
   startPolling(1000)
   genError.value = null
@@ -5727,21 +6367,26 @@ async function executePlan(overwrite) {
     if (details.includes('plan_stale')) {
       // 后端判定任务书与录制对不上：强制重新规划，别拿旧任务书硬写。
       if (planState.value) planState.value = { ...planState.value, stale: true }
+      emitModal.open = false
       ElMessage.warning('录制步骤变过了，请重新规划任务书')
       return
     }
     if (details.includes('workspace_changed')) {
       // 换了工作区/框架：旧任务书里的写法是另一个仓库的，不能硬套。
       planState.value = null
+      emitModal.open = false
       ElMessage.warning('工作区或框架变了，请重新生成任务书')
       return
     }
     if (details.includes('cancelled')) {
+      emitModal.open = false
       ElMessage.info('已取消本次生成')
       return
     }
     const isConflict = status === 409 && details.some(d => String(d).startsWith('conflict:'))
     if (isConflict) {
+      // 系统确认框的层级低于进度弹窗，不先收起来就会被整个盖住、点不到。
+      emitModal.open = false
       try {
         await ElMessageBox.confirm(
           `目标文件 ${planTarget.value} 已存在。覆盖后可以在「生成记录」里撤销，恢复原内容。是否覆盖？`,
@@ -5887,6 +6532,7 @@ onMounted(async () => {
   window.addEventListener('resize', clampPanelWidth)
   // 多选态按 Esc 退出：框选到一半想放弃时，不必再去够工具栏那颗按钮。
   window.addEventListener('keydown', onSelectKeydown)
+  document.addEventListener('mousedown', onDocMouseDown, true)
   try {
     const { data } = await api.getAutomationModels()
     modelOptions.value = data.models || []
@@ -5919,6 +6565,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', clampPanelWidth)
   window.removeEventListener('keydown', onSelectKeydown)
   window.removeEventListener('keydown', onSheetKeydown, true)
+  document.removeEventListener('mousedown', onDocMouseDown, true)
   // 浮层开着就切走页面：body 的 overflow 是全局的，不还回去整站都滚不动。
   if (planSheetOpen.value) document.body.style.overflow = sheetBodyOverflow || ''
   clearTimeout(flashTimer)
@@ -6392,7 +7039,9 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .is-panel .toolbar-group :deep(.el-button) { height:26px; padding:0 7px; font-size:12px; }
 .is-panel .toolbar-group :deep(.el-button .el-icon) { font-size:14px; }
 /* 步骤行同样压一档：一行 60px 上下，八步能整屏看完，不用滚。 */
-.is-panel .step { padding:8px 10px; }
+/* 面板行留白保持不变，只把圆心告诉竖线：10px 左内边距 + 12.5px 节点半径。
+   不把 padding-left 归零，否则整列圆和正文都会左移 10px。 */
+.is-panel .step { padding:8px 10px; --rail-x:22.5px; }
 .is-panel .step-main { gap:8px; }
 .is-panel .step-text { font-size:13px; }
 /* 面板窄：正文单行省略，悬停才展开。少了这条，flex 会把 .step-text 压到 min-content，
@@ -6415,7 +7064,9 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
    分组容器用 display:contents 退化成排版占位，按钮重新回到同一张网格里排队。 */
 .toolbar.is-lean {
   display:grid;
-  grid-template-columns:repeat(4, minmax(0, 1fr));
+  /* 面板是平铺按钮（不是主窗口那两个下拉），三列正好四行；
+     改四列会把「动作库」甩到下一行，多出一整行高度 */
+  grid-template-columns:repeat(3, minmax(0, 1fr));
   gap:6px;
   align-items:stretch;
 }
@@ -6469,28 +7120,35 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 /* 时间线 */
 .timeline { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:0; }
 /* 时间轴：卡片改成「一条线串起来的行」。左侧序号是节点，按步骤类型着色，
-   扫一眼能看出这一段是操作、动作还是校验；卡片边框去掉后密集步骤也不会碎。 */
-.step { display:flex; gap:11px; align-items:flex-start; padding:7px 8px 7px 0; position:relative;
+   扫一眼能看出这一段是操作、动作还是校验；卡片边框去掉后密集步骤也不会碎。
+   竖线的横坐标不从行推导，而是由 --rail-x 直接给出圆心：面板行有 10px 左内边距，
+   以前线写死 left:12px、圆心却在 22.5px，整条轴歪 10px 就是这个原因。 */
+.step { --rail-x:12.5px; display:flex; gap:11px; align-items:flex-start; padding:7px 8px 7px 0; position:relative;
   border:0; border-radius:9px; background:transparent;
   transition:background .15s ease, box-shadow .18s ease; }
-.step::before { content:''; position:absolute; left:12px; top:0; bottom:0; width:1.5px; background:color-mix(in srgb, var(--ink) 14%, transparent); }
+.step::before { content:''; position:absolute; left:calc(var(--rail-x) - .5px); top:0; bottom:0;
+  width:1px; background:color-mix(in srgb, var(--ink) 10%, transparent); }
 .step:first-child::before { top:13px; }
 .step:last-child::before { display:none; }
 .step:hover { background:var(--bg-hover); }
 .step:hover { border-color:var(--accent-line); box-shadow:0 4px 14px rgba(16,24,40,.06); }
 /* 不唯一现在是「可降级生成」，用琥珀色提示而不是红色阻断 */
 .step.is-blocked { background:color-mix(in srgb, var(--warn) 7%, transparent); }
-.step-no { flex-shrink:0; width:25px; height:25px; border-radius:50%; background:var(--bg-card);
+/* border-box：25px 是含 1.5px 描边的实际外径，圆心才固定在 12.5px。
+   底色必须不透明 —— 半透明时竖线会从圆里透出来，像一根线串起三个圈。 */
+.step-no { flex-shrink:0; width:25px; height:25px; box-sizing:border-box; border-radius:50%; background:var(--bg-card);
   border:1.5px solid var(--line-ctl); color:var(--muted); font-size:10.5px; font-weight:500;
   display:flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums;
   position:relative; z-index:1; }
-/* 节点色只区分四类，再多就花了：操作默认蓝，动作紫，校验绿，等待/特殊黄 */
-.step.type-call .step-no { color:#b39ddb; border-color:rgba(179,157,219,.34); background:rgba(179,157,219,.13); }
-.step.type-assert .step-no, .step.type-wait .step-no { color:var(--ok); border-color:var(--ok-line); background:var(--ok-soft); }
+/* 节点色只区分四类，再多就花了：操作默认蓝，动作紫，校验绿，等待/特殊黄。
+   底色用 color-mix 混进卡片色得到实色：rgba / 语义 soft 在暗色下都是半透明的，
+   竖线会从圆里透出来；这样混两套主题都自动得到对应的不透明底色。 */
+.step.type-call .step-no { color:#b39ddb; border-color:rgba(179,157,219,.34); background:color-mix(in srgb, #b39ddb 14%, var(--bg-card)); }
+.step.type-assert .step-no, .step.type-wait .step-no { color:var(--ok); border-color:var(--ok-line); background:color-mix(in srgb, var(--ok) 14%, var(--bg-card)); }
 .step.type-sleep .step-no, .step.type-ready .step-no,
-.step.type-slider .step-no, .step.type-captcha .step-no { color:var(--warn); border-color:var(--warn-line); background:var(--warn-soft); }
-.step.type-goto .step-no, .step.type-reload .step-no, .step.type-new_page .step-no { color:#8fb8e0; border-color:rgba(143,184,224,.32); background:rgba(143,184,224,.1); }
-.step.is-blocked .step-no { color:var(--warn); border-color:var(--warn); background:var(--warn-soft); }
+.step.type-slider .step-no, .step.type-captcha .step-no { color:var(--warn); border-color:var(--warn-line); background:color-mix(in srgb, var(--warn) 14%, var(--bg-card)); }
+.step.type-goto .step-no, .step.type-reload .step-no, .step.type-new_page .step-no { color:#8fb8e0; border-color:rgba(143,184,224,.32); background:color-mix(in srgb, #8fb8e0 16%, var(--bg-card)); }
+.step.is-blocked .step-no { color:var(--warn); border-color:var(--warn); background:color-mix(in srgb, var(--warn) 16%, var(--bg-card)); }
 .step-body { flex:1; min-width:0; }
 .step-main { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .step-text { color:var(--ink); font-size:14px; line-height:1.5; word-break:break-word; }
@@ -6513,6 +7171,13 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
   opacity:.5; transition:opacity .15s ease; }
 /* 操作图标平时淡着，指针进到这一行才亮：一行里五个图标常驻太吵，压过正文了 */
 .step:hover .step-actions, .step:focus-within .step-actions { opacity:1; }
+/* 执行前等待：关着只显示一个秒表图标，打开后展开秒数输入，宽度够放「360」+ 步进箭头 */
+.settle-ctrl { display:flex; align-items:center; gap:2px; flex:none; }
+.settle-toggle { height:22px; width:22px; padding:0; color:var(--muted); }
+.settle-toggle:hover { color:var(--accent); background:var(--accent-soft); }
+.settle-toggle.is-on { color:var(--accent); }
+.settle-input { width:78px; margin-left:2px; }
+.settle-input :deep(.el-input__wrapper) { padding-left:6px; padding-right:22px; }
 /* 定位预览：行内小准星，点一下在浏览器里把匹配元素全框出来并编号 */
 .peek-btn { height:22px; width:22px; padding:0; margin-left:-2px; color:var(--muted); }
 .peek-btn:hover { color:var(--accent); background:var(--accent-soft); }
@@ -7034,7 +7699,7 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .gen-replay-why { flex-basis:100%; padding-left:27px; color:var(--danger); font-size:11.5px; line-height:1.5; }
 
 /* ---- 任务书 ---- */
-.plan-head-meta { margin-left:auto; color:var(--muted); font-size:11.5px; font-weight:400; }
+.plan-head-meta { color:var(--muted); font-size:11.5px; font-weight:400; }
 /* 任务书入口：生成卡里只留一行状态。正文在浮层里读，长表格不该挤进 420px 的侧栏。 */
 .plan-ready { display:flex; align-items:center; gap:10px; }
 .plan-ready-main { flex:1; min-width:0; }
@@ -7052,144 +7717,321 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
   padding:22px; background:rgba(16,24,40,.44);
 }
 .plan-sheet {
-  display:flex; flex-direction:column; width:min(1120px,96vw); height:min(900px,92vh);
+  display:flex; flex-direction:column; width:min(1120px,96vw); height:min(880px,92vh);
   overflow:hidden; background:var(--bg-card); border-radius:16px;
   box-shadow:0 24px 64px rgba(16,24,40,.26);
 }
 .plan-sheet-head {
   flex:none; display:flex; align-items:center; gap:10px; padding:12px 16px;
-  border-bottom:1px solid var(--line-soft); background:linear-gradient(180deg,var(--bg-card),var(--bg-card));
+  border-bottom:1px solid var(--line-soft); background:var(--bg-card);
 }
 .plan-sheet-tip { margin-left:auto; color:var(--muted); font-size:11.5px; }
+.chip-warn {
+  padding:1px 7px; border-radius:5px; background:var(--danger-soft);
+  color:var(--danger); font-size:10.5px;
+}
 .plan-sheet-close {
-  flex:none; width:28px; height:28px; padding:0; border:0; border-radius:8px;
+  flex:none; margin-left:auto; width:28px; height:28px; padding:0; border:0; border-radius:8px;
   background:transparent; color:var(--muted); font-size:13px; line-height:1; cursor:pointer;
 }
 .plan-sheet-close:hover { background:var(--bg-sunken); color:var(--ink); }
-.plan-sheet-body { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) 330px; }
-.plan-sheet-main { min-height:0; overflow-y:auto; padding:16px 24px 24px; }
-/* 大屏上把正文的行距和表格松一格：还是同一份内容，读起来不再是窄栏里的压缩版 */
-.plan-sheet-main .plan-block { padding:14px 0; }
-.plan-sheet-main .plan-steps { font-size:12.5px; }
-.plan-sheet-main .plan-steps td { padding:7px 6px; }
-.plan-sheet-main .plan-step-no { width:26px; }
-.plan-sheet-main .plan-step-action { width:46px; }
+
+/* 目录 + 正文：单栏阅读，决策收在页脚一条。 */
+.plan-sheet-body { flex:1; min-height:0; display:grid; grid-template-columns:180px minmax(0,1fr); }
+.plan-outline {
+  min-height:0; overflow-y:auto; padding:18px 10px;
+  border-right:1px solid var(--line-faint); background:var(--bg-card);
+  display:flex; flex-direction:column; gap:2px;
+}
+.plan-outline-item {
+  display:flex; align-items:center; gap:7px; width:100%; padding:6px 9px;
+  border:0; border-radius:7px; background:transparent; color:var(--muted);
+  font-family:var(--sans); font-size:11.5px; line-height:1.6; text-align:left; cursor:pointer;
+}
+.plan-outline-item:hover { background:var(--bg-sunken); color:var(--ink-2); }
+.plan-outline-item.is-on { background:var(--accent-soft); color:var(--accent-ink); font-weight:600; }
+.plan-outline-no { flex:none; font-family:var(--mono); font-size:9.5px; color:var(--faint); }
+.plan-outline-item.is-on .plan-outline-no { color:var(--accent-ink); }
+.plan-outline-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.plan-outline-count { flex:none; font-size:10px; color:var(--faint); font-variant-numeric:tabular-nums; }
+.plan-outline-count.is-warn { color:var(--warn); }
+
+.plan-doc { min-height:0; overflow-y:auto; padding:26px 40px 40px; scroll-behavior:smooth; }
+.plan-sec { max-width:700px; margin:0 auto; }
+.plan-h {
+  display:flex; align-items:baseline; gap:8px; margin:26px 0 10px;
+  font-size:13px; font-weight:650; color:var(--ink);
+}
+.plan-sec:first-of-type .plan-h { margin-top:0; }
+.plan-h-no { font-family:var(--mono); font-size:10px; color:var(--faint); font-weight:400; }
+.plan-h-hint { margin-left:auto; font-size:10.5px; color:var(--faint); font-weight:400; }
+.plan-h-hint.is-warn { color:var(--warn); }
+
+.plan-fields { display:grid; grid-template-columns:64px minmax(0,1fr); gap:7px 14px; margin:0; font-size:12.5px; }
+.plan-fields dt { color:var(--muted); font-size:11.5px; line-height:1.7; }
+.plan-fields dd { margin:0; color:var(--ink-2); line-height:1.7; word-break:break-word; }
+.plan-style-note { margin:10px 0 0; color:var(--muted); font-size:11.5px; line-height:1.75; }
+.plan-empty { margin:0 0 10px; color:var(--muted); font-size:12px; line-height:1.75; }
+
+.plan-steplist { list-style:none; margin:0; padding:0; border-top:1px solid var(--line-faint); }
+.plan-steplist-item {
+  display:flex; align-items:flex-start; gap:12px; padding:10px 4px;
+  border-bottom:1px solid var(--line-faint);
+}
+.plan-steplist-no {
+  flex:none; width:22px; font-family:var(--mono); font-size:10.5px;
+  color:var(--faint); line-height:1.9; font-variant-numeric:tabular-nums;
+}
+.plan-steplist-text { flex:1; min-width:0; font-size:12.5px; line-height:1.7; color:var(--ink-2); }
+.plan-step-flag {
+  margin-left:6px; padding:1px 5px; border-radius:4px;
+  background:var(--accent-soft); color:var(--accent-ink); font-size:10px;
+}
+.plan-step-note-badge {
+  flex:none; width:18px; height:18px; margin-top:3px; padding:0; border:0; border-radius:50%;
+  background:var(--accent); color:#fff; font-size:10px; line-height:18px; cursor:pointer;
+  font-variant-numeric:tabular-nums;
+}
+
+.plan-risklist { list-style:none; margin:0; padding:0; }
+.plan-risklist li {
+  display:flex; gap:8px; padding:6px 0; font-size:12.5px; line-height:1.7; color:var(--ink-2);
+}
+.plan-riskdot { flex:none; width:5px; height:5px; margin-top:8px; border-radius:50%; background:var(--warn); }
+.plan-riskdot.is-plain { background:var(--faint); }
+.plan-need-reason { color:var(--muted); }
+
+.plan-notelist { list-style:none; margin:0 0 10px; padding:0; display:flex; flex-direction:column; gap:8px; }
+.plan-notecard {
+  padding:9px 11px; border:1px solid var(--line-soft); border-radius:9px;
+  background:var(--bg-card); transition:background .2s ease, border-color .2s ease;
+}
+.plan-notecard.is-flash { background:var(--accent-soft); border-color:var(--accent-line); }
+.plan-notecard-head { display:flex; align-items:center; gap:8px; margin-bottom:5px; }
+.plan-note-anchor {
+  padding:1px 5px; border-radius:4px; background:var(--accent-soft);
+  color:var(--accent-ink); font-size:10px;
+}
+.plan-note-del {
+  margin-left:auto; padding:0; border:0; background:none;
+  color:var(--faint); font-size:11px; cursor:pointer;
+}
+.plan-note-del:hover { color:var(--danger); }
+.plan-add-note {
+  padding:0; border:0; background:none; color:var(--accent-ink);
+  font-family:var(--sans); font-size:11.5px; cursor:pointer;
+}
+.plan-add-note:hover { text-decoration:underline; }
+
+/* 页脚决策条：读到第几步都能直接执行。 */
+.plan-doc-foot {
+  flex:none; padding:10px 16px 12px;
+  border-top:1px solid var(--line-soft); background:var(--bg-card);
+}
+.plan-suggest-bar {
+  display:flex; align-items:center; gap:10px; margin-bottom:9px; padding:7px 10px;
+  border:1px solid var(--warn-line); border-radius:8px; background:var(--warn-soft);
+  color:var(--warn); font-size:11.5px;
+}
+.plan-suggest-bar > span { flex:1; min-width:0; }
+.plan-foot-row { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.plan-foot-target { display:flex; align-items:center; gap:8px; flex:1; min-width:0; }
+.plan-foot-label { flex:none; color:var(--muted); font-size:10.5px; }
+.plan-foot-path {
+  flex:1; min-width:0; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  padding:0; background:none; font-family:var(--mono); font-size:11px; color:var(--ink-2);
+}
+.plan-foot-edit {
+  flex:none; display:flex; align-items:center; padding:2px; border:0;
+  background:none; color:var(--faint); cursor:pointer;
+}
+.plan-foot-edit:hover { color:var(--accent); }
+.plan-foot-input { flex:1; min-width:180px; }
+.plan-foot-actions { display:flex; align-items:center; gap:8px; flex:none; }
+.plan-foot-hint { color:var(--muted); font-size:10.5px; }
+.plan-foot-reason { margin-top:6px; color:var(--muted); font-size:10.5px; line-height:1.6; }
+
 .plan-sheet-error { flex:none; overflow-y:auto; padding:18px 24px; border-bottom:1px solid var(--danger-line); background:var(--danger-soft); }
-/* 没有旧任务书可看时，错误就是全部内容：占满并居中，别让它孤零零挂在顶上 */
 .plan-sheet-error.is-solo {
   flex:1; min-height:0; display:flex; flex-direction:column; justify-content:center;
   padding:32px 40px; border-bottom:0; background:var(--bg-card);
 }
 .plan-sheet-error.is-solo .gen-error { max-width:720px; margin:0 auto; width:100%; }
-/* 右栏固定：读两步就能点执行，不用滚到第 12 步末尾才看见按钮 */
-.plan-sheet-side {
-  min-height:0; display:flex; flex-direction:column;
-  border-left:1px solid var(--line-soft); background:var(--bg-card);
-}
-.plan-side-scroll { flex:1; min-height:0; overflow-y:auto; padding:14px 16px; }
-.plan-side-foot { flex:none; padding:12px 16px; border-top:1px solid var(--line-soft); background:var(--bg-card); }
-.plan-side-foot .plan-actions { margin-top:0; }
-.plan-side-foot .plan-actions :deep(.el-button + .el-button) { margin-left:0; }
-.plan-side-foot .plan-actions :deep(.el-button) { flex:1; }
-.plan-side-foot .field-hint, .plan-side-foot .gen-block-reason { margin-top:8px; }
-/* 330px 放不下「输入框 + 确定 + 取消」一排，让它断成两行 */
-.plan-sheet-side .plan-target-edit { flex-wrap:wrap; }
-.plan-sheet-side .plan-target-edit :deep(.el-input) { flex:1 1 100%; }
-.plan-target-edit-btns { display:flex; gap:6px; }
-.plan-notes-count { margin-left:auto; color:var(--muted); font-size:11px; font-weight:400; }
 
-/* 窗口本身不够宽时（嵌入模式、或被并排挤窄）就单列：正文在上，右栏缩成底部操作区。
-   按钮仍然常驻，这点不能在窄屏上退化。 */
-@media (max-width: 900px) {
-  .plan-sheet-mask { padding:10px; }
-  .plan-sheet { width:96vw; height:96vh; border-radius:12px; }
-  .plan-sheet-body { grid-template-columns:1fr; grid-template-rows:minmax(0,1fr) auto; }
-  .plan-sheet-side { border-left:0; border-top:1px solid var(--line-soft); max-height:40vh; }
-  .plan-sheet-tip { display:none; }
-  .plan-sheet-head { padding:10px 12px; }
+.plan-sheet code, .plan-doc-foot code, .plan-suggest-bar code {
+  padding:1px 5px; border-radius:4px; background:var(--bg-sunken);
+  color:var(--ink-2); font-size:11px; word-break:break-all;
 }
-.plan-block { padding:10px 0; border-top:1px dashed var(--line-soft); }
-.plan-block:first-child { border-top:0; padding-top:0; }
-.plan-block-title {
-  display:flex; align-items:baseline; gap:6px;
-  margin-bottom:6px; color:var(--ink); font-size:12px; font-weight:600;
-}
-.plan-kv { display:flex; gap:8px; font-size:11.5px; line-height:1.8; }
-.plan-kv > span { flex:none; width:44px; color:var(--muted); }
-.plan-kv > b { color:var(--ink-2); font-weight:500; word-break:break-word; }
-.plan-style-note { margin-top:5px; color:var(--muted); font-size:11.5px; line-height:1.65; }
-.plan-sheet code, .plan-ready code, .plan-target code, .plan-reuse code, .plan-suggest code {
-  background:var(--bg-sunken); color:var(--ink-2); padding:1px 5px; border-radius:4px;
-  font-size:11px; word-break:break-all;
-}
-.plan-target { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.plan-path-ok { color:var(--ok); font-size:11.5px; }
-/* 「这是 AI 选的」标记：路径本身是重点，别做成彩色按钮抢注意力 */
 .plan-path-badge {
-  margin-left:6px; padding:1px 6px; border-radius:4px;
-  background:var(--accent-soft); color:var(--accent); font-size:11px; font-weight:500;
+  flex:none; padding:1px 6px; border-radius:4px; background:var(--accent-soft);
+  color:var(--accent); font-size:10.5px; font-weight:500;
 }
-.plan-target-edit-btn { color:var(--muted); }
-.plan-target-edit { display:flex; align-items:center; gap:6px; }
-.plan-target-edit :deep(.el-input) { flex:1; }
 .plan-target-error { margin-top:5px; color:var(--danger); font-size:11.5px; }
 .plan-target-changed {
-  margin-top:8px; padding:7px 9px; border-radius:7px;
-  background:var(--warn-soft); border:1px solid var(--warn-line); color:var(--warn);
-  font-size:11.5px; line-height:1.6;
+  margin-top:6px; padding:6px 9px; border:1px solid var(--warn-line); border-radius:7px;
+  background:var(--warn-soft); color:var(--warn); font-size:11.5px; line-height:1.6;
 }
-.plan-suggest {
-  margin-top:8px; padding:9px 10px; border:1px solid var(--warn-line); border-radius:8px;
-  background:var(--warn-soft); font-size:11.5px; color:var(--warn);
-}
-.plan-suggest-title { font-weight:600; margin-bottom:3px; }
-.plan-suggest-reason { color:var(--warn); line-height:1.65; }
-.plan-suggest .el-button { margin-top:7px; }
 .plan-reuse { margin:0; padding:0; list-style:none; }
-.plan-reuse li { padding:5px 0; border-top:1px dashed var(--line-soft); font-size:11.5px; }
+.plan-reuse li { padding:6px 0; border-top:1px solid var(--line-faint); font-size:12px; }
 .plan-reuse li:first-child { border-top:0; padding-top:0; }
 .plan-reuse-file { margin-left:6px; color:var(--muted); font-size:11px; }
 .plan-reuse-use {
   display:block; margin-top:3px; color:var(--muted); font-size:11px;
   line-height:1.6; white-space:pre-wrap; word-break:break-all;
 }
-.plan-steps { width:100%; border-collapse:collapse; font-size:11.5px; }
-.plan-steps td { padding:5px 4px; border-top:1px dashed var(--line-soft); vertical-align:top; }
-.plan-steps tr:first-child td { border-top:0; padding-top:0; }
-.plan-step-no { width:18px; color:var(--muted); font-variant-numeric:tabular-nums; }
-.plan-step-action { width:34px; color:var(--muted); white-space:nowrap; }
-.plan-step-action.reuse { color:var(--accent); font-weight:600; }
-.plan-step-note { color:var(--ink-2); line-height:1.65; word-break:break-word; }
-.plan-risks { margin:0; padding-left:16px; color:var(--warn); font-size:11.5px; line-height:1.7; }
-.plan-notes { margin-top:10px; padding-top:10px; border-top:1px solid var(--line-soft); }
-.plan-notes-hint { color:var(--muted); font-size:11px; font-weight:400; }
-.plan-note {
-  position:relative; margin:6px 0; padding:7px 28px 7px 9px;
-  background:var(--bg-card); border-radius:7px;
-}
 .plan-quote {
-  margin-bottom:4px; padding-left:6px; border-left:2px solid var(--line-field);
-  color:var(--muted); font-size:11.5px; line-height:1.55; word-break:break-all;
+  margin-bottom:5px; padding-left:7px; border-left:2px solid var(--line-field);
+  color:var(--muted); font-size:11.5px; line-height:1.6; word-break:break-all;
 }
-.plan-note-body { color:var(--ink-2); font-size:12px; line-height:1.6; white-space:pre-wrap; }
-.plan-note-del {
-  position:absolute; top:6px; right:6px; padding:0; border:0; background:none;
-  color:var(--faint); font-size:11px; cursor:pointer;
-}
-.plan-note-del:hover { color:var(--danger); }
+.plan-note-body { color:var(--ink-2); font-size:12px; line-height:1.65; white-space:pre-wrap; }
 .plan-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
 .plan-stale {
-  margin-bottom:10px; padding:8px 10px; border:1px solid var(--danger-line); border-radius:8px;
-  background:var(--danger-soft); color:var(--danger); font-size:12px; line-height:1.6;
+  max-width:700px; margin:0 auto 12px; padding:8px 10px; border:1px solid var(--danger-line);
+  border-radius:8px; background:var(--danger-soft); color:var(--danger); font-size:12px; line-height:1.6;
 }
-.plan-sel-tip {
-  position:fixed; z-index:3000; height:30px; padding:0 12px; border:0; border-radius:15px;
-  background:var(--bg-code); color:#fff; font-size:12px; line-height:30px; cursor:pointer;
-  box-shadow:0 6px 18px rgba(20, 26, 36, .22);
+
+/* 窗口不够宽（嵌入 / 被并排挤窄）时收起目录，正文占满。 */
+@media (max-width: 900px) {
+  .plan-sheet-mask { padding:10px; }
+  .plan-sheet { width:96vw; height:96vh; border-radius:12px; }
+  .plan-sheet-body { grid-template-columns:1fr; }
+  .plan-outline { display:none; }
+  .plan-doc { padding:18px 20px 28px; }
+  .plan-sheet-tip { display:none; }
+  .plan-sheet-head { padding:10px 12px; }
+  .plan-foot-hint { display:none; }
 }
-.plan-sel-tip:hover { background:var(--accent); }
 
+/* ---- 选文意见气泡 ---- */
+.note-pop {
+  position:fixed; z-index:3100; width:340px; border-radius:12px;
+  background:var(--bg-card); border:1px solid var(--line-soft);
+  box-shadow:0 18px 44px -14px rgba(16,24,40,.32);
+}
+.note-pop::before {
+  content:''; position:absolute; left:34px; top:-6px; width:11px; height:11px;
+  background:var(--bg-card); border-left:1px solid var(--line-soft);
+  border-top:1px solid var(--line-soft); transform:rotate(45deg);
+}
+.note-pop.is-above::before {
+  top:auto; bottom:-6px; border-left:0; border-top:0;
+  border-right:1px solid var(--line-soft); border-bottom:1px solid var(--line-soft);
+}
+.note-pop-head { position:relative; display:flex; align-items:center; gap:8px; padding:10px 12px 0; }
+.note-pop-title { color:var(--ink); font-size:11.5px; font-weight:600; }
+.note-pop-close {
+  margin-left:auto; padding:0; border:0; background:none;
+  color:var(--faint); font-size:11px; cursor:pointer;
+}
+.note-pop-close:hover { color:var(--ink-2); }
+.note-pop-quote {
+  position:relative; max-height:34px; overflow:hidden; margin:8px 12px 0; padding-left:8px;
+  border-left:2px solid var(--accent-line); color:var(--muted); font-size:11px; line-height:1.6;
+}
+.note-pop-input {
+  position:relative; display:block; width:calc(100% - 24px); height:78px; margin:8px 12px 0;
+  padding:7px 9px; border:1px solid var(--line-field); border-radius:8px;
+  background:var(--bg-card); color:var(--ink-2); font-family:var(--sans);
+  font-size:12px; line-height:1.6; resize:none;
+}
+.note-pop-input:focus { outline:none; border-color:var(--accent-line); box-shadow:0 0 0 3px rgba(0,113,227,.08); }
+.note-pop-input::placeholder { color:var(--faint); }
+.note-pop-foot { position:relative; display:flex; align-items:center; gap:6px; padding:8px 12px 10px; }
+.note-pop-count { margin-right:auto; color:var(--faint); font-size:10px; font-variant-numeric:tabular-nums; }
 
+/* ---- 执行进度弹窗 ---- */
+.emit-modal-mask {
+  position:fixed; inset:0; z-index:3200; display:flex; align-items:center; justify-content:center;
+  padding:22px; background:rgba(16,24,40,.44);
+}
+.emit-modal {
+  display:flex; flex-direction:column; width:min(640px, calc(100vw - 24px));
+  max-height:min(86vh, 760px); overflow:hidden; border-radius:16px;
+  background:var(--bg-card); box-shadow:0 24px 64px rgba(16,24,40,.26);
+}
+.emit-modal-head { flex:none; display:flex; align-items:center; gap:10px; padding:15px 18px 4px; }
+.emit-modal-title { color:var(--ink); font-size:15px; font-weight:650; }
+.emit-modal-meta {
+  margin-left:auto; color:var(--muted); font-size:11.5px; font-variant-numeric:tabular-nums;
+}
+.emit-modal-close {
+  flex:none; width:26px; height:26px; padding:0; border:0; border-radius:7px;
+  background:transparent; color:var(--muted); font-size:12px; cursor:pointer;
+}
+.emit-modal-close:hover { background:var(--bg-sunken); color:var(--ink); }
+.emit-modal-sub {
+  flex:none; padding:0 18px 12px; border-bottom:1px solid var(--line-faint);
+  color:var(--muted); font-size:11.5px; line-height:1.6; word-break:break-all;
+}
+.emit-modal-sep { margin:0 6px; color:var(--faint); }
+.emit-modal-body { flex:1; min-height:0; overflow-y:auto; padding:12px 18px 4px; }
+
+.emit-flow { list-style:none; margin:0; padding:0; }
+.emit-stage { display:flex; align-items:flex-start; gap:11px; padding:8px 0; }
+.emit-stage-dot {
+  flex:none; width:19px; height:19px; margin-top:1px; border-radius:50%;
+  border:1px solid var(--line-field); background:var(--bg-card); color:var(--faint);
+  font-size:10px; display:flex; align-items:center; justify-content:center;
+}
+.emit-stage.is-done .emit-stage-dot { background:var(--ok-soft); border-color:var(--ok-line); color:var(--ok); }
+.emit-stage.is-running .emit-stage-dot { border-color:var(--accent); }
+.emit-stage.is-failed .emit-stage-dot { background:var(--danger-soft); border-color:var(--danger); color:var(--danger); }
+.emit-stage.is-pending { opacity:.55; }
+.emit-stage-main { flex:1; min-width:0; }
+.emit-stage-title { color:var(--ink-2); font-size:12.5px; line-height:1.6; }
+.emit-stage.is-running .emit-stage-title { color:var(--ink); font-weight:600; }
+.emit-stage.is-done .emit-stage-title { color:var(--muted); }
+.emit-stage.is-failed .emit-stage-title { color:var(--danger); font-weight:600; }
+.emit-stage-log {
+  margin-top:2px; color:var(--muted); font-family:var(--mono); font-size:11px;
+  line-height:1.6; word-break:break-all;
+}
+.emit-stage.is-pending .emit-stage-log { color:var(--faint); }
+.emit-stage-live {
+  flex:none; padding-top:2px; color:var(--accent); font-family:var(--mono);
+  font-size:10px; font-variant-numeric:tabular-nums;
+}
+.emit-stage-rail { height:2px; margin:7px 0 2px; border-radius:2px; background:var(--bg-sunken); overflow:hidden; }
+.emit-stage-rail i {
+  display:block; width:38%; height:100%; border-radius:2px;
+  background:linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation:emit-rail 1.3s ease-in-out infinite;
+}
+@keyframes emit-rail { 0% { transform:translateX(-90%); } 100% { transform:translateX(320%); } }
+.emit-spin {
+  display:block; width:9px; height:9px; border-radius:50%;
+  border:2px solid var(--accent-line); border-top-color:var(--accent);
+  animation:emit-spin .8s linear infinite;
+}
+@keyframes emit-spin { to { transform:rotate(360deg); } }
+
+.emit-error {
+  margin:0 0 12px; padding:10px 12px; border:1px solid var(--danger-line);
+  border-radius:9px; background:var(--danger-soft);
+}
+.emit-error-title { color:var(--danger); font-size:12px; font-weight:600; line-height:1.6; }
+.emit-error-list { margin:6px 0 0; padding-left:16px; color:var(--ink-2); font-size:11.5px; line-height:1.75; }
+.emit-result {
+  margin:0 0 12px; padding:10px 12px; border:1px solid var(--ok-line);
+  border-radius:9px; background:var(--ok-soft);
+}
+.emit-result-title { color:var(--ok); font-size:12px; font-weight:600; }
+.emit-result-text { margin-top:4px; color:var(--ink-2); font-size:11.5px; line-height:1.7; }
+/* 结果之后只推一件事：去执行测试。这里只做说明，按钮放在页脚，避免两个入口打架。 */
+.emit-next {
+  margin:0 0 12px; padding:9px 12px 10px; border:1px solid var(--accent-line);
+  border-radius:9px; background:var(--accent-soft);
+}
+.emit-next-head { display:flex; align-items:baseline; gap:8px; }
+.emit-next-title { color:var(--accent); font-size:12px; font-weight:600; }
+.emit-next-meta { margin-left:auto; color:var(--accent); font-size:10.5px; }
+.emit-next-text { margin-top:3px; color:var(--ink-2); font-size:11.5px; line-height:1.7; }
+.emit-modal-foot {
+  flex:none; display:flex; align-items:center; gap:10px;
+  padding:12px 18px 14px; border-top:1px solid var(--line-faint);
+}
+.emit-foot-hint { margin-left:auto; color:var(--muted); font-size:10.5px; line-height:1.5; }
+.emit-foot-warn { flex:1; min-width:0; color:var(--danger); font-size:11.5px; line-height:1.5; }
 
 @media (max-height: 620px) {
   .recording-page:not(.is-panel):not(.is-embed) { height:auto; }
@@ -7229,6 +8071,23 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .select-hint { font-size:11.5px; color:var(--muted); }
 .select-hint.is-bad { color:var(--danger); }
 .select-actions { margin-left:auto; display:flex; gap:6px; flex:none; }
+
+/* 后置处理卡：虚线框 + 冷色，和实线步骤行区分开——它不在流程里按顺序执行。
+   放列表末尾是因为它在整个流程之后跑，视觉位置就是执行位置。 */
+.teardown-card { margin-top:12px; padding:9px 11px 8px; border:1px dashed var(--accent-line); border-radius:11px; background:var(--bg-soft, rgba(127,127,127,.05)); }
+.td-head { display:flex; align-items:center; gap:7px; min-width:0; }
+.td-tag { flex:none; padding:1px 6px; border-radius:5px; font-size:10.5px; font-weight:600; color:var(--call, #6d4bd8); background:var(--call-soft, rgba(109,75,216,.10)); }
+.td-name { font-size:12.5px; font-weight:600; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.td-count { flex:none; font-size:11px; color:var(--muted); }
+.td-warn { flex:none; font-size:11px; color:var(--danger); }
+.td-actions { margin-left:auto; display:flex; flex:none; }
+.td-args { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
+.td-arg { padding:1px 6px; border-radius:5px; font-size:11px; color:var(--muted); background:var(--bg-card); }
+.td-steps { list-style:none; margin:6px 0 0; padding:0; display:flex; flex-direction:column; gap:2px; }
+.td-steps li { display:flex; gap:6px; align-items:baseline; font-size:11.5px; color:var(--muted); min-width:0; }
+.td-no { flex:none; width:14px; text-align:right; font-variant-numeric:tabular-nums; opacity:.7; }
+.td-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.td-hint { margin:6px 0 0; font-size:10.5px; color:var(--muted); opacity:.85; }
 
 /* 调用卡：紫色系。它不是一种操作，而是「一串操作的入口」，
    和任何一种原子步骤共色都会被读成「又是一步点击」。 */

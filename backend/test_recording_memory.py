@@ -324,11 +324,12 @@ class EmitInjectionTest(unittest.TestCase):
         self.assertEqual(payload['samples'][0]['path'], 'tests/login/login-success.spec.ts')
         self.assertIn('await page.goto', payload['samples'][0]['head'])
 
-    def test_writer_samples_untouched_without_memory(self):
+    def test_writer_samples_dropped_without_memory(self):
+        """detect 扫到的「最近改过的用例」不再下发给写手：写手会照着抄项目封装。"""
         detected = {'samples': [{'path': 'tests/zzz.spec.ts', 'head': '// 半截'}], 'evidence': []}
         payload = emit._payload('playwright-ts', self.STEPS, 'tests/a.spec.ts', 't',
                                 detected, [], memory=None)
-        self.assertEqual(payload['samples'][0]['path'], 'tests/zzz.spec.ts')
+        self.assertEqual(payload['samples'], [])
         self.assertIsNone(payload['project_memory'])
 
     def test_writer_prompt_states_precedence(self):

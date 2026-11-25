@@ -14,6 +14,7 @@
 对外只有四个入口：`discover()` / `start()` / `stop()` / `artifact_path()`。
 """
 import json
+import logging
 import os
 import re
 import shutil
@@ -27,6 +28,8 @@ from pathlib import Path
 from app.models import db
 from app.models.test_run import TestRun
 from app.services.recording import detect, toolchain
+
+logger = logging.getLogger(__name__)
 
 # 枚举结果缓存：Playwright 25 条 2s、Robot 508 条 3s，每次开页面都重算太浪费。
 # 用「刷新用例」按钮可以强制重来。
@@ -506,8 +509,8 @@ def _rf_test_root(root):
     return root_path
 
 
-def _rf_cases(root, python):
-    target = _rf_test_root(root)
+def _rf_rows(target, root, python):
+    """对 target（目录或单个 .robot 文件）枚举一次，返回 TestSuiteBuilder 的原始行。"""
     try:
         result = subprocess.run([python, '-c', RF_DUMP, str(target)],
                                 capture_output=True, text=True, encoding='utf-8',
@@ -526,27 +529,98 @@ def _rf_cases(root, python):
     match = re.search(r'^\[', text, re.M)
     if not match:
         raise RunnerError('枚举用例没有返回结果')
-    rows = json.loads(text[match.start():])
+    return json.loads(text[match.start():])
 
-    cases = []
-    for row in rows:
-        source = row.get('source') or ''
-        file = _rel(source, root) if source else ''
-        cases.append({
-            'id': 'rf|%s|%s' % (file, row.get('name') or ''),
-            'framework': 'robot-selenium',
-            'file': file,
-            'dir': _posix(Path(file).parent),
-            'title': row.get('name') or '',
-            'suite': row.get('suite') or '',
-            'project': '',
-            'line': 0,
-            'tags': list(row.get('tags') or []),
-            'generated': detect.is_generated_by_autocase(Path(source)) if source else False,
-            'run_path': file,
-        })
+
+def _rf_case(row, source, root):
+    file = _rel(source, root) if source else ''
+    return {
+        'id': 'rf|%s|%s' % (file, row.get('name') or ''),
+        'framework': 'robot-selenium',
+        'file': file,
+        'dir': _posix(Path(file).parent),
+        'title': row.get('name') or '',
+        'suite': row.get('suite') or '',
+        'project': '',
+        'line': 0,
+        'tags': list(row.get('tags') or []),
+        'generated': detect.is_generated_by_autocase(Path(source)) if source else False,
+        'run_path': file,
+    }
+
+
+def _rf_cases(root, python):
+    rows = _rf_rows(_rf_test_root(root), root, python)
+    cases = [_rf_case(row, row.get('source') or '', root) for row in rows]
     cases.sort(key=lambda item: (item['file'], item['title']))
     return cases
+
+
+def cases_in(workspace, files):
+    """只枚举指定文件的用例。生成完脚本要立刻跳到执行页时用它。
+
+    不能复用 discover() 的两个原因：它缓存 2 分钟，刚写出来的文件还在缓存里看不见；
+    它只扫「测试用例层 / tests」这几个约定目录，文件写到别处就永远找不到。
+    这里文件写在哪就解析哪。
+
+    解析失败只记进 missing，不抛错：脚本已经生成成功了，不能因为「列不出用例」
+    反过来把一次成功判成失败。
+    """
+    root = Path(str(workspace or '')).resolve()
+    if not root.is_dir():
+        raise RunnerError('工作区不存在：%s' % workspace)
+
+    wanted, missing = {}, []
+    for item in files or []:
+        rel = _posix(str(item or '')).strip('/')
+        if not rel:
+            continue
+        absolute = (root / rel).resolve()
+        if absolute != root and root not in absolute.parents:
+            missing.append(rel)
+            continue
+        if absolute.is_file():
+            wanted[rel] = absolute
+        else:
+            missing.append(rel)
+
+    framework = _framework(root)
+    if not wanted:
+        return {'framework': framework, 'cases': [], 'root': str(root), 'missing': missing}
+
+    cases = []
+    if framework == 'robot-selenium':
+        python = _rf_python(str(root))
+        if not python:
+            raise RunnerError('工作区里没有 Python 环境（venv/.venv），无法枚举 Robot 用例')
+        for rel, absolute in wanted.items():
+            try:
+                rows = _rf_rows(absolute, root, python)
+            except RunnerError as exc:
+                logger.warning('按文件枚举失败（%s）：%s', rel, exc)
+                missing.append(rel)
+                continue
+            for row in rows:
+                cases.append(_rf_case(row, row.get('source') or str(absolute), root))
+        cases.sort(key=lambda item: (item['file'], item['title']))
+    elif framework == 'playwright-ts':
+        try:
+            listed = _pw_cases(str(root))
+        except RunnerError as exc:
+            logger.warning('按文件枚举失败：%s', exc)
+            missing.extend(wanted)
+        else:
+            cases = [case for case in listed if case['file'] in wanted]
+    else:
+        raise RunnerError('这个工作区既没有 .robot 用例，也没有 @playwright/test（package.json），无法执行')
+
+    # 与 discover() 保持一致：_rf_run 靠 file_total 判断「整个文件都被选中」。
+    totals = {}
+    for case in cases:
+        totals[case['file']] = totals.get(case['file'], 0) + 1
+    for case in cases:
+        case['file_total'] = totals[case['file']]
+    return {'framework': framework, 'cases': cases, 'root': str(root), 'missing': missing}
 
 
 def _rf_run(root, handle, selected, artifacts, report):

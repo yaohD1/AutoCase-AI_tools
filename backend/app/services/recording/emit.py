@@ -18,6 +18,7 @@ from app.services.recording.locators import (best_effort, false_positive, inline
                                             pick_for, pool_for)
 from app.services.recording.captcha_ts import CAPTCHA_TS
 from app.services.recording.files_bundle import FILES_PY, FILES_TS
+from app.services.recording.slider_bundle import SLIDER_PY
 from app.services.recording.slider_ts import SLIDER_TS
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,8 @@ LOCATOR_RULES = (
     '- intent.type 为 url_contains / page_text_contains / sleep 时没有 target：'
     'url_contains 断言整条地址，page_text_contains 断言整个页面的文字，不要为它们编造元素定位。\n'
     '- step.type 为 reload 表示「刷新当前标签页」：这一步没有 target 也没有 url。\n'
+    '- step.type 为 close 表示「关闭被测浏览器」：这一步没有 target、没有值，'
+    '它是一条收尾声明，不是对页面元素的操作。\n'
     '- step.type 为 press 表示「在目标元素上按一个键」，step.value 是键名（如 Enter、Control+Enter）。\n'
     '- step.type 为 dialog 表示「上一步操作会弹出原生对话框」，它没有 target，也没有定位。'
     'step.value 是 accept 或 dismiss，step.dialog.message 是弹窗文字（只用于写注释，不要拿去断言）。'
@@ -142,6 +145,8 @@ FRAMEWORK_RULES = {
         'download.prompt_for_download 为 False。项目里有现成的公共 resource 就只补这两个选项，'
         '不要重写整个 driver 初始化。\n'
         '  · 中文文件名到磁盘可能被 URL 编码，断言优先用通配的 expected（*.xlsx），不要把全名写死。\n'
+        '- 关闭浏览器（type 为 close）：写 Close Browser，位置就放在它那一步。'
+        '这一步没有 target、没有值，不要加等待，也不要改成 Quit All Browsers。\n'
     ),
     'playwright-ts': (
         '框架写法（Playwright，自带 auto-wait）：\n'
@@ -204,6 +209,8 @@ FRAMEWORK_RULES = {
         '  · expect 里为空或为 0 的键不要写。parse 为 none 时连 verifyFile 都省掉：'
         '文件存在、体积过线这两条已由 downloadFile 保证。\n'
         '  · 下载目录默认是项目根的 downloads/，不要改成绝对路径，也不要写死盘符。\n'
+        '- 关闭浏览器（type 为 close）：写 await page.close()，位置就放在它那一步。'
+        '不要写 browser.close()（关掉整个浏览器会让后续页面全部失效），也不要加 waitForTimeout。\n'
     ),
 }
 
@@ -295,7 +302,10 @@ def _steps_for_prompt(steps, framework, actions=None):
                 item['text'] = step['text']
             out.append(item)
             continue
-        item = {'no': step['no'], 'type': step['type'], 'text': step.get('text')}
+        # text 是元素上的原文，用来写注释；没有就不占位（null 对写手没有信息量）。
+        item = {'no': step['no'], 'type': step['type']}
+        if step.get('text'):
+            item['text'] = step['text']
         # 带最长等待就是轮询等待。老数据里可能存在 type 仍是 assert 的，这里统一成 wait，
         # 免得提示词里「立即断言」和「等到成立」两套写法各自为政。
         if step['type'] in ('assert', 'wait') and (step.get('intent') or {}).get('timeout'):
@@ -339,14 +349,18 @@ def _steps_for_prompt(steps, framework, actions=None):
         target = step.get('target')
         if target:
             info = _locator_info(target, framework)
-            item['target'] = {
-                'alias': target.get('alias'),
-                'status': target.get('status'),
-                'locator': info['locator'] if info else None,
-                'match_count': info['matches'] if info else None,
-                'nth': info['nth'] if info else None,
-                'candidates': _candidates_for_prompt(target, framework),
-            }
+            matches = info['matches'] if info else None
+            nth = info['nth'] if info else None
+            item['target'] = {'locator': info['locator'] if info else None}
+            if target.get('alias'):
+                item['target']['alias'] = target['alias']
+            # 候选清单是「录制时怎么挑定位」的中间产物：模型只需要一条能跑通的定位。
+            # 唯一命中（match_count == 1 且没有 nth）时整段不发——实测这能省掉提示词
+            # 三成体积，而写手从来没在里面挑过东西。真不唯一时才给，那时的候选才有用。
+            if matches != 1 or nth is not None:
+                item['target']['match_count'] = matches
+                item['target']['nth'] = nth
+                item['target']['candidates'] = _candidates_for_prompt(target, framework)
             # 序号已经算进 locator 里了（RF 的 xpath=(...)[n]）：必须明说，
             # 否则写手会照着 nth 再拼一次，变成「第 n 个里的第 n 个」，直接定位不到。
             if info and info.get('nth_applied'):
@@ -363,6 +377,12 @@ def _steps_for_prompt(steps, framework, actions=None):
         # 标签页序号：0 是主标签页，非 0 说明这一步是在别的标签页里发生的。
         if step.get('page_index'):
             item['page_index'] = step['page_index']
+        # 这一步的「执行前等待」：面板上给这一步开了开关并填了秒数。
+        # 等的是**这一步自己的目标元素**——先等它出现，再动它。
+        # 不是等下一步的元素：那是「点完等结果」，和这个开关绑的不是同一件事。
+        settle = step.get('settle') or None
+        if settle:
+            item['settle'] = {'timeout': settle.get('timeout') or 5}
         out.append(item)
     return out
 
@@ -389,11 +409,36 @@ def _actions_for_prompt(actions, framework, steps):
     return out
 
 
+def _teardown_for_prompt(teardown, framework):
+    """后置处理给写手的形状：名字 + 参数 + 子步骤。
+
+    它就是「一次不在流程里的调用」，所以子步骤和动作定义同一套形状；区别只在
+    写手要把名字写成 Test Teardown / afterEach，而不是写进用例正文。
+    """
+    action = (teardown or {}).get('action') or {}
+    if not action.get('name'):
+        return None
+    return {
+        'id': action.get('id'),
+        'name': action['name'],
+        'desc': action.get('desc') or '',
+        'params': [p.get('key') for p in action.get('params') or []],
+        'args': {k: str(v) for k, v in ((teardown or {}).get('args') or {}).items()},
+        'steps': _steps_for_prompt(action.get('steps') or [], framework),
+    }
+
+
 def _fmt(candidate, framework):
-    """把一个候选变成目标框架里可以直接写的定位字符串。"""
+    """把一个候选变成目标框架里可以直接写的定位字符串；没有真定位时返回 None。
+
+    RF 的 desc 是展示串（`rf xpath://...`），当定位写出去是错的，所以只认 spec.args；
+    存档续录的老草稿可能没带 spec，这里必须容错——缺定位要由上层汇总成
+    「第 N 步请重新拾取」，而不是冒一个 KeyError 到全局 500。
+    """
     if framework == RF_FRAMEWORK:
-        return candidate['spec']['args'][0]
-    return candidate['desc']
+        args = (candidate.get('spec') or {}).get('args') or []
+        return args[0] if args else None
+    return candidate.get('desc') or None
 
 
 def _match_texts(target):
@@ -462,12 +507,26 @@ def _locator_info(target, framework):
     返回 {'locator', 'matches', 'nth', 'mode'}，RF 下序号可能已经内联进 locator
     （此时带 nth_applied）。连一条能命中的候选都没有时返回 None。
     kind / desc / spec 是给界面「定位详情」用的：它得知道这条长什么样、能不能拿去查页面。
+    候选在、但没带定位 spec（老存档续录）时返回 missing_spec=True，
+    让调用方按「请重新拾取」报错，而不是把它当成「元素已经不在页面上」。
     """
     candidate, index, mode = _pick_locator(target, framework)
     if candidate is None:
         return None
+    locator = _fmt(candidate, framework)
+    if locator is None:
+        return {
+            'locator': None,
+            'matches': candidate.get('count') or 0,
+            'nth': index,
+            'mode': mode,
+            'kind': candidate.get('kind'),
+            'desc': candidate.get('desc'),
+            'spec': candidate.get('spec'),
+            'missing_spec': True,
+        }
     info = {
-        'locator': _fmt(candidate, framework),
+        'locator': locator,
         'matches': candidate.get('count') or 0,
         'nth': index,
         'mode': mode,
@@ -496,6 +555,9 @@ def _candidates_for_prompt(target, framework):
             continue
         index = candidate.get('index')
         locator = _fmt(candidate, framework)
+        if locator is None:
+            # 没带定位 spec 的老存档：先把这条候选剔掉，_prepare 会整体拦下并说清第几步。
+            continue
         applied = False
         if candidate['count'] > 1:
             # RF 下多匹配的候选也把序号内联进去：写手从清单里挑备选用时，
@@ -898,7 +960,7 @@ def _prepare(workspace, steps, framework, target_path, actions=None):
     # 序号对 RF 已经内联进 xpath，对 Playwright 由写手写成 .nth(n)——两边都不再是
     # 「让模型自己拼字符串」，剩下的风险只在 css 候选上（见 LOCATOR_RULES）。
     # 只有连一条候选都命不中（元素已经不在页面上）才拒绝——那种情况写不出任何定位。
-    blocked, degraded = [], []
+    blocked, degraded, unlocated = [], [], []
     checks = [(step, None) for step in steps]
     for action in (actions or {}).values():
         for sub in action.get('steps') or []:
@@ -910,6 +972,10 @@ def _prepare(workspace, steps, framework, target_path, actions=None):
         info = _locator_info(target, framework)
         if info is None:
             blocked.append((owner, step.get('no')))
+        elif info.get('missing_spec'):
+            # 候选还在、只是没带定位表达式（老存档只存了前端视图）。这和「元素找不到」
+            # 是两件事：重拾一次就能恢复，不该让用户去页面上重新找元素。
+            unlocated.append((owner, step.get('no')))
         elif info['mode'] == 'ambiguous':
             entry = {
                 'no': step.get('no'),
@@ -921,6 +987,14 @@ def _prepare(workspace, steps, framework, target_path, actions=None):
             if owner:
                 entry['action'] = owner
             degraded.append(entry)
+    if unlocated:
+        where = ['第 %s 步' % no if not owner else '动作《%s》第 %s 步' % (owner, no)
+                 for owner, no in unlocated]
+        raise EmitError(
+            '%s 缺少定位信息（存档续录可能没带上），请重新拾取这几步的目标元素后再生成'
+            % '、'.join(where),
+            details=['unlocated:%s' % (no or 0) for _, no in unlocated],
+        )
     if blocked:
         where = ['第 %s 步' % no if not owner else '动作《%s》第 %s 步' % (owner, no)
                  for owner, no in blocked]
@@ -1018,18 +1092,42 @@ def plan(runner, workspace, model, steps, framework, target_path, title, python=
     }
 
 
-def _ensure_slider_utils(root, target_path, steps, framework):
-    """把滑块工具写进 target_path 同级的 utils/，返回相对路径；不需要就返回 None。
+def _has_slider(steps=None, actions=None):
+    """本次流程里有没有滑块。
+
+    滑块**通常不在顶层步骤里**，而在动作（比如「登录」）的子步骤里：用户录一个
+    「登录」动作，里面是填账号、填密码、点登录、拖滑块四步。只扫顶层会漏掉它，
+    这正是之前提示词里那段滑块规则从来没注入过的原因。
+    """
+    if any(step.get('type') == 'slider' for step in (steps or [])):
+        return True
+    items = actions.values() if isinstance(actions, dict) else (actions or [])
+    for action in items:
+        for step in (action.get('steps') or []):
+            if step.get('type') == 'slider':
+                return True
+    return False
+
+
+def _ensure_slider_utils(root, target_path, steps, framework, actions=None):
+    """把滑块工具写进目标项目，返回相对路径；不需要就返回 None。
+
+    两个框架落盘位置不同：PW 放 utils/slider.ts，RF 放 libraries/SliderLibrary.py
+    （和 FilesLibrary 并排，.robot 里用 ${CURDIR}/libraries/ 引用）。
+    两个文件里的算法是同一套，只差语言。
 
     必须在 guard.snapshot 之前落盘：写完才算「项目原有文件」，既不进 diff，
-    也不会被越界检查当成 agent 乱写。写手被要求 import 它，文件不存在时它会自己造一个，
-    而 write_scope=exact 会直接把那次写入拒掉。
+    也不会被越界检查当成 agent 乱写。写手被要求引用它，文件不存在时它会自己造一个，
+    而 write_scope=exact 会把那次写入拒掉。
     """
-    if framework != PW_FRAMEWORK:
-        return None
-    if not any((step.get('type') == 'slider') for step in (steps or [])):
+    if not _has_slider(steps, actions):
         return None
     target = Path(target_path)
+    if framework == RF_FRAMEWORK:
+        folder = Path(root) / target.parent / 'libraries'
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'SliderLibrary.py').write_text(SLIDER_PY, encoding='utf-8')
+        return (target.parent / 'libraries' / 'SliderLibrary.py').as_posix()
     utils_dir = Path(root) / target.parent / 'utils'
     utils_dir.mkdir(parents=True, exist_ok=True)
     (utils_dir / 'slider.ts').write_text(SLIDER_TS, encoding='utf-8')
@@ -1075,6 +1173,289 @@ def _ensure_files_utils(root, target_path, steps, framework):
     return (target.parent / 'utils' / 'files.ts').as_posix()
 
 
+# 平台补头的固定内容：浏览器怎么启动、什么时候关。
+# 这些行录制里没有——录制侧用 ignore_https_errors 把证书警告页遮掉了，页面本来就是开着的——
+# 但生成的脚本缺了就跑不起来：自签名 https 会停在 NET::ERR_CERT_AUTHORITY_INVALID，
+# 而 Go To 自己不报错，后面每一步都找不到元素，看起来像「定位写错了」。
+def _rf_boot_lines(download=False):
+    """平台补头的固定内容：浏览器怎么启动、什么时候关。
+
+    这些行录制里没有——录制侧用 ignore_https_errors 把证书警告页遮掉了，页面本来就是开着的——
+    但生成的脚本缺了就跑不起来：自签名 https 会停在 NET::ERR_CERT_AUTHORITY_INVALID，
+    而 Go To 自己不报错，后面每一步都找不到元素，看起来像「定位写错了」。
+
+    download=True 时多三行，把浏览器的下载目录绑到 FilesLibrary 用的那个目录上。
+    Chrome 只认 Windows 原生反斜杠路径：`${CURDIR}/downloads` 这种混合斜杠会被**静默忽略**，
+    文件落到用户默认下载目录，Download File 干等 30 秒报「没有出现下载完成的文件」。
+    `Ensure Download Dir` 由 FilesLibrary 提供，返回的就是它自己那个目录的绝对路径，
+    两边永远一致，平台不用再算一遍。
+    """
+    lines = [
+        "    ${options}=    Evaluate    sys.modules['selenium.webdriver'].ChromeOptions()"
+        "    sys, selenium.webdriver",
+        '    Call Method    ${options}    add_argument    --ignore-certificate-errors',
+    ]
+    if download:
+        lines += [
+            '    ${download_dir}=    Ensure Download Dir',
+            '    ${prefs}=    Create Dictionary    download.default_directory=${download_dir}'
+            '    download.prompt_for_download=${False}',
+            '    Call Method    ${options}    add_experimental_option    prefs    ${prefs}',
+        ]
+    lines += [
+        '    Create Webdriver    Chrome    chrome_options=${options}',
+        '    Set Selenium Implicit Wait    10',
+        '    Maximize Browser Window',
+    ]
+    return lines
+
+# 这些行由平台统一写，模型写了也要删掉，否则会二次打开浏览器 / 覆盖等待参数。
+_RF_INIT_PREFIXES = (
+    'open browser', 'open chrome',
+    'create webdriver', 'maximize browser window',
+    'set selenium implicit wait', 'set selenium timeout', 'set selenium speed',
+    'close browser',
+)
+_RF_INIT_CN_PREFIXES = ('打开浏览器', '打开谷歌浏览器', '关闭浏览器')
+
+
+def _looks_like_boot(body):
+    """这一行是不是「浏览器初始化 / 收尾」，该由平台统一写。"""
+    if not body:
+        return False
+    low = ' '.join(body.lower().split())
+    if 'chromeoptions()' in low:
+        return True
+    if low.startswith('call method') and '${options}' in low:
+        return True
+    for prefix in _RF_INIT_PREFIXES:
+        if low.startswith(prefix):
+            return True
+    return any(body.startswith(prefix) for prefix in _RF_INIT_CN_PREFIXES)
+
+
+def _strip_fence(text):
+    lines = text.strip().splitlines()
+    if lines and lines[0].strip().startswith('```'):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == '```':
+        lines = lines[:-1]
+    return '\n'.join(lines)
+
+
+def _split_robot_sections(text):
+    """按 `*** Xxx ***` 切段，段名统一小写；tasks 当成 test cases。"""
+    out = {}
+    current = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('***') and stripped.endswith('***') and len(stripped) > 6:
+            name = stripped.strip('*').strip().lower()
+            if name == 'tasks':
+                name = 'test cases'
+            current = name
+            out.setdefault(current, [])
+            continue
+        if current is not None:
+            out[current].append(line.rstrip())
+    return out
+
+
+def _first_goto_url(steps, actions=None):
+    for step in (steps or []):
+        if step.get('type') == 'goto' and step.get('url'):
+            return step['url']
+    items = actions.values() if isinstance(actions, dict) else (actions or [])
+    for action in items:
+        for step in (action.get('steps') or []):
+            if step.get('type') == 'goto' and step.get('url'):
+                return step['url']
+    return None
+
+
+def _trim_blank(lines):
+    """去掉首尾空行。不去的话每跑一次规范化就多几行空行，文件越滚越乱。"""
+    out = list(lines)
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    return out
+
+
+def _is_close_line(body):
+    """这一行是不是「关闭浏览器」。"""
+    low = ' '.join((body or '').lower().split())
+    return low.startswith('close browser') or (body or '').strip().startswith('关闭浏览器')
+
+
+def _normalize_rf_script(root, target_path, steps, actions=None,
+                         slider_lib=None, files_lib=None, teardown=None):
+    """把 agent 写的 .robot 改成「平台头 + 模型正文」，返回被替换掉的行。
+
+    只保留 Test Cases / Keywords / Variables 三段，Settings 整段重写：
+    浏览器初始化带 `--ignore-certificate-errors`（内网系统几乎都是自签名证书），
+    加隐式等待（录制的 goto 之后元素还没渲染，项目封装里靠 Sleep 5~7 秒硬等），
+    `Test Teardown`（用户设的后置处理，失败也执行），以及
+    `Suite Teardown Close Browser`（录制结束时不会关浏览器）。
+
+    后置处理存在时，正文里的 `Close Browser` 会被摘掉：它跑在后置**之前**，浏览器一关，
+    后置里的步骤就全部落到已关闭的会话上。收尾统一交给 Suite Teardown，顺序才对。
+    """
+    path = Path(root) / target_path
+    try:
+        raw = path.read_text(encoding='utf-8')
+    except OSError:
+        return []
+    sections = _split_robot_sections(_strip_fence(raw))
+    cases = sections.get('test cases')
+    if not cases:
+        # 结构不认识就别动：宁可让它原样失败，也不要猜着改坏
+        return []
+
+    action = (teardown or {}).get('action') or {}
+    teardown_name = (action.get('name') or '').strip()
+    has_close = any(step.get('type') == 'close' for step in (steps or []))
+    # 正文里该不该保留 close：只有「用户显式加了 close、又没有后置」时才保留。
+    keep_body_close = has_close and not teardown_name
+
+    notes = []
+    cleaned = []
+    close_kept = False
+    for line in cases:
+        body = line.strip()
+        if _looks_like_boot(body):
+            notes.append(body)
+            if keep_body_close and _is_close_line(body) and not close_kept:
+                # 用户显式要的收尾，位置就是他放的那一步；只保留第一次。
+                cleaned.append('    Close Browser')
+                close_kept = True
+            continue
+        cleaned.append(line)
+    cleaned = _trim_blank(cleaned)
+
+    name_at = None
+    for index, line in enumerate(cleaned):
+        body = line.strip()
+        if body and not line[:1].isspace() and not body.startswith('#'):
+            name_at = index
+            break
+    if name_at is None:
+        return []
+
+    # BOOT 要插在用例名之后、[Documentation]/[Tags] 这类设置行之后。
+    insert_at = name_at + 1
+    while insert_at < len(cleaned):
+        body = cleaned[insert_at].strip()
+        if not body or (body.startswith('[') and ']' in body):
+            insert_at += 1
+            continue
+        break
+
+    block = _rf_boot_lines(download=bool(files_lib))
+    if not any(line.strip().lower().startswith('go to') for line in cleaned):
+        url = _first_goto_url(steps, actions)
+        if url:
+            block.append('    Go To    ' + url)
+    cleaned[insert_at:insert_at] = block
+
+    # 模型漏写 close 时补在正文末尾：用户既然加了这一步，就该在脚本里看到它。
+    if keep_body_close and not close_kept:
+        cleaned = _trim_blank(cleaned)
+        cleaned.append('    Close Browser')
+        notes.append('补 Close Browser')
+
+    out = []
+    origin = next((line for line in raw.splitlines()
+                   if line.strip().startswith('# @autocase')), None)
+    out.append(origin or '# 头部由平台生成：浏览器怎么启动、什么时候关，这里统一保证。')
+    out.append('*** Settings ***')
+    out.append('Library    SeleniumLibrary    timeout=10')
+    if files_lib:
+        # 下载目录必须显式给，不能用 FilesLibrary 的默认值：默认是相对当前工作目录的
+        # downloads/，换一个目录运行 robot 就换一个目录，而且同项目所有脚本共用一个，
+        # 并发跑时 A 脚本会看到 B 脚本刚下的文件。绑到脚本同级，产物跟着脚本走。
+        out.append('Library    ${CURDIR}/libraries/FilesLibrary.py    ${CURDIR}/downloads')
+    if slider_lib:
+        out.append('Library    ${CURDIR}/libraries/SliderLibrary.py')
+    if teardown_name:
+        # 实参由平台写：后置是用户在界面上设的，模型只负责写同名关键字。
+        args = [str((teardown.get('args') or {}).get(p.get('key'), ''))
+                for p in action.get('params') or []]
+        # 空值会让 ${EMPTY} 一样的空单元格把参数位错开，宁可不传，让关键字用默认值。
+        args = [value for value in args if value != '']
+        out.append('    '.join(['Test Teardown', teardown_name] + args))
+    out.append('Suite Teardown    Close Browser')
+    out.append('')
+
+    variables = _trim_blank(sections.get('variables') or [])
+    if variables:
+        out.append('*** Variables ***')
+        out.extend(variables)
+        out.append('')
+    out.append('*** Test Cases ***')
+    out.extend(cleaned)
+    keywords = _trim_blank(sections.get('keywords') or [])
+    if keywords:
+        out.append('')
+        out.append('*** Keywords ***')
+        out.extend(keywords)
+
+    text = '\n'.join(out).rstrip() + '\n'
+    if text == raw:
+        return notes
+    path.write_text(text, encoding='utf-8')
+    return notes
+
+
+def _normalize_pw_script(root, target_path):
+    """给 Playwright spec 补 ignoreHTTPSErrors，返回是否改过。
+
+    和 RF 的 `--ignore-certificate-errors` 是同一件事：录制侧 newContext 时开了
+    ignore_https_errors，所以警告页在录制中不可见、IR 里没有「继续前往」可录；
+    生成侧不开，`page.goto` 到自签名 https 会直接抛
+    `net::ERR_CERT_AUTHORITY_INVALID`。
+
+    两种写法分别处理：test runner 用文件级 `test.use`，手动建 context 的写进
+    `newContext({...})` —— 后者 `test.use` 不生效。
+    """
+    path = Path(root) / target_path
+    try:
+        raw = path.read_text(encoding='utf-8')
+    except OSError:
+        return False
+    text = _strip_fence(raw)
+    if 'ignoreHTTPSErrors' in text:
+        return False
+    lines = text.splitlines()
+
+    manual = next((i for i, line in enumerate(lines) if 'newContext(' in line), None)
+    if manual is not None:
+        line = lines[manual]
+        pos = line.find('newContext(') + len('newContext(')
+        rest = line[pos:].lstrip()
+        if rest.startswith('{'):
+            lines[manual] = line[:pos] + ' { ignoreHTTPSErrors: true,' + rest[1:]
+        elif rest.startswith(')'):
+            # 原来无参：newContext() -> newContext({ ignoreHTTPSErrors: true })
+            lines[manual] = line[:pos] + '{ ignoreHTTPSErrors: true }' + rest
+        else:
+            lines[manual] = line[:pos] + '{ ignoreHTTPSErrors: true }, ' + rest
+    else:
+        last_import = -1
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith('import ') or stripped.startswith('} from '):
+                last_import = index
+        if last_import < 0:
+            # 没有 import 就不是 test runner 的 spec，别猜着插
+            return False
+        lines[last_import + 1:last_import + 1] = ['', 'test.use({ ignoreHTTPSErrors: true });']
+
+    path.write_text('\n'.join(lines).rstrip() + '\n', encoding='utf-8')
+    return True
+
+
 def _write_slider_env(root):
     """把视觉模型的三个环境变量补进项目根的 .env。已存在的键一个都不覆盖。
 
@@ -1108,6 +1489,65 @@ def _write_slider_env(root):
     return path
 
 
+def _settle_rules(payload):
+    """「执行前等待」怎么写。
+
+    面板上给某一步开了开关（steps 里带 settle），语义是「先等这一步的元素出现，再动它」。
+    必须说清楚插在动作**之前**、等的是**这一步自己的 target**，而且只对带 settle 的步骤生效——
+    不然写手会给每一步都补一行 Wait Until（它上一版就是这么把 9 步写成 18 行的）。
+    """
+    if not any(step.get('settle') for step in (payload.get('steps') or [])):
+        return ''
+    if payload.get('framework') == RF_FRAMEWORK:
+        return (
+            '本次有步骤带「执行前等待」（steps 里带 settle 的项）。\n'
+            '- 对带 settle 的步骤：**先写一行等待，紧接着写这一步的动作**，'
+            '等待的元素就是这一步自己的 target.locator：\n'
+            '  `Wait Until Element Is Visible    <这一步 target.locator>    <settle.timeout>s`\n'
+            '  不要等下一步的元素，不要改超时，不要调整这两行的先后。\n'
+            '- **没有 settle 的步骤一律不要加 Wait Until / Sleep**，一行写完就结束；'
+            '元素出现这件事由平台设置的隐式等待负责，不要再抄一遍。\n'
+            '- 这条同样管 actions 里的子步骤：动作内部没有 settle 的步骤也不要写等待。\n'
+        )
+    return (
+        '本次有步骤带「执行前等待」（steps 里带 settle 的项）。\n'
+        '- 对带 settle 的步骤：**先等这一步自己的元素，再执行动作**：\n'
+        '  `await expect(page.locator(<这一步 target.locator>)).toBeVisible({ timeout: <settle.timeout> * 1000 })`\n'
+        '  不要等下一步的元素，不要改超时。\n'
+        '- **没有 settle 的步骤不要加任何 expect().toBeVisible / waitForTimeout**。\n'
+    )
+
+
+def _slider_rules(payload):
+    """滑块那一步怎么写。
+
+    单独抽出来是因为它有两个容易踩的点：
+    1. 滑块通常在**动作的子步骤**里，只扫顶层会漏（这正是它之前从没被注入过的原因）；
+    2. 两个框架的能力位置不同 —— PW 是 `utils/slider.ts` 里的 `solveSlider`，
+       RF 是 `libraries/SliderLibrary.py` 里的 `Solve Slider`。写成同一句话，
+       总有一个框架拿到用不了的指令。
+    """
+    if not _has_slider(payload.get('steps'), payload.get('actions')):
+        return ''
+    head = '本次步骤里有**滑块验证**（可能在某个动作的子步骤里）。\n'
+    head += '- 不要自己写截图、找缺口、算坐标、拼拖动轨迹的代码，也不要去找页面上的 canvas。\n'
+    if payload.get('framework') == RF_FRAMEWORK:
+        head += (
+            '- 直接写一行 `Solve Slider    <selector>`：selector 取该项 slider.selector 原值，'
+            'attempts / timeout 用 slider 字段里的值（没给就省略）。\n'
+            '- 这个关键字来自平台库，`Library` 行由平台写在文件头里，你不要写 Settings。\n'
+        )
+    else:
+        head += (
+            '- 直接调用平台注入的 `solveSlider(page, config)`，config 用该项的 slider 字段原值。\n'
+            '- 从平台生成的 `utils/slider` 导入：`import { solveSlider } from \'./utils/slider\';`'
+            '（工具文件由平台写在 target_path 同级的 utils/ 里，不要覆盖它）。\n'
+            '- 这个调用是异步的，必须 await；它内部最多重试 3 次，失败会抛错，不要再包一层重试。\n'
+        )
+    head += '- 不要给这一步写断言：滑块通过后页面自己会跳转，后续步骤的断言已经覆盖了结果。\n'
+    return head
+
+
 def _prompt(payload, resumed=False):
     head = ''
     if resumed:
@@ -1124,9 +1564,18 @@ def _prompt(payload, resumed=False):
         )
     head += (
         '请按下面的录制结果写入一个测试文件。\n'
-        '- 主文件必须是 target_path。任务书里若出现别的路径（包括 plan.target_path、'
-        'plan.target_path_suggestion），不要拿它当主文件。\n'
+        '- 只写 target_path 这一个文件，路径以 payload 里的 target_path 为准。\n'
     )
+    if payload.get('framework') == RF_FRAMEWORK:
+        head += (
+            '- **不要写 `*** Settings ***`**：Library、Suite Teardown 全部由平台补。\n'
+            '- 只写 `*** Test Cases ***`（和需要时的 `*** Keywords ***`），'
+            '从录制里的第一步 `Go To` 开始，一步一步翻译。\n'
+            '- 不要写任何 `Open Browser` / `Create Webdriver` / `ChromeOptions` / '
+            '`Maximize Browser Window` / `Set Selenium Implicit Wait` / `Close Browser`，'
+            '也不要调用项目里的「打开浏览器并登录…」这类封装：浏览器由平台打开，'
+            '证书、等待、收尾都在平台那一层处理。\n'
+        )
     if payload.get('write_scope') == 'workspace':
         head += (
             '- 这几步如果确实需要一个辅助文件（helper / fixture / 类型定义），可以写，'
@@ -1143,11 +1592,9 @@ def _prompt(payload, resumed=False):
         )
     if payload.get('plan'):
         head += (
-            '本次已经有人替你读过项目，任务书在 plan 字段里。按它写：\n'
-            '- project_style 是这套项目真实的写法，优先于下面任何通用规则；两者冲突时以 project_style 为准。\n'
-            '- reusable 里列出的封装只要能覆盖某一步，就必须调用它，不要自己重写同样的动作。\n'
-            '- steps 里标 reuse 的步骤按 target 和 args 调用；标 write 的步骤用录制的定位手写。\n'
-            '- needs 里列出的文件不是这次要改的，不要动它们，也不要把它们的内容复制进来。\n'
+            '本次已经有人替你读过项目，每一步要做什么写在 plan.steps 里。\n'
+            '- plan.steps 的 note 是这一步的人话说明，只拿来写注释，不要照它编造定位。\n'
+            '- 动作怎么写、用哪条定位，一律以 payload.steps 为准。\n'
         )
     else:
         head += (
@@ -1173,7 +1620,8 @@ def _prompt(payload, resumed=False):
         if (payload.get('project_memory') or {}).get('map'):
             head += (
                 'project_memory.map 是这个项目的「地图」：整个仓库里哪块代码在哪、新用例该放哪个目录、'
-                '有哪些现成封装该怎么调。samples 里是一条真实用例。\n'
+                '有哪些现成封装该怎么调。'
+                + ('samples 里是一条真实用例。\n' if payload.get('samples') else '\n') +
                 '- 优先级：plan（本次任务书）> project_memory（项目长期写法）> 下面的通用规则。'
                 '两者冲突时以 plan 为准，它是针对这一次的。\n'
                 '- 「现成封装」里能覆盖某一步的，直接按它写的调用方式用，不要重写同样的动作。\n'
@@ -1182,8 +1630,7 @@ def _prompt(payload, resumed=False):
             )
         else:
             head += (
-                'project_memory 是这个项目长期积累的画像（有人读遍项目后总结的），'
-                'samples 里是它挑出来的一条真实用例。\n'
+                'project_memory 是这个项目长期积累的画像（有人读遍项目后总结的）。\n'
                 '- 优先级：plan（本次任务书）> project_memory（项目长期写法）> 下面的通用规则。'
                 '两者冲突时以 plan 为准，它是针对这一次的。\n'
                 '- helpers / fixtures 里列出的封装只要能覆盖某一步，就直接调用，不要重写同样的动作。\n'
@@ -1194,16 +1641,14 @@ def _prompt(payload, resumed=False):
             '用户对任务书提了修改意见（plan_feedback：quote 是原文，comment 是他的要求）。\n'
             '这些意见优先于任务书本身：两者冲突时按用户意见写。\n'
         )
-    if any(step.get('type') == 'slider' for step in payload.get('steps') or []):
+    if payload.get('toolchain'):
+        head += '目标环境的真实情况（不是猜测，动笔前必须按它对齐）：\n'
         head += (
-            '本次步骤里有**滑块验证**（steps 里 type 为 slider 的项）。\n'
-            '- 不要自己写截图、找缺口、算坐标、拼拖动轨迹的代码，也不要去找页面上的 canvas。\n'
-            '- 直接调用平台注入的 `solveSlider(page, config)`，config 用该项的 slider 字段原值。\n'
-            '- 从平台生成的 `utils/slider` 导入：`import { solveSlider } from \'./utils/slider\';`'
-            '（工具文件由平台写在 target_path 同级的 utils/ 里，不要覆盖它）。\n'
-            '- 这个调用是异步的，必须 await；它内部最多重试 3 次，失败会抛错，不要再包一层重试。\n'
-            '- 不要给这一步写断言：滑块通过后页面自己会跳转，后续步骤的断言已经覆盖了结果。\n'
+            '- toolchain 是这台机器上实际安装的版本。只写这个版本支持的东西：'
+            '参数个数、关键字是否存在都以它为准，不要凭记忆用更新版本才有的写法。\n'
         )
+    head += _slider_rules(payload)
+    head += _settle_rules(payload)
     if any(step.get('type') == 'captcha' for step in payload.get('steps') or []):
         head += (
             '本次步骤里有**图形验证码识别**（steps 里 type 为 captcha 的项）。\n'
@@ -1216,6 +1661,29 @@ def _prompt(payload, resumed=False):
             '- 它只负责把码填进输入框，**不点提交**：点击登录/确定是后面独立的步骤，不要并进来。\n'
             '- 不要给这一步写断言。码对不对由后面的提交结果决定，这里断言不了。\n'
         )
+    if payload.get('teardown'):
+        if payload.get('framework') == RF_FRAMEWORK:
+            head += (
+                '本次有**后置处理**（payload.teardown）：它是收尾动作，**不写在用例正文里**。\n'
+                '- 在 `*** Keywords ***` 里写一个与 teardown.name **完全同名**的 Keyword，'
+                '子步骤照常翻译；`{{key}}` 用 params 里的同名参数，默认实参取 args。\n'
+                '- **不要**在正文里调用它，也**不要**写 `Test Teardown`：\n'
+                '  平台会把 `Test Teardown    <teardown.name>` 写进 Settings，用例失败时也会执行。\n'
+                '- 不要在这个 Keyword 里加 Close Browser：收尾时的关浏览器由平台的 Suite Teardown 负责。\n'
+                '- teardown 存在时，正文里的 close 步骤不写 `Close Browser`（同样交给 Suite Teardown）；'
+                '它不会漏执行，只是执行在最后。\n'
+            )
+        else:
+            head += (
+                '本次有**后置处理**（payload.teardown）：它是收尾动作，**不写在 test 正文里**。\n'
+                '- 写成 `test.afterEach(async ({ page }) => { ... })`，放在所有 test 之外。\n'
+                '- 子步骤照常翻译；`{{key}}` 用 params 里的同名参数，默认实参取 args。\n'
+                '- 不要在 test 里调用它，也不要写成 beforeEach。\n'
+                '- 脚本不是 test runner（自己 newContext）时没有 afterEach：把正文包进 '
+                '`try { ... } finally { ... }`，后置放 finally，保证失败也执行。\n'
+                '- teardown 存在时，正文里不要再写 `page.close()`：把 close 步骤放到 afterEach '
+                '（或 finally）的最后一行，否则后置会跑在已经关掉的页面上。\n'
+            )
     return (
         head
         + LOCATOR_RULES
@@ -1226,9 +1694,32 @@ def _prompt(payload, resumed=False):
     )
 
 
+def _plan_for_prompt(plan):
+    """任务书只把「每一步做什么」交给写手，其余字段在这里拦下。
+
+    三个必须拦的：
+    - `project_style.auth_setup` 写着「Suite Setup 登录」，而录制步骤里本来就有登录。
+      照它写就是双重登录，实测过，正文登录完再 Setup 一次，用例直接跑不过。
+    - `project_style.import_sample` / `reference_files` 会勾着写手去 Resource 项目封装，
+      但生成的每一步都要用录制下来的定位，调封装等于把录制的定位白扔。
+    - `target_path` / `target_path_suggestion` 和 payload.target_path 冲突，
+      提示词开头得专门写一句「不要拿它当主文件」，那句话本身就是这个冲突的代价。
+
+    `_note_fix` 之类是 planner 自己的修订备注，只对写 planner 的人有意义。
+    """
+    if not plan:
+        return plan
+    out = {}
+    if plan.get('steps'):
+        out['steps'] = [{'no': item.get('no'), 'note': item.get('note')}
+                        for item in plan['steps'] if item.get('note')]
+    # 风险和缺口是给人看的结论，写手看到会试图「顺手处理掉」，反而跑偏。
+    return out
+
+
 def _payload(framework, steps, target_path, title, detected, keywords, plan=None,
              plan_feedback=None, memory=None, context_reused=False, write_scope='exact',
-             actions=None):
+             actions=None, teardown=None):
     samples = list(detected.get('samples') or [])
     snippet = (memory or {}).get('snippet') or {}
     if snippet.get('code'):
@@ -1239,6 +1730,13 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
             'head': snippet['code'],
             'generated': False,
         }]
+    else:
+        # 自动采集的「项目里最近改过的用例」不再交给写手。
+        # 它是写手抄项目封装的直接原因：里面每一行都是项目里的写法，写手会照着它
+        # 把录制的定位换成 `打开浏览器并登录网管` 这类封装，连「导出」都会抄成
+        # Click Element（实测就是这么丢的下载校验）。而且它常占提示词三成体积。
+        # 只有用户在画像里明确挑过范例（snippet）时才给。
+        samples = []
     payload = {
         'framework': framework,
         'target_path': target_path,
@@ -1246,8 +1744,10 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
         'steps': _steps_for_prompt(steps, framework, actions),
         'evidence': detected.get('evidence', []),
         'samples': samples,
-        'keywords': keywords,
-        'plan': plan,
+        # keywords 不再下发。176 条清单占 11,000 字符，而一次用例平均只用 6~8 个关键字；
+        # 更糟的是规则曾经写着「必须能在这份清单里找到」，清单里没有滑块（Solve Slider）
+        # 时写手直接拒绝生成。实测不给清单，它照样写对（见 _promptlab 实验报告）。
+        'plan': _plan_for_prompt(plan),
         # 项目画像：跨多次录制复用，plan 是针对这一次的，两者同时在场。
         'project_memory': memory,
         # 用户对任务书的意见：选中片段 + 他自己的话。写手必须照这个改，
@@ -1255,6 +1755,14 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
         'plan_feedback': _clean_feedback(plan_feedback),
         'output_language': 'Simplified Chinese for progress notes; keep code and identifiers unchanged.',
     }
+    # 版本是硬事实：老环境里 syntax 对不等于关键字存在。只在真探测到时加，别给写手一堆 null。
+    toolchain_versions = {
+        name: detected.get(key)
+        for name, key in (('robot', 'robot_version'), ('seleniumlibrary', 'seleniumlibrary_version'))
+        if detected.get(key)
+    }
+    if toolchain_versions:
+        payload['toolchain'] = toolchain_versions
     if context_reused:
         # 同一会话的第二轮：读过的项目还在上下文里，别让它从头再扫一遍。
         payload['context_reused'] = True
@@ -1263,6 +1771,9 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
     if actions:
         # 只在真有过封装时才加这个键：没有动作时多一个空列表会让写手以为漏了什么。
         payload['actions'] = _actions_for_prompt(actions, framework, steps)
+    shaped = _teardown_for_prompt(teardown, framework)
+    if shaped:
+        payload['teardown'] = shaped
     return payload
 
 
@@ -1303,7 +1814,7 @@ def _repair_turn(session, runner, root, model, target_path):
 
 def generate(runner, workspace, model, steps, framework, target_path, title, python=None,
              overwrite=False, plan=None, plan_feedback=None, progress=None, storage_state=None,
-             memory=None, session=None, write_scope='exact', actions=None):
+             memory=None, session=None, write_scope='exact', actions=None, teardown=None):
     """按任务书写入脚本。返回 {'path', 'changed', 'outside', 'backup_id', 'validated', ...}。
 
     这里**不再跑规划**：规划是独立的一步（见 plan），任务书由用户确认后随请求带进来。
@@ -1333,6 +1844,12 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
             keywords = toolchain.export_keywords(detected['python'])['keywords']
         except toolchain.ToolchainError as exc:
             raise EmitError(str(exc))
+        if _has_slider(steps, actions):
+            # 平台库的关键字不在 SeleniumLibrary 的清单里。不补这一条，
+            # 「只能用清单里的关键字」那条规则会让写手认为 Solve Slider 违规，
+            # 上一版就是这么被逼到「拒绝生成」的。
+            keywords.append({'name': 'Solve Slider',
+                             'args': ['selector', 'attempts=2', 'timeout=40']})
 
     target_abs = root / target_path
     existed = target_abs.exists()
@@ -1355,10 +1872,14 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
 
     before = None
     resumed = session is not None
+    # 后置处理的子步骤也要参与「需要哪些平台工具」的判定：后置里可能有下载校验、
+    # 验证码或滑块，按顶层 steps 扫会漏掉，生成出来的文件就少一个 Library。
+    teardown_steps = list(((teardown or {}).get('action') or {}).get('steps') or [])
+    all_steps = list(steps or []) + teardown_steps
     # 有滑块 / 验证码步骤时先把工具文件落到项目里（在快照之前，见函数注释）。
-    slider_utils = _ensure_slider_utils(root, target_path, steps, framework)
-    captcha_utils = _ensure_captcha_utils(root, target_path, steps, framework)
-    files_utils = _ensure_files_utils(root, target_path, steps, framework)
+    slider_utils = _ensure_slider_utils(root, target_path, all_steps, framework, actions)
+    captcha_utils = _ensure_captcha_utils(root, target_path, all_steps, framework)
+    files_utils = _ensure_files_utils(root, target_path, all_steps, framework)
     if slider_utils:
         logger.info('录制生成：已注入滑块工具 %s', slider_utils)
     if captcha_utils:
@@ -1375,7 +1896,7 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         payload = _payload(framework, steps, target_path, title, detected, keywords,
                            plan, plan_feedback, memory,
                            context_reused=resumed, write_scope=write_scope,
-                           actions=actions)
+                           actions=actions, teardown=teardown)
         prompt = _prompt(payload, resumed=resumed)
 
         if resumed:
@@ -1392,10 +1913,32 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
             raise EmitError('agent 没有写出目标文件：%s' % target_path,
                             details=_missing_target_details(before, target_path, reply))
 
+        # 头部（Settings + 浏览器初始化 + Teardown）一律由平台重写。
+        # 录制的第一步是 Go To，但录制时页面已经开着、证书警告页也被 ignore_https_errors
+        # 遮掉了，所以「怎么打开浏览器」这件事在 IR 里根本不存在，只能由平台保证。
+        if framework == RF_FRAMEWORK:
+            replaced = _normalize_rf_script(root, target_path, steps, actions,
+                                            slider_utils, files_utils, teardown)
+            if replaced:
+                logger.info('录制生成：头部已由平台重写，替换 %s 行：%s',
+                            len(replaced), ' / '.join(replaced[:4]))
+        elif framework == PW_FRAMEWORK:
+            if _normalize_pw_script(root, target_path):
+                logger.info('录制生成：已补 ignoreHTTPSErrors（内网系统多是自签名证书）')
+
         mark('validate')
+
+        def _rewrite_head():
+            """修复轮之后重新盖平台头：模型重写整个文件时会把它改回自己的写法。"""
+            if framework == RF_FRAMEWORK:
+                _normalize_rf_script(root, target_path, steps, actions,
+                                     slider_utils, files_utils, teardown)
+            elif framework == PW_FRAMEWORK:
+                _normalize_pw_script(root, target_path)
+
         validated, output = _check_with_repair(
             runner, root, model, framework, target_path, detected, writable=target_path,
-            progress=progress, turn=repair_turn,
+            progress=progress, turn=repair_turn, after_fix=_rewrite_head,
         )
         if not validated:
             raise EmitError('校验未通过' if existed else '校验未通过，文件已保留',
@@ -1499,11 +2042,15 @@ def _abort(target_abs, error, target_path, existed):
 
 
 def _check_with_repair(runner, root, model, framework, target_path, detected, writable=None,
-                       progress=None, turn=None):
+                       progress=None, turn=None, after_fix=None):
     """校验；失败则把输出交回 agent 修一次；仍失败返回 (False, 输出)。
 
     turn 给出时走同一个 opencode 会话（见 emit_session）；不给就退回一次性的
     emit_recording，行为和以前完全一致。
+
+    after_fix 在每轮修正之后调用。修复轮是让模型重写整个文件，它会按自己的习惯
+    把平台补的头部改回去（`Suite Teardown 关闭浏览器` 这种项目里根本没有的关键字），
+    于是「改对了正文、改坏了头」还是校验不过。头部只能由平台保证，修完必须再盖一次。
     """
     def mark(stage, detail=''):
         if progress is not None:
@@ -1525,6 +2072,8 @@ def _check_with_repair(runner, root, model, framework, target_path, detected, wr
             '校验输出：\n```\n%s\n```\n' % (target_path, output)
         )
         send(fix)
+        if after_fix is not None:
+            after_fix()
         mark('validate', '第 %d 轮修正后重新校验' % rounds)
         ok, output = _validate(framework, python, root, target_path)
     return ok, output

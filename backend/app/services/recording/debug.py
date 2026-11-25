@@ -96,6 +96,8 @@ def _label(step):
         return '等待 %ss' % ((step.get('intent') or {}).get('seconds') or '')
     if kind == 'new_page':
         return '新标签页'
+    if kind == 'close':
+        return '关闭浏览器'
     return None
 
 

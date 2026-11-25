@@ -293,6 +293,18 @@ class FilesLibrary:
 
     # ---- 下载 ----
 
+    @keyword('Ensure Download Dir')
+    def ensure_download_dir(self):
+        """建好下载目录，返回它的绝对路径（Windows 上是反斜杠）。
+
+        给浏览器初始化用：Chrome 的 download.default_directory 只认原生路径，
+        正斜杠或混合斜杠会被静默忽略，文件就落到用户默认下载目录，Download File
+        干等 30 秒后报「没有出现下载完成的文件」。所以浏览器配置里必须写这里返回的值，
+        而它正是本库自己轮询的那个目录，两边天然一致。
+        """
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+        return str(self.download_dir)
+
     @keyword('Download File')
     def download_file(self, locator, expected='', min_bytes=0, parse='none', min_rows=0, timeout=30):
         """点一下触发下载，等文件写完再校验，返回 {name, size, rows, path}。

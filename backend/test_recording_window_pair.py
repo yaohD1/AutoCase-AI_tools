@@ -413,5 +413,94 @@ class ReplayWindowPlacementTest(unittest.TestCase):
         self.assertEqual(bounds['bounds'], {'windowState': 'maximized'})
 
 
+class PanelOpenTest(unittest.TestCase):
+    """面板打开后的兜底：认窗口、摆位重试、启动预定位。
+
+    线上症状：点开始录制，被测页面出来了，面板「有时候不出来」，得去任务栏点。
+    实测确认了两个断点：
+      - `--app` 失败退回 Playwright 新窗口时，CDP 的 Browser.getWindowForTarget
+        对新 context 的页面报「No web contents in the target」；异常被吞、
+        layout 仍返回 True，于是被测窗口缩了一点、面板原地没动；
+      - 摆位只尝试一次：窗口刚创建、被测窗口还在从最大化还原时，白失败一次
+        就再也不管了。
+    """
+
+    def _session(self):
+        s = RecordingSession.__new__(RecordingSession)
+        s._main_hwnd = 222
+        s._panel_hwnd = 0
+        s._panel_width = 520
+        s._main_window_hwnd = lambda: 222
+        s._browser_pid = lambda: 999
+        return s
+
+    def test_adopt_panel_window_by_title(self):
+        """同一个浏览器进程里两个窗口，靠标题认面板，别把主窗口认成面板。"""
+        s = self._session()
+        titles = {222: '被测页面', 333: '别的窗口', 444: 'AutoCase 录制面板 - Chrome'}
+        ww = MagicMock()
+        ww.find_windows.return_value = [222, 333, 444]
+        ww.window_title.side_effect = lambda h: titles[h]
+        with patch('app.services.recording.session.winwindows', ww):
+            self.assertTrue(s._adopt_panel_window(timeout=0.05))
+        self.assertEqual(s._panel_hwnd, 444)
+
+    def test_adopt_takes_single_candidate(self):
+        s = self._session()
+        ww = MagicMock()
+        ww.find_windows.return_value = [222, 333]
+        ww.window_title.return_value = '另一个窗口'
+        with patch('app.services.recording.session.winwindows', ww):
+            self.assertTrue(s._adopt_panel_window(timeout=0.05))
+        self.assertEqual(s._panel_hwnd, 333)
+
+    def test_adopt_refuses_ambiguous_candidates(self):
+        """两个候选都认不出来时宁可不动：认错窗口会把主窗口摆到右边，两窗叠在一起。"""
+        s = self._session()
+        ww = MagicMock()
+        ww.find_windows.return_value = [222, 333, 444]
+        ww.window_title.return_value = '分不清'
+        with patch('app.services.recording.session.winwindows', ww):
+            self.assertFalse(s._adopt_panel_window(timeout=0.05))
+        self.assertEqual(s._panel_hwnd, 0)
+
+    def test_layout_retries_until_success(self):
+        s = self._session()
+        calls = []
+
+        def fake_layout():
+            calls.append(1)
+            return len(calls) >= 3
+
+        s.layout_windows = fake_layout
+        self.assertTrue(s._layout_panel_with_retry('app', delays=(0, 0, 0)))
+        self.assertEqual(len(calls), 3)
+
+    def test_layout_raises_panel_after_failure(self):
+        """重试也失败时至少把面板提到前面，别让它躺在最大化窗口下面。"""
+        s = self._session()
+        s.layout_windows = lambda: False
+        raised = []
+        s._raise_pair = lambda main: raised.append(main)
+        self.assertFalse(s._layout_panel_with_retry('app', delays=(0, 0)))
+        self.assertEqual(raised, [222])
+
+    def test_window_position_stays_on_screen(self):
+        s = self._session()
+        ww = MagicMock()
+        ww.work_area.return_value = (0, 0, 1920, 1040)
+        ww.scale.return_value = 1.0
+        with patch('app.services.recording.session.winwindows', ww):
+            pos = s._panel_window_position()
+        self.assertIsNotNone(pos)
+        self.assertGreaterEqual(pos[0], 0)
+        self.assertLess(pos[0], 1920)
+
+    def test_set_window_bounds_reports_failure(self):
+        page = MagicMock()
+        page.context.new_cdp_session.side_effect = RuntimeError('No web contents in the target')
+        self.assertFalse(RecordingSession._set_window_bounds(page, {'left': 0}))
+
+
 if __name__ == '__main__':
     unittest.main()

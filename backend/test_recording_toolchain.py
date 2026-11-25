@@ -69,6 +69,16 @@ class DetectTest(unittest.TestCase):
         self.assertIsNone(got['framework'])
         self.assertTrue(any(e['kind'] == 'framework' and e['value'] is None for e in got['evidence']))
 
+    def test_robot_version_is_reported_for_robot_projects(self):
+        # 写手要按目标环境的版本约束语法：只拿到 SeleniumLibrary 版本不够。
+        ws = self._ws({'tests/a.robot': '*** Test Cases ***\nA\n    Log    hi\n'})
+        with mock.patch.object(detect, 'library_version', return_value='3.0.0'), \
+                mock.patch.object(detect, 'robot_version', return_value='3.1.2'):
+            got = detect.detect(ws, python='python')
+        self.assertEqual(got['robot_version'], '3.1.2')
+        self.assertTrue(any(e['kind'] == 'robotframework' and e['value'] == '3.1.2'
+                            for e in got['evidence']))
+
     def test_workspace_venv_is_preferred_over_path(self):
         ws = self._ws({'.venv/Scripts/python.exe': ''})
         python, source = detect.find_python(ws)
@@ -175,6 +185,105 @@ class ToolchainTest(unittest.TestCase):
             self.assertIn('Input Text Typo', output)
         finally:
             shutil.rmtree(ws, ignore_errors=True)
+
+
+# libdoc 的 XML spec 有两代写法，解析要都能吃：
+#   RF 3.x —— <arg>path=None</arg>
+#   RF 4+  —— <arg><name>path</name><default>None</default></arg>
+RF3_SPEC = '''<?xml version="1.0" encoding="UTF-8"?>
+<keywordspec name="SeleniumLibrary" type="library">
+<version>3.0.0</version>
+<keywords>
+<kw name="Click Element">
+<arguments>
+<arg>locator</arg>
+</arguments>
+</kw>
+<kw name="Add Cookie">
+<arguments>
+<arg>name</arg>
+<arg>value</arg>
+<arg>path=None</arg>
+</arguments>
+</kw>
+</keywords>
+</keywordspec>
+'''
+
+RF7_SPEC = '''<?xml version="1.0" encoding="UTF-8"?>
+<keywordspec name="Collections" type="LIBRARY" format="MARKDOWN" specversion="7">
+<version>7.5.1</version>
+<keywords>
+<kw name="Append To List">
+<arguments repr="list_, *values">
+<arg kind="POSITIONAL_OR_NAMED" required="true">
+<name>list_</name>
+<doc>The list to modify.</doc>
+</arg>
+<arg kind="VAR_POSITIONAL" required="false">
+<name>values</name>
+</arg>
+</arguments>
+</kw>
+</keywords>
+</keywordspec>
+'''
+
+
+class SpecParseTest(unittest.TestCase):
+    """libdoc 的 XML 结构跨版本不一样，这里锁住两种写法。"""
+
+    def _spec(self, text):
+        root = Path(tempfile.mkdtemp(prefix='specread-'))
+        path = root / 'lib.xml'
+        path.write_text(text, encoding='utf-8')
+        self.addCleanup(shutil.rmtree, str(root), True)
+        return path
+
+    def test_rf3_spec_strips_default_values(self):
+        got = toolchain._read_spec(self._spec(RF3_SPEC))
+        self.assertEqual(got['library'], 'SeleniumLibrary')
+        self.assertEqual(got['version'], '3.0.0')
+        by_name = {kw['name']: kw['args'] for kw in got['keywords']}
+        self.assertEqual(by_name['Click Element'], ['locator'])
+        self.assertEqual(by_name['Add Cookie'], ['name', 'value', 'path'])
+
+    def test_rf7_spec_reads_name_child(self):
+        got = toolchain._read_spec(self._spec(RF7_SPEC))
+        by_name = {kw['name']: kw['args'] for kw in got['keywords']}
+        self.assertEqual(by_name['Append To List'], ['list_', 'values'])
+
+    def test_export_asks_libdoc_for_xml_explicitly(self):
+        # 靠后缀猜格式在 RF 3.x 会直接失败，7.x 也不再推断：必须显式 --format XML。
+        seen = {}
+
+        def fake_run(cmd, timeout, cwd=None):
+            seen['cmd'] = cmd
+            Path(cmd[-1]).write_text(RF7_SPEC, encoding='utf-8')
+            return mock.Mock(returncode=0, stdout='', stderr='')
+
+        with mock.patch.object(toolchain, '_run', side_effect=fake_run):
+            got = toolchain.export_keywords('python')
+        self.assertIn('--format', seen['cmd'])
+        self.assertEqual(seen['cmd'][seen['cmd'].index('--format') + 1], 'XML')
+        self.assertEqual(got['library'], 'Collections')
+        self.assertEqual(got['version'], '7.5.1')
+
+    def test_old_robot_format_error_says_version_too_old(self):
+        err = "Format must be 'HTML' or 'XML', got 'JSON'.  Try --help for usage information."
+        with mock.patch.object(toolchain, '_run',
+                               return_value=mock.Mock(returncode=2, stdout='', stderr=err)):
+            with self.assertRaises(toolchain.ToolchainError) as ctx:
+                toolchain.export_keywords('python')
+        self.assertIn('版本太老', str(ctx.exception))
+
+    def test_missing_robot_is_a_readable_error(self):
+        err = "No module named robot"
+        with mock.patch.object(toolchain, '_run',
+                               return_value=mock.Mock(returncode=1, stdout='', stderr=err)):
+            with self.assertRaises(toolchain.ToolchainError) as ctx:
+                toolchain.export_keywords('python')
+        self.assertIn('没有 robotframework', str(ctx.exception))
 
 
 if __name__ == '__main__':

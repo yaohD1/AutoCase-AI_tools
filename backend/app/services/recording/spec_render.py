@@ -122,6 +122,8 @@ def _step_lines(step, unsupported):
         return ['  await page.goto(%s, { waitUntil: \'domcontentloaded\' })' % js(step.get('url'))]
     if kind == 'reload':
         return ['  await page.reload({ waitUntil: \'domcontentloaded\' })']
+    if kind == 'close':
+        return ['  await page.close()']
     if kind == 'sleep':
         intent = step.get('intent') or {}
         return ['  await page.waitForTimeout(%d)' % int(float(intent.get('seconds') or 0) * 1000)]

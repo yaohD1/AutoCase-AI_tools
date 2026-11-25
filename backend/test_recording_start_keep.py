@@ -18,6 +18,7 @@ os.environ['DATABASE_URL'] = 'sqlite:///' + os.path.join(_TMP, 'test.db').replac
 from app import create_app  # noqa: E402
 from app.models import db  # noqa: E402
 from app.services.recording.session import RecordingSession  # noqa: E402
+from test_support import reset_database  # noqa: E402
 
 SPEC = {'kind': 'role', 'desc': "getByRole('button', { name: '登录' })", 'count': 1,
         'spec': {'kind': 'role', 'method': 'get_by_role', 'args': ['button'],
@@ -60,8 +61,7 @@ class StartKeepStepsTest(unittest.TestCase):
         self.app = create_app()
         self.ctx = self.app.app_context()
         self.ctx.push()
-        db.drop_all()
-        db.create_all()
+        reset_database()
         self.client = self.app.test_client()
         self._prev = RecordingSession._current
 

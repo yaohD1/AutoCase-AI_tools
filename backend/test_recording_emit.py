@@ -122,8 +122,11 @@ class EmitTest(unittest.TestCase):
         result = self._gen(runner, [(True, 'ok')], plan=PLAN)
 
         self.assertEqual(runner.plan_prompts, [], '写入阶段不该再跑规划')
-        self.assertIn('LoginPage.login', runner.prompts[0], '复用项要进写手的提示词')
-        self.assertIn('custom TestModule', runner.prompts[0], '项目风格要进写手的提示词')
+        self.assertIn('LoginPage.login', runner.prompts[0], '任务书里的步骤说明要进写手提示词')
+        # project_style 不再下发：它的 auth_setup 写着「Suite Setup 登录」，而录制步骤里
+        # 本来就有登录，下发它就是引导双重登录（实测踩过）；reusable / reference_files
+        # 会勾着写手去调项目封装，把录制的定位白扔。
+        self.assertNotIn('project_style', runner.prompts[0])
         self.assertEqual(result['plan']['steps'][0]['action'], 'reuse')
         # 写权限只在写入阶段申请一次。
         self.assertEqual(runner.writables, [TARGET])
@@ -298,12 +301,16 @@ class EmitTest(unittest.TestCase):
         blank = emit._plan_prompt(emit._plan_payload('playwright-ts', [_rf_step()], '', 'Login'))
         self.assertIn('为空表示由你按项目约定选一个', blank)
 
-    def test_writer_prompt_forbids_using_the_plan_path(self):
+    def test_writer_prompt_names_only_the_payload_target_path(self):
+        """任务书里的路径不再下发：它和 payload.target_path 冲突，只会让写手写错地方。
+
+        原来靠一句「不要拿 plan.target_path 当主文件」兜着，那句话本身就是这个冲突的代价。
+        """
         prompt = emit._prompt({'framework': 'robot-selenium', 'target_path': TARGET,
-                               'steps': [], 'plan': PLAN})
-        self.assertIn('主文件必须是 target_path', prompt)
-        self.assertIn('不要拿它当主文件', prompt)
-        self.assertIn('plan.target_path', prompt)
+                               'steps': [], 'plan': emit._plan_for_prompt(PLAN)})
+        self.assertIn('只写 target_path 这一个文件', prompt)
+        self.assertNotIn('plan.target_path', prompt)
+        self.assertNotIn('project_style', prompt)
 
     def test_plan_json_survives_code_fence_and_chatter(self):
         """模型常把 JSON 包进 ```json 或前面加一句废话，都要能抠出来。"""
@@ -442,7 +449,8 @@ class EmitTest(unittest.TestCase):
         runner = FakeRunner(write(TARGET, ROBOT()))
         self._gen(runner, [(True, 'ok')], steps=[_rf_step(), step])
         self.assertIn(locator, runner.prompts[0])
-        self.assertIn('"nth": null', runner.prompts[0])
+        # 唯一命中时不再下发 nth / candidates（纯冗余）：locator 原样出现，且没有被拼上序号
+        self.assertNotIn('"nth":', runner.prompts[0])
 
     def test_target_that_matches_nothing_still_blocks(self):
         """连一条候选都命不中（元素已不在页面上）才拒绝——那种情况写不出任何定位。"""
@@ -509,6 +517,167 @@ class EmitTest(unittest.TestCase):
         # reload 没有目标元素也没有地址，别让模型去编一个
         self.assertNotIn('target', emit._steps_for_prompt([step], 'playwright-ts')[0])
         self.assertNotIn('url', emit._steps_for_prompt([step], 'playwright-ts')[0])
+
+
+class NormalizeHeaderTest(unittest.TestCase):
+    """头部由平台重写：证书、等待、收尾不能指望模型。
+
+    录制侧用 ignore_https_errors 把证书警告页遮掉了，IR 里没有「继续前往」可录；
+    生成的 Selenium 脚本裸跑会停在 NET::ERR_CERT_AUTHORITY_INVALID，而 Go To
+    自己不报错，看起来像成功。所以头部必须由平台固定写。
+    """
+
+    TARGET = 'tests/norm.robot'
+    STEPS = [{'no': 1, 'type': 'goto', 'url': 'https://x/#/'}]
+
+    def _run(self, content):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(root), True)
+        path = root / self.TARGET
+        path.parent.mkdir(parents=True)
+        path.write_text(content, encoding='utf-8')
+        emit._normalize_rf_script(str(root), self.TARGET, self.STEPS,
+                                  slider_lib='tests/libraries/SliderLibrary.py')
+        return path.read_text(encoding='utf-8')
+
+    def test_rewrites_settings_and_keeps_one_boot(self):
+        text = self._run(
+            '*** Settings ***\nLibrary    SeleniumLibrary\nSuite Teardown    关闭浏览器\n\n'
+            '*** Test Cases ***\n用例\n'
+            "    ${options}=    Evaluate    sys.modules['selenium.webdriver'].ChromeOptions()    sys, selenium.webdriver\n"
+            '    Call Method    ${options}    add_argument    --ignore-certificate-errors\n'
+            '    Create Webdriver    Chrome    chrome_options=${options}\n'
+            '    Go To    https://x/#/\n'
+            '    Click Element    xpath=//a\n\n'
+            '*** Keywords ***\n登录\n    Input Text    xpath=//i    1\n')
+        self.assertIn('Suite Teardown    Close Browser', text)
+        self.assertNotIn('关闭浏览器', text)
+        self.assertEqual(text.count('Create Webdriver'), 1)
+        self.assertEqual(text.count('--ignore-certificate-errors'), 1)
+        self.assertIn('Set Selenium Implicit Wait', text)
+        self.assertIn('Library    ${CURDIR}/libraries/SliderLibrary.py', text)
+        self.assertIn('*** Keywords ***', text)
+
+    def test_adds_goto_when_only_test_cases(self):
+        text = self._run('*** Test Cases ***\n用例\n    Click Element    xpath=//a\n')
+        self.assertIn('Go To    https://x/#/', text)
+        self.assertIn('--ignore-certificate-errors', text)
+
+    def test_drops_project_wrapper(self):
+        text = self._run('*** Test Cases ***\n用例\n    打开谷歌浏览器并访问登录页面\n'
+                         '    Click Element    xpath=//a\n')
+        self.assertNotIn('打开谷歌浏览器并访问登录页面', text)
+        self.assertIn('Go To    https://x/#/', text)
+
+    def test_idempotent(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(root), True)
+        path = root / self.TARGET
+        path.parent.mkdir(parents=True)
+        path.write_text('*** Test Cases ***\n用例\n    Go To    https://x/#/\n', encoding='utf-8')
+        emit._normalize_rf_script(str(root), self.TARGET, self.STEPS)
+        first = path.read_text(encoding='utf-8')
+        emit._normalize_rf_script(str(root), self.TARGET, self.STEPS)
+        self.assertEqual(path.read_text(encoding='utf-8'), first)
+
+
+class NormalizePwScriptTest(unittest.TestCase):
+    """Playwright 侧同一件事：自签名证书要靠 ignoreHTTPSErrors 放行。
+
+    实测：不加这一项，page.goto 到自签名 https 直接抛
+    net::ERR_CERT_AUTHORITY_INVALID；加上就正常进页面。
+    """
+
+    TARGET = 'autocase/a.spec.ts'
+
+    def _run(self, content):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(root), True)
+        path = root / self.TARGET
+        path.parent.mkdir(parents=True)
+        path.write_text(content, encoding='utf-8')
+        changed = emit._normalize_pw_script(str(root), self.TARGET)
+        return changed, path.read_text(encoding='utf-8')
+
+    def test_inserts_test_use_after_import(self):
+        changed, text = self._run(
+            "import { test, expect } from '@playwright/test'\n\n"
+            "test('t', async ({ page }) => { await page.goto('https://x/') })\n")
+        self.assertTrue(changed)
+        self.assertIn("test.use({ ignoreHTTPSErrors: true });", text)
+        self.assertLess(text.index('ignoreHTTPSErrors'), text.index("test('t'"))
+
+    def test_multiline_import(self):
+        changed, text = self._run(
+            "import {\n  test,\n  expect,\n} from '@playwright/test'\n\n"
+            "test('t', async ({ page }) => {})\n")
+        self.assertTrue(changed)
+        self.assertLess(text.index('ignoreHTTPSErrors'), text.index("test('t'"))
+
+    def test_skips_when_already_present(self):
+        changed, text = self._run(
+            "import { test } from '@playwright/test'\n"
+            "test.use({ ignoreHTTPSErrors: true })\n")
+        self.assertFalse(changed)
+
+    def test_manual_new_context(self):
+        changed, text = self._run(
+            "import { chromium } from 'playwright'\n"
+            'const context = await browser.newContext()\n')
+        self.assertTrue(changed)
+        self.assertIn('newContext({ ignoreHTTPSErrors: true })', text)
+
+    def test_manual_new_context_with_options(self):
+        changed, text = self._run(
+            "import { chromium } from 'playwright'\n"
+            "const context = await browser.newContext({ storageState: 's.json' })\n")
+        self.assertTrue(changed)
+        self.assertIn('ignoreHTTPSErrors: true', text)
+        self.assertIn("storageState: 's.json'", text)
+
+    def test_no_import_no_change(self):
+        changed, _ = self._run("const x = 'ignore me'\n")
+        self.assertFalse(changed)
+
+
+class DownloadDirHeaderTest(unittest.TestCase):
+    """有下载步骤时，平台补头要把浏览器下载目录绑到 FilesLibrary 用的那个目录。
+
+    Chrome 的 download.default_directory 只认 Windows 原生反斜杠路径：
+    `${CURDIR}/downloads` 这种混合斜杠会被**静默忽略**，文件落到用户默认下载目录，
+    Download File 干等 30 秒报「没有出现下载完成的文件」——实测踩过。
+    所以目录值必须由 FilesLibrary 自己算（它 resolve 过），不能平台另算一遍。
+    """
+
+    TARGET = 'tests/dl.robot'
+    STEPS = [{'no': 1, 'type': 'goto', 'url': 'https://x/#/'}]
+    BODY = ('*** Test Cases ***\n用例\n'
+            '    Go To    https://x/#/\n'
+            "    ${f}=    Download File    xpath=//b    min_bytes=1\n")
+
+    def _run(self, files_lib='tests/libraries/FilesLibrary.py'):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(root), True)
+        path = root / self.TARGET
+        path.parent.mkdir(parents=True)
+        path.write_text(self.BODY, encoding='utf-8')
+        emit._normalize_rf_script(str(root), self.TARGET, self.STEPS, files_lib=files_lib)
+        return path.read_text(encoding='utf-8')
+
+    def test_binds_download_dir_when_library_present(self):
+        text = self._run()
+        self.assertIn('Library    ${CURDIR}/libraries/FilesLibrary.py    ${CURDIR}/downloads', text)
+        self.assertIn('${download_dir}=    Ensure Download Dir', text)
+        self.assertIn('download.default_directory=${download_dir}', text)
+        self.assertIn("download.prompt_for_download=${False}", text)
+        # prefs 必须在创建 driver 之前设置，否则 Chrome 已经启动，改了也没用
+        self.assertLess(text.index('add_experimental_option'),
+                        text.index('Create Webdriver'))
+
+    def test_no_pref_without_download_library(self):
+        text = self._run(files_lib=None)
+        self.assertNotIn('Ensure Download Dir', text)
+        self.assertNotIn('add_experimental_option', text)
 
 
 if __name__ == '__main__':

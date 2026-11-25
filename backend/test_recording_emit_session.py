@@ -288,7 +288,7 @@ class PromptShapeTest(unittest.TestCase):
     def test_exact_scope_keeps_the_single_file_wording(self):
         text = emit._prompt({'target_path': 'tests/a.spec.ts',
                              'write_scope': 'exact'}, resumed=False)
-        self.assertIn('主文件必须是 target_path', text)
+        self.assertIn('只写 target_path 这一个文件', text)
         self.assertNotIn('写完在回复里逐个说明额外文件', text)
 
     def test_payload_carries_context_flags(self):

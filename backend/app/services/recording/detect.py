@@ -72,11 +72,24 @@ def library_version(python, dist):
 
 
 def robot_version(python):
-    out, _ = _probe(python, ['-m', 'robot', '--version'])
-    if not out:
+    """目标环境的 Robot Framework 版本。
+
+    不能用 `python -m robot --version`：RF 3.1.2 会正确打印版本，但退出码是 251，
+    按退出码判断会把它当成「没装」，版本提示也就一直拿不到。读版本模块不挑版本。
+    """
+    out, err = _probe(python, ['-c', 'import robot.version; print(robot.version.VERSION)'])
+    if out:
+        return out.strip()
+    if 'no module named' in (err or '').lower():
         return None
-    match = re.search(r'(\d+(?:\.\d+)+)', out)
-    return match.group(1) if match else out
+    # 更老的版本没有 robot.version 模块时退回 CLI：这时不看退出码，只认输出里有没有版本号。
+    try:
+        result = subprocess.run([python, '-m', 'robot', '--version'], capture_output=True, text=True,
+                                encoding='utf-8', errors='replace', timeout=PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r'(\d+(?:\.\d+)+)', (result.stdout or '') + (result.stderr or ''))
+    return match.group(1) if match else None
 
 
 def requirement_hints(workspace):
@@ -229,14 +242,18 @@ def detect(workspace, python=None):
     playwright = playwright_ts_present(root)
 
     version = None
+    robot_cli = None
     if python:
         version = library_version(python, ROBOT_DIST)
         if version:
             evidence.append({'kind': 'seleniumlibrary', 'value': version, 'source': 'importlib.metadata'})
-        else:
-            cli = robot_version(python)
-            if cli:
-                evidence.append({'kind': 'robotframework', 'value': cli, 'source': 'robot --version'})
+        # 写脚本要按目标环境的版本约束语法：RF 3.x 没有 4.x 才加的参数，
+        # SeleniumLibrary 3.x 的 Open Browser 也没有 options。所以只要有 robot 迹象
+        # 就探一次（纯 playwright 项目不必为它多起一个进程）。
+        if robot_files or robot_hints or not version:
+            robot_cli = robot_version(python)
+            if robot_cli:
+                evidence.append({'kind': 'robotframework', 'value': robot_cli, 'source': 'robot --version'})
     if not version:
         for hint in robot_hints:
             evidence.append({'kind': 'requirement', 'value': hint['spec'], 'source': hint['file']})
@@ -262,6 +279,7 @@ def detect(workspace, python=None):
         'framework': framework,
         'python': python,
         'seleniumlibrary_version': version,
+        'robot_version': robot_cli,
         'evidence': evidence,
         'samples': samples,
     }
