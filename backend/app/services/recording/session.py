@@ -3243,6 +3243,17 @@ class RecordingSession(object):
             # 页内 JS 自己关掉的话，面板会一直显示「退出拾取」，点了才同步。
             self._set_pick(False)
             return
+        if action == 'pause-toggle':
+            # 页面里按 Ctrl+`。键盘事件会发给每个 frame，一次按键这里会收到 N 条，
+            # 250ms 内只认第一条——不去重的话两个 frame 就互相抵消，按一下等于没按。
+            if getattr(self, 'status', None) != 'recording':
+                return
+            now = time.monotonic()
+            if now - getattr(self, '_pause_toggle_at', 0) < 0.25:
+                return
+            self._pause_toggle_at = now
+            self._set_paused(not self.paused)
+            return
         if action == 'expand-panel':
             # 面板收起来之后，页面里那颗胶囊是唯一还能点到的入口。
             self._set_panel_mode_now(False)

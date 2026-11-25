@@ -233,7 +233,7 @@
                收进「更多」；「收起面板」在关掉页内浮层后没有恢复入口，所以不再提供。 -->
           <template v-if="panelFloat">
             <button v-if="isRecording" type="button" class="panel-icon" :class="{ 'is-on': paused }"
-                    :title="paused ? '继续记录步骤' : '浏览器可用，不记录步骤'"
+                    :title="paused ? '继续记录步骤（Ctrl+`）' : '浏览器可用，不记录步骤（Ctrl+`）'"
                     @click="togglePause">
               <el-icon><VideoPlay v-if="paused" /><VideoPause v-else /></el-icon>
             </button>
@@ -624,7 +624,7 @@
               :plain="paused"
               :icon="paused ? VideoPlay : VideoPause"
               :loading="pausing"
-              :title="paused ? '继续记录步骤' : '浏览器可用，不记录步骤'"
+              :title="paused ? '继续记录步骤（Ctrl+`）' : '浏览器可用，不记录步骤（Ctrl+`）'"
               @click="togglePause"
             >
               {{ paused ? '继续' : '暂停' }}
@@ -768,7 +768,8 @@
         </div>
 
         <div v-if="paused" class="pause-hint">
-          已暂停：可以在浏览器里自由操作（关闭弹层、滚动、试填一遍都不算），这些动作不会被记录。点「继续」接着录。
+          已暂停：可以在浏览器里自由操作（关闭弹层、滚动、试填一遍都不算），这些动作不会被记录。
+          按 <b>Ctrl+`</b> 或点「继续」接着录。
         </div>
 
         <div v-if="isStopped && browserOpen" class="keep-open-hint">

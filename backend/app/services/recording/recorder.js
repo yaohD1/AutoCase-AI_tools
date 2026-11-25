@@ -925,6 +925,21 @@
     applyPickMode(false);
   }, true);
 
+  // 暂停 / 继续：Ctrl+`（Backquote）。
+  // 不用 Ctrl+E —— 那是 Chrome 自己的「聚焦地址栏搜索」，按键到不了页面。
+  // 在输入框里按也不会打出反引号：捕获阶段就 preventDefault 了。
+  // 一次按键会发给每个 frame，后端按时间戳去重（session._handle_hud_action）。
+  document.addEventListener('keydown', (e) => {
+    if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
+    if (e.code !== 'Backquote' && e.key !== '`') return;
+    if (typeof window.__pwHudAction !== 'function') return;
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      window.__pwHudAction('pause-toggle');
+    } catch (err) { /* binding 还没就位 */ }
+  }, true);
+
   // 只给自测和排障用：closed shadow root 外部拿不到内容，这里读闭包里的渲染状态。
   window.__pwPickSnapshot = () => ({
     mounted: !!pickHost,

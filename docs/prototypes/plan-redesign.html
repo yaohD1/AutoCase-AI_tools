@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>任务书重做 · 排版 / 意见框 / 执行进度</title>
+<style>
+:root{
+  --bg-page:#e4e9f0; --bg-card:#fff; --bg-sunken:#f2f5fa; --bg-stage:#eef2f7;
+  --ink:#15181d; --ink-2:#3c4048; --muted:#77818f; --faint:#a8b1bd;
+  --line-soft:rgba(16,24,40,.10); --line-faint:rgba(16,24,40,.06); --line-field:rgba(16,24,40,.13);
+  --accent:#0071e3; --accent-hover:#0064c8; --accent-soft:#eef4fd; --accent-ink:#0b62c4; --accent-line:#dce9fa;
+  --ok:#1e7a46; --ok-soft:#edf7f1; --ok-line:#d9ecdf;
+  --warn:#ad6800; --warn-soft:#fdf6ea; --warn-line:#f2e3c9;
+  --danger:#e03127; --danger-soft:#fdeeed; --danger-line:#ffc0bb;
+  --chip-bg:#f0f3f8; --chip-ink:#5b6472;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'Inter','Segoe UI','Microsoft YaHei UI','Microsoft YaHei',-apple-system,sans-serif;
+  --shadow-card:0 1px 2px rgba(16,24,40,.05);
+  --shadow-sheet:0 26px 60px -24px rgba(16,24,40,.38), 0 0 0 1px rgba(16,24,40,.05);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg-page);color:var(--ink);font-family:var(--sans);
+  font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;}
+.wrap{max-width:1200px;margin:0 auto;padding:36px 24px 90px}
+code{font-family:var(--mono);font-size:11px;background:var(--bg-sunken);color:var(--ink-2);
+  padding:1px 5px;border-radius:4px;word-break:break-all}
+
+.page-head h1{margin:0 0 8px;font-size:20px;font-weight:650;letter-spacing:-.2px}
+.page-head p{margin:0;max-width:820px;color:var(--muted);font-size:12.5px;line-height:1.75}
+
+.sec{margin-top:52px}
+.sec-head{display:flex;align-items:baseline;gap:10px;margin-bottom:4px}
+.sec-head h2{margin:0;font-size:15px;font-weight:650}
+.sec-head .idx{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.sec > p{margin:0 0 6px;max-width:840px;color:var(--muted);font-size:12.5px;line-height:1.75}
+
+.frame{margin-top:26px}
+.cap{display:flex;align-items:center;gap:9px;margin-bottom:10px;flex-wrap:wrap}
+.cap b{font-size:13px;font-weight:650}
+.cap .why{color:var(--muted);font-size:12px}
+.cap .pill{font-size:10.5px;padding:1px 7px;border-radius:20px;background:var(--accent-soft);
+  color:var(--accent-ink);border:1px solid var(--accent-line)}
+.cap .pill.warn{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-line)}
+
+/* ---------- 任务书外壳 ---------- */
+.sheet{background:var(--bg-card);border-radius:16px;overflow:hidden;
+  box-shadow:var(--shadow-sheet);display:flex;flex-direction:column}
+.shead{flex:none;height:52px;display:flex;align-items:center;gap:9px;padding:0 16px;
+  border-bottom:1px solid var(--line-soft);background:#fff}
+.stitle{font-size:14px;font-weight:650;letter-spacing:-.1px}
+.chip{font-size:11px;color:var(--chip-ink);background:var(--chip-bg);border-radius:5px;padding:2px 7px}
+.chip.warn{background:var(--warn-soft);color:var(--warn)}
+.chip.ok{background:var(--ok-soft);color:var(--ok)}
+.stip{margin-left:auto;font-size:11.5px;color:var(--muted)}
+.x{width:28px;height:28px;display:flex;align-items:center;justify-content:center;
+  border-radius:8px;color:var(--muted);font-size:12px;cursor:default}
+
+/* A 分节卡片 */
+.sbody{display:grid;grid-template-columns:minmax(0,1fr) 336px;min-height:0}
+.smain{padding:16px 18px 18px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.card{border:1px solid var(--line-soft);border-radius:12px;background:#fff;box-shadow:var(--shadow-card);overflow:hidden}
+.chead{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line-faint);background:#fff}
+.ct{font-size:12.5px;font-weight:600}
+.count{font-size:10.5px;color:var(--muted);background:var(--chip-bg);border-radius:5px;padding:1px 6px;font-variant-numeric:tabular-nums}
+.count.warn{background:var(--warn-soft);color:var(--warn)}
+.spacer{flex:1}
+.mini{font-size:11px;color:var(--muted)}
+.cbody{padding:11px 14px 13px}
+.fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 14px}
+.f{display:flex;flex-direction:column;gap:2px;min-width:0}
+.f>span{font-size:10.5px;color:var(--muted)}
+.f>b{font-size:12.5px;font-weight:500;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.f>b.dim{color:var(--muted);font-weight:400}
+.code-line{margin-top:11px;font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.note{margin:9px 0 0;font-size:11.5px;line-height:1.7;color:var(--muted)}
+
+.tbl{width:100%;border-collapse:collapse}
+.tbl thead th{font-size:10.5px;font-weight:500;color:var(--muted);text-align:left;
+  padding:6px 14px;background:var(--bg-sunken);border-bottom:1px solid var(--line-soft)}
+.tbl td{padding:8px 14px;font-size:12.5px;color:var(--ink-2);border-top:1px solid var(--line-faint);vertical-align:top}
+.tbl tbody tr:first-child td{border-top:0}
+.tbl .num{width:38px;color:var(--faint);font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums}
+.tbl .kind{font-size:11px;color:var(--muted)}
+.tbl .kind.reuse{color:var(--accent-ink);font-weight:600}
+.risk-row{display:flex;gap:8px;font-size:12px;line-height:1.65;color:var(--ink-2)}
+.risk-row .dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--warn);margin-top:7px}
+.card.is-risk{border-color:var(--warn-line)}
+.card.is-risk .chead{background:var(--warn-soft);border-bottom-color:var(--warn-line)}
+
+/* 右栏 */
+.sside{display:flex;flex-direction:column;border-left:1px solid var(--line-soft);background:#fff;min-height:0}
+.side-card{padding:14px 16px;border-bottom:1px solid var(--line-faint)}
+.sc-head{display:flex;align-items:center;gap:7px;margin-bottom:8px}
+.sc-head>span:first-child{font-size:12px;font-weight:600}
+.badge{font-size:10px;color:var(--accent-ink);background:var(--accent-soft);
+  border:1px solid var(--accent-line);border-radius:5px;padding:0 5px}
+.path{position:relative;font-family:var(--mono);font-size:10.5px;line-height:1.6;color:var(--ink-2);
+  background:var(--bg-sunken);border:1px solid var(--line-faint);border-radius:7px;
+  padding:7px 30px 7px 9px;word-break:break-all}
+.path .pen{position:absolute;right:8px;top:8px;color:var(--faint);font-size:11px}
+.hint{font-size:10.5px;line-height:1.6;color:var(--muted)}
+.side-card .hint{margin-top:7px}
+.suggest{margin-top:8px;padding:8px 9px;border:1px solid var(--warn-line);background:var(--warn-soft);
+  border-radius:7px;font-size:11px;line-height:1.6;color:var(--warn)}
+.suggest b{display:block;font-weight:600;margin-bottom:3px}
+.empty{font-size:11.5px;line-height:1.8;color:var(--muted)}
+.sfoot{margin-top:auto;padding:12px 16px 14px;border-top:1px solid var(--line-soft);display:flex;flex-wrap:wrap;gap:7px}
+.sfoot .hint{flex:1 1 100%;order:3;margin-top:3px}
+
+.btn{height:30px;padding:0 13px;border-radius:8px;border:1px solid var(--line-field);
+  background:#fff;color:var(--ink-2);font-size:12px;font-family:var(--sans);cursor:default}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500;box-shadow:0 1px 2px rgba(0,113,227,.2)}
+.btn.warn{background:#fff;border-color:var(--warn-line);color:var(--warn)}
+.btn.sm{height:27px;padding:0 11px;font-size:11.5px}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--muted)}
+.btn.danger-text{border-color:transparent;background:transparent;color:var(--danger)}
+
+/* B 文档式 */
+.bbody{display:grid;grid-template-columns:172px minmax(0,1fr);min-height:0}
+.outline{padding:18px 12px;border-right:1px solid var(--line-faint);background:#fff;display:flex;flex-direction:column;gap:2px}
+.outline a{display:flex;align-items:center;gap:6px;padding:6px 9px;border-radius:7px;
+  font-size:11.5px;color:var(--muted);text-decoration:none}
+.outline a.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+.outline a .n{font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+.outline a em{margin-left:auto;font-style:normal;font-size:10px;color:var(--faint)}
+.doc{padding:22px 34px 26px;max-width:720px;margin:0 auto}
+.doc h3{display:flex;align-items:baseline;gap:8px;margin:22px 0 9px;font-size:12.5px;font-weight:650}
+.doc h3:first-child{margin-top:0}
+.doc h3 .n{font-family:var(--mono);font-size:10px;color:var(--faint);font-weight:400}
+.doc h3 .h3r{margin-left:auto;font-size:10.5px;color:var(--faint);font-weight:400}
+.doc dl{margin:0;display:grid;grid-template-columns:70px minmax(0,1fr);gap:6px 12px;font-size:12px}
+.doc dt{color:var(--muted);font-size:11.5px}
+.doc dd{margin:0;color:var(--ink-2)}
+.docsteps{list-style:none;margin:0;padding:0;border-top:1px solid var(--line-faint)}
+.docsteps li{display:flex;align-items:flex-start;gap:11px;padding:9px 2px;border-bottom:1px solid var(--line-faint)}
+.docsteps .n{flex:none;width:20px;font-family:var(--mono);font-size:10px;color:var(--faint);line-height:1.9}
+.docsteps p{margin:0;flex:1;font-size:12.5px;line-height:1.65;color:var(--ink-2)}
+.docsteps .k{flex:none;font-size:10.5px;color:var(--faint);line-height:1.9}
+.callout{margin-top:2px;padding:9px 11px;border-radius:8px;font-size:11.5px;line-height:1.7}
+.callout.warn{background:var(--warn-soft);border:1px solid var(--warn-line);color:var(--warn)}
+.dim{color:var(--muted);font-size:12px;margin:0}
+.bbar{flex:none;display:flex;align-items:center;gap:14px;padding:11px 16px;
+  border-top:1px solid var(--line-soft);background:#fff}
+.bbar-path{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
+.bbar-path>span{font-size:10.5px;color:var(--muted);flex:none}
+.bbar-path code{max-width:460px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.bbar-path .link{font-size:11px;color:var(--accent-ink);background:none;border:0;cursor:default;flex:none}
+.bbar-right{display:flex;align-items:center;gap:7px;flex:none}
+.bbar-right .hint{flex:none}
+
+/* C 台账 */
+.kpis{display:grid;grid-template-columns:repeat(3,110px) minmax(0,1fr);border-bottom:1px solid var(--line-soft)}
+.kpi{padding:10px 16px;border-right:1px solid var(--line-faint);display:flex;align-items:baseline;gap:7px}
+.kpi>span{font-size:10.5px;color:var(--muted)}
+.kpi>b{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}
+.kpi>b.warn{color:var(--warn)}
+.kpi.wide{border-right:0;align-items:center}
+.kpi.wide code{font-size:10.5px;background:none;padding:0;color:var(--ink-2)}
+.cbanner{display:flex;gap:8px;padding:8px 16px;font-size:11.5px;color:var(--warn);
+  background:var(--warn-soft);border-bottom:1px solid var(--warn-line)}
+.cbanner b{font-weight:600;flex:none}
+.ledger thead th{padding:7px 16px;position:sticky;top:0}
+.ledger td{padding:9px 16px}
+.ledger .num{width:44px}
+.ledger .note-cell{width:66px;text-align:center}
+.note-add{width:20px;height:20px;border-radius:6px;border:1px solid var(--line-faint);
+  background:#fff;color:var(--faint);font-size:12px;line-height:1;cursor:default}
+.cfoot{margin-top:auto;display:flex;align-items:center;gap:10px;padding:10px 16px;
+  border-top:1px solid var(--line-soft);background:var(--bg-sunken);font-size:11.5px;color:var(--muted)}
+.cfoot b{font-size:11px;font-weight:600;color:var(--ink-2)}
+.head-actions{margin-left:auto;display:flex;gap:7px}
+
+/* ---------- 意见框三版 ---------- */
+.crop{width:920px;background:#fff;border-radius:14px;box-shadow:var(--shadow-sheet);overflow:hidden}
+.crop-head{height:44px;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--line-soft)}
+.crop-body{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 280px;min-height:330px}
+.crop-main{padding:14px 18px}
+.crop-side{border-left:1px solid var(--line-soft);padding:13px 14px}
+.mini-step{display:flex;gap:10px;padding:8px 6px;font-size:12px;line-height:1.6;color:var(--ink-2);position:relative;border-radius:7px}
+.mini-step .n{flex:none;width:18px;font-family:var(--mono);font-size:10px;color:var(--faint);line-height:1.9}
+.mini-step mark{background:#cfe4ff;color:inherit;padding:0}
+.mini-step.on{background:var(--accent-soft);box-shadow:inset 2px 0 0 var(--accent)}
+.mini-step .mk{position:absolute;left:-2px;top:9px;width:15px;height:15px;border-radius:50%;
+  background:var(--accent);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center}
+
+.pop{position:absolute;left:46px;top:132px;width:330px;background:#fff;border-radius:12px;
+  border:1px solid var(--line-soft);box-shadow:0 18px 44px -14px rgba(16,24,40,.32);overflow:visible;z-index:2}
+.pop::before{content:'';position:absolute;left:34px;top:-7px;width:12px;height:12px;background:#fff;
+  border-left:1px solid var(--line-soft);border-top:1px solid var(--line-soft);transform:rotate(45deg)}
+.pop>*{position:relative;z-index:1}
+.pop-head{display:flex;align-items:center;gap:7px;padding:9px 12px 0;font-size:11.5px;font-weight:600}
+.pop-quote{margin:7px 12px 0;padding-left:8px;border-left:2px solid var(--accent-line);
+  font-size:11px;line-height:1.6;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pop textarea{display:block;width:calc(100% - 24px);margin:8px 12px 0;height:64px;resize:none;
+  border:1px solid var(--line-field);border-radius:7px;padding:7px 8px;font-family:var(--sans);font-size:12px;color:var(--ink-2)}
+.pop textarea::placeholder{color:var(--faint)}
+.pop-foot{display:flex;justify-content:flex-end;gap:6px;padding:8px 12px 10px}
+.pop-foot .btn{height:27px;font-size:11.5px;padding:0 11px}
+
+.focus-input{margin-top:8px;border:1px solid var(--accent-line);background:var(--accent-soft);
+  border-radius:9px;padding:9px}
+.focus-input .q{font-size:10.5px;line-height:1.55;color:var(--accent-ink);background:#fff;
+  border-radius:5px;padding:4px 7px;margin-bottom:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.focus-input .box{background:#fff;border:1px solid var(--line-field);border-radius:6px;
+  padding:6px 8px;font-size:11.5px;color:var(--faint);height:54px}
+.focus-input .acts{display:flex;justify-content:flex-end;gap:6px;margin-top:7px}
+.focus-input .btn{height:25px;font-size:11px;padding:0 9px}
+.note-item{padding:7px 9px;border:1px solid var(--line-faint);border-radius:7px;margin-top:7px;background:#fff}
+.note-item .q{font-size:10.5px;color:var(--muted);border-left:2px solid var(--line-field);padding-left:6px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.note-item .c{font-size:11.5px;color:var(--ink-2);margin-top:4px;line-height:1.55}
+
+.dock{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:10px;
+  padding:10px 14px;background:#fff;border-top:1px solid var(--line-soft);
+  box-shadow:0 -10px 24px -18px rgba(16,24,40,.4)}
+.dock .q{flex:none;max-width:238px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:11px;color:var(--muted);border-left:2px solid var(--accent);padding-left:7px}
+.dock .box{flex:1;height:30px;border:1px solid var(--line-field);border-radius:7px;
+  padding:0 9px;font-size:11.5px;color:var(--faint);display:flex;align-items:center}
+.dock .btn{height:28px;font-size:11.5px;padding:0 11px}
+.crop-note{padding:9px 14px;border-top:1px dashed var(--line-faint);font-size:11.5px;color:var(--muted);background:#fcfdff}
+
+/* ---------- 执行进度 ---------- */
+.modal{width:640px;background:#fff;border-radius:16px;box-shadow:var(--shadow-sheet);overflow:hidden}
+.mhead{display:flex;align-items:center;gap:10px;padding:15px 18px 4px}
+.mtitle{font-size:15px;font-weight:650}
+.mmeta{margin-left:auto;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.mx{width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:7px;
+  color:var(--muted);font-size:12px;flex:none}
+.msub{padding:0 18px 13px;font-size:11.5px;color:var(--muted);border-bottom:1px solid var(--line-faint)}
+.msub code{font-size:10.5px}
+.mbody{padding:14px 18px 6px}
+.flow{list-style:none;margin:0;padding:0;position:relative}
+.flow li{display:flex;gap:11px;padding:8px 0;position:relative}
+.flow li .dot{flex:none;width:19px;height:19px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:10px;border:1px solid var(--line-field);background:#fff;color:var(--faint);z-index:1}
+.flow li.done .dot{background:var(--ok-soft);border-color:var(--ok);color:var(--ok);font-weight:700}
+.flow li.run .dot{border-color:var(--accent);background:#fff}
+.flow li.run .dot i{display:block;width:9px;height:9px;border-radius:50%;border:2px solid var(--accent-line);border-top-color:var(--accent)}
+.flow li.wait{opacity:.55}
+.flow li .tx{flex:1;min-width:0}
+.flow li b{display:block;font-size:12.5px;font-weight:500;color:var(--ink-2)}
+.flow li.wait b{font-weight:400}
+.flow li em{display:block;font-style:normal;font-size:11px;color:var(--muted);margin-top:1px}
+.flow li .t{flex:none;font-family:var(--mono);font-size:10px;color:var(--faint);padding-top:2px}
+.flow li.done b{color:var(--muted)}
+.bar{height:5px;max-width:520px;border-radius:4px;background:var(--bg-sunken);overflow:hidden;margin:7px 0 5px}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:4px}
+.mfoot{display:flex;align-items:center;gap:10px;padding:12px 18px 14px;border-top:1px solid var(--line-faint)}
+.mfoot .hint{margin-left:auto}
+.result{margin:4px 0 10px;border:1px solid var(--ok-line);background:var(--ok-soft);border-radius:9px;padding:10px 12px}
+.result .rt{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--ok);margin-bottom:5px}
+.result .rr{font-size:11.5px;color:var(--ink-2);line-height:1.8}
+.result .rr code{background:#fff}
+.done-flow li{padding:5px 0}
+.done-flow b{color:var(--muted);font-weight:400}
+.done-flow li .dot{width:17px;height:17px;font-size:9px;background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
+.done-flow .tx b{font-weight:400;color:var(--muted)}
+.flow li.fail .dot{background:var(--danger-soft);border-color:var(--danger);color:var(--danger);font-weight:700}
+.flow li.fail b{color:var(--danger)}
+.errbox{margin:0 0 12px;border:1px solid var(--danger-line);background:var(--danger-soft);border-radius:9px;padding:10px 12px}
+.errbox .et{font-size:12px;font-weight:600;color:var(--danger);margin-bottom:5px}
+.errbox .el{font-size:11.5px;line-height:1.8;color:var(--ink-2);font-family:var(--mono)}
+.errlist{margin:6px 0 0;padding-left:16px;font-size:11.5px;line-height:1.8;color:var(--ink-2)}
+
+
+/* B：原地 */
+.inplace{width:880px;background:#fff;border-radius:16px;box-shadow:var(--shadow-sheet);overflow:hidden}
+.ip-body{padding:26px 30px 30px;display:grid;grid-template-columns:minmax(0,1fr) 232px;gap:26px;align-items:start}
+.ip-stage b{display:block;font-size:17px;font-weight:650;letter-spacing:-.2px}
+.ip-stage p{margin:5px 0 0;font-size:11.5px;line-height:1.7;color:var(--muted)}
+.ip-side{border-left:1px solid var(--line-faint);padding-left:20px}
+.ip-side .row{display:flex;justify-content:space-between;font-size:11px;padding:5px 0;color:var(--muted)}
+.ip-side .row b{font-weight:500;color:var(--ink-2)}
+.ip-bar{grid-column:1 / -1;height:6px;border-radius:4px;background:var(--bg-sunken);overflow:hidden;margin-top:-8px}
+.ip-bar i{display:block;height:100%;background:var(--accent)}
+
+/* C 控制台 */
+.console{width:640px;background:var(--bg-card);border-radius:16px;box-shadow:var(--shadow-sheet);overflow:hidden}
+.con-head{display:flex;align-items:center;gap:9px;padding:12px 16px;border-bottom:1px solid var(--line-soft)}
+.con-head .t{font-size:13px;font-weight:600}
+.con-head .pct{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--accent-ink)}
+.con-bar{height:3px;background:var(--bg-sunken)}
+.con-bar i{display:block;height:100%;background:var(--accent);width:64%}
+.term{margin:0;padding:14px 16px;background:var(--bg-code);min-height:250px;
+  font-family:var(--mono);font-size:11px;line-height:1.95;color:#93a4bb}
+.term .ts{color:#54657d;margin-right:9px}
+.term .ok{color:#68d391}
+.term .key{color:#7fb6ff}
+.term .warn{color:#f0b45f}
+.term .cur{color:#d6dfeb}
+.term .cur::after{content:'';display:inline-block;width:6px;height:12px;background:#7fb6ff;
+  margin-left:4px;vertical-align:-2px;opacity:.85}
+
+.note-line{margin-top:12px;font-size:12px;color:var(--muted);line-height:1.75;max-width:880px}
+.note-line b{color:var(--ink-2);font-weight:600}
+.ref{margin-top:16px;display:flex;gap:14px;align-items:flex-start;padding:12px;border:1px solid var(--line-soft);
+  border-radius:12px;background:#fff;max-width:760px}
+.ref img{width:330px;border:1px solid var(--line-soft);border-radius:8px;display:block}
+.ref .rt{font-size:11.5px;line-height:1.8;color:var(--muted)}
+.ref .rt b{display:block;font-size:12px;color:var(--ink-2);margin-bottom:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="page-head">
+    <h1>任务书重做：排版 / 意见框 / 执行进度</h1>
+    <p>三块合在一个页面里看。任务书用的是你当前那份真实内容（7 步、0 复用、1 风险，写入终端资产导入导出用例），所以图片四的差异能直接对上你截图里的问题。</p>
+  </div>
+
+  <div class="sec">
+    <div class="sec-head"><span class="idx">现状</span><h2>为什么看着不规整</h2></div>
+    <p>不是字号问题，是「没有骨架」：四个区块只靠虚线分隔，标题和正文同一个灰阶；步骤表没有表头，每行都重复一个「手写」；右栏路径折成三行，编辑铅笔被挤到下一行；「未找到可复用封装」占掉一整块。读起来像一份 Markdown 转出来的草稿，不像一份要签字确认的东西。</p>
+    <div class="ref">
+      <img src="../plan-current.png" alt="当前任务书">
+      <div class="rt">
+        <b>具体问题（按视觉顺序）</b>
+        1. 虚线 + 无表头，区块之间没有容器，视线落不到边界<br>
+        2. 「手写」×7 是噪声：全部手写时这个信息属于表头，不属于每一行<br>
+        3. 项目风格是三行 label:value，import 那行折行后和说明糊在一起<br>
+        4. 右栏 330px 里塞了路径、建议、意见、按钮，四件事互相挤<br>
+        5. 空状态（0 条封装 / 0 条意见）各占一块版面
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 一 · 任务书排版 ============ -->
+  <div class="sec">
+    <div class="sec-head"><span class="idx">01</span><h2>任务书排版</h2></div>
+    <p>三版都用同一份内容、同一套 token，只换骨架。差别是「这份东西被当成什么」：卡片是审查清单，文档是要读的说明书，台账是逐行核对的表。</p>
+
+    <!-- A -->
+    <div class="frame">
+      <div class="cap"><b>A · 分节卡片</b><span class="pill">推荐</span><span class="why">每块有边界和表头，空状态收成一行</span></div>
+      <div class="sheet">
+        <div class="shead">
+          <span class="stitle">任务书</span>
+          <span class="chip">7 步</span>
+          <span class="chip warn">1 风险</span>
+          <span class="stip">选中正文可单独提意见</span>
+          <span class="x">✕</span>
+        </div>
+        <div class="sbody">
+          <div class="smain">
+            <div class="card">
+              <div class="chead"><span class="ct">项目风格</span></div>
+              <div class="cbody">
+                <div class="fields">
+                  <div class="f"><span>框架</span><b>Robot Framework</b></div>
+                  <div class="f"><span>断言</span><b>关键字断言</b></div>
+                  <div class="f"><span>复用</span><b class="dim">无 · 7 步全部手写</b></div>
+                </div>
+                <div class="code-line"><span>import</span><code>Resource ../../登录/公共的前置后置.resource</code></div>
+                <p class="note">文件名采用中文业务名称加「测试用例」；通过 Resource 引入页面操作资源。</p>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="chead"><span class="ct">逐步做法</span><span class="count">7 步</span><span class="spacer"></span><span class="mini">全部手写</span></div>
+              <table class="tbl">
+                <thead><tr><th class="num">#</th><th>做法</th></tr></thead>
+                <tbody>
+                  <tr><td class="num">1</td><td>打开终端资产模块的登录页面。</td></tr>
+                  <tr><td class="num">2</td><td>填写账号密码，点击登录并完成滑块验证。</td></tr>
+                  <tr><td class="num">3</td><td>点击「终端管理」菜单。</td></tr>
+                  <tr><td class="num">4</td><td>点击「终端资产」进入资产页面。</td></tr>
+                  <tr><td class="num">5</td><td>点击导出，等待文件下载并按预期校验文件大小及 XLSX 行数。</td></tr>
+                  <tr><td class="num">6</td><td>点击「导入」按钮。</td></tr>
+                  <tr><td class="num">7</td><td>点击「下载导入模板」，等待模板文件下载并按预期校验文件大小。</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="card is-risk">
+              <div class="chead"><span class="ct">风险</span><span class="count warn">1</span></div>
+              <div class="cbody">
+                <div class="risk-row"><span class="dot"></span>步骤里未列出终端资产页面的操作资源，需由写手确认所需 Resource。</div>
+              </div>
+            </div>
+          </div>
+
+          <aside class="sside">
+            <div class="side-card">
+              <div class="sc-head"><span>写入位置</span><span class="badge">AI 选定</span></div>
+              <div class="path">测试用例层/终端管理/终端资产/终端资产导入导出测试用例.robot<span class="pen">✎</span></div>
+              <div class="hint">参照终端管理目录，按业务模块放入对应子目录。本次唯一写入点。</div>
+            </div>
+            <div class="side-card">
+              <div class="sc-head"><span>你的意见</span><span class="count">0</span></div>
+              <div class="empty">选中正文任意一段，就地写意见。<br>无意见可直接执行，意见随写入提交。</div>
+            </div>
+            <div class="sfoot">
+              <button class="btn">重新规划</button>
+              <button class="btn primary">按此执行</button>
+              <div class="hint">仅写目标文件；校验失败会保留文件并报错</div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+
+    <!-- B -->
+    <div class="frame">
+      <div class="cap"><b>B · 单栏文档 + 目录</b><span class="why">当说明书读，决策收到页脚一条</span></div>
+      <div class="sheet">
+        <div class="shead">
+          <span class="stitle">任务书</span>
+          <span class="chip">7 步</span>
+          <span class="stip">选中正文可单独提意见</span>
+          <span class="x">✕</span>
+        </div>
+        <div class="bbody">
+          <nav class="outline">
+            <a class="on"><span class="n">01</span>项目风格</a>
+            <a><span class="n">02</span>逐步做法<em>7</em></a>
+            <a><span class="n">03</span>风险<em>1</em></a>
+          </nav>
+          <div class="doc">
+            <h3><span class="n">01</span>项目风格</h3>
+            <dl>
+              <dt>runner</dt><dd>Robot Framework，使用 *** Settings *** / *** Test Cases *** 结构</dd>
+              <dt>断言</dt><dd>使用 Robot Framework 断言关键字</dd>
+              <dt>import</dt><dd><code>Resource ../../登录/公共的前置后置.resource</code></dd>
+              <dt>复用</dt><dd>无，7 步全部手写</dd>
+            </dl>
+            <p class="note">文件名采用中文业务名称加「测试用例」；通过 Resource 引入页面操作资源。</p>
+
+            <h3><span class="n">02</span>逐步做法<span class="h3r">7 步 · 全部手写</span></h3>
+            <ol class="docsteps">
+              <li><span class="n">01</span><p>打开终端资产模块的登录页面。</p></li>
+              <li><span class="n">02</span><p>填写账号密码，点击登录并完成滑块验证。</p></li>
+              <li><span class="n">03</span><p>点击「终端管理」菜单。</p></li>
+              <li><span class="n">04</span><p>点击「终端资产」进入资产页面。</p></li>
+              <li><span class="n">05</span><p>点击导出，等待文件下载并按预期校验文件大小及 XLSX 行数。</p></li>
+              <li><span class="n">06</span><p>点击「导入」按钮。</p></li>
+              <li><span class="n">07</span><p>点击「下载导入模板」，等待模板文件下载并按预期校验文件大小。</p></li>
+            </ol>
+
+            <h3><span class="n">03</span>风险<span class="h3r">1 条</span></h3>
+            <div class="callout warn">步骤里未列出终端资产页面的操作资源，需由写手确认所需 Resource。</div>
+          </div>
+        </div>
+        <div class="bbar">
+          <div class="bbar-path"><span>写入</span><code>测试用例层/终端管理/终端资产/终端资产导入导出测试用例.robot</code><button class="link">改</button></div>
+          <div class="bbar-right"><span class="hint">意见 0</span><button class="btn">重新规划</button><button class="btn primary">按此执行</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- C -->
+    <div class="frame">
+      <div class="cap"><b>C · 台账</b><span class="why">一行一步，全宽对齐；意见作为表格的一列</span></div>
+      <div class="sheet">
+        <div class="shead">
+          <span class="stitle">任务书</span>
+          <span class="stip">Robot Framework · 全部手写</span>
+          <div class="head-actions"><button class="btn sm">重新规划</button><button class="btn primary sm">按此执行</button></div>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><span>步骤</span><b>7</b></div>
+          <div class="kpi"><span>复用</span><b>0</b></div>
+          <div class="kpi"><span>风险</span><b class="warn">1</b></div>
+          <div class="kpi wide"><span>写入</span><code>测试用例层/终端管理/终端资产/终端资产导入导出测试用例.robot</code></div>
+        </div>
+        <div class="cbanner"><b>风险</b>步骤里未列出终端资产页面的操作资源，需由写手确认所需 Resource。</div>
+        <table class="tbl ledger">
+          <thead><tr><th class="num">#</th><th style="width:64px">方式</th><th>做法</th><th class="note-cell">意见</th></tr></thead>
+          <tbody>
+            <tr><td class="num">1</td><td class="kind">手写</td><td>打开终端资产模块的登录页面。</td><td class="note-cell"><button class="note-add">+</button></td></tr>
+            <tr><td class="num">2</td><td class="kind">手写</td><td>填写账号密码，点击登录并完成滑块验证。</td><td class="note-cell"><button class="note-add">+</button></td></tr>
+            <tr><td class="num">3</td><td class="kind">手写</td><td>点击「终端管理」菜单。</td><td class="note-cell"><span class="count">1</span></td></tr>
+            <tr><td class="num">4</td><td class="kind">手写</td><td>点击「终端资产」进入资产页面。</td><td class="note-cell"><button class="note-add">+</button></td></tr>
+            <tr><td class="num">5</td><td class="kind">手写</td><td>点击导出，等待文件下载并按预期校验文件大小及 XLSX 行数。</td><td class="note-cell"><button class="note-add">+</button></td></tr>
+            <tr><td class="num">6</td><td class="kind">手写</td><td>点击「导入」按钮。</td><td class="note-cell"><button class="note-add">+</button></td></tr>
+            <tr><td class="num">7</td><td class="kind">手写</td><td>点击「下载导入模板」，等待模板文件下载并按预期校验文件大小。</td><td class="note-cell"><button class="note-add">+</button></td></tr>
+          </tbody>
+        </table>
+        <div class="cfoot"><b>项目风格</b>runner Robot Framework · 断言 关键字断言 · import <code>Resource ../../登录/公共的前置后置.resource</code></div>
+      </div>
+    </div>
+
+    <p class="note-line"><b>怎么选：</b>A 最稳，区块有容器、空状态收成一行、右栏路径不再折三行；B 最适合「通读一遍再签」，但写入位置被压到页脚，改路径要多一步；C 最规整，一行一步对齐到底，代价是项目风格被挤到页脚，长步骤会撑高行。</p>
+  </div>
+
+  <!-- ============ 二 · 意见框 ============ -->
+  <div class="sec">
+    <div class="sec-head"><span class="idx">02</span><h2>选中文字后的意见框</h2></div>
+    <p>现在的做法是：选一段 → 点浮出的「就这段写意见」→ 弹一个居中对话框。问题是对话框把正文盖住了，写完也看不出这条意见挂在哪一段。三版都保留「选中即写」，改动的是它出现在哪、写完留下什么。</p>
+
+    <div class="frame">
+      <div class="cap"><b>A · 就地气泡</b><span class="pill">推荐</span><span class="why">选完直接在原地写，写完变成一个编号标记</span></div>
+      <div class="crop">
+        <div class="crop-head"><span class="stitle">任务书</span><span class="chip">7 步</span><span class="stip">选中正文可单独提意见</span><span class="x">✕</span></div>
+        <div class="crop-body">
+          <div class="crop-main">
+            <div class="mini-step"><span class="n">1</span>打开终端资产模块的登录页面。</div>
+            <div class="mini-step"><span class="n">2</span>填写账号密码，点击登录并完成滑块验证。</div>
+            <div class="mini-step"><span class="n">3</span><mark>点击「终端管理」菜单。</mark></div>
+            <div class="mini-step"><span class="n">4</span>点击「终端资产」进入资产页面。</div>
+            <div class="mini-step"><span class="n">5</span>点击导出，等待文件下载并按预期校验文件大小。</div>
+            <div class="mini-step"><span class="n">6</span>点击「导入」按钮。</div>
+            <div class="mini-step"><span class="n">7</span>点击「下载导入模板」，等待模板文件下载。</div>
+          </div>
+          <aside class="crop-side">
+            <div class="sc-head"><span>你的意见</span><span class="count">0</span></div>
+            <div class="empty">选中正文任意一段，就地写意见。</div>
+          </aside>
+
+          <div class="pop">
+            <div class="pop-head">第 3 步 · 意见</div>
+            <div class="pop-quote">「点击「终端管理」菜单。」</div>
+            <textarea placeholder="如：这里必须先等菜单加载完，用 Wait Until Element Is Visible"></textarea>
+            <div class="pop-foot"><button class="btn ghost sm">取消</button><button class="btn primary sm">添加意见</button></div>
+          </div>
+        </div>
+        <div class="crop-note">写完气泡收起，正文该行右侧出现 <b style="color:var(--accent-ink)">③</b> 编号；右栏列表同步，点编号可跳回该行。</div>
+      </div>
+    </div>
+
+    <div class="frame">
+      <div class="cap"><b>B · 右栏聚焦</b><span class="why">正文不动，输入区在右栏展开</span></div>
+      <div class="crop">
+        <div class="crop-head"><span class="stitle">任务书</span><span class="chip">7 步</span><span class="stip">选中正文可单独提意见</span><span class="x">✕</span></div>
+        <div class="crop-body">
+          <div class="crop-main">
+            <div class="mini-step"><span class="n">1</span>打开终端资产模块的登录页面。</div>
+            <div class="mini-step"><span class="n">2</span>填写账号密码，点击登录并完成滑块验证。</div>
+            <div class="mini-step on"><span class="n">3</span>点击「终端管理」菜单。</div>
+            <div class="mini-step"><span class="n">4</span>点击「终端资产」进入资产页面。</div>
+            <div class="mini-step"><span class="n">5</span>点击导出，等待文件下载并按预期校验文件大小。</div>
+            <div class="mini-step"><span class="n">6</span>点击「导入」按钮。</div>
+            <div class="mini-step"><span class="n">7</span>点击「下载导入模板」，等待模板文件下载。</div>
+          </div>
+          <aside class="crop-side">
+            <div class="sc-head"><span>你的意见</span><span class="count">0</span></div>
+            <div class="focus-input">
+              <div class="q">「点击「终端管理」菜单。」</div>
+              <div class="box">如：这里必须先等菜单加载完…</div>
+              <div class="acts"><button class="btn ghost sm">取消</button><button class="btn primary sm">添加</button></div>
+            </div>
+            <div class="note-item"><div class="q">「点击导出，等待文件下载…」</div><div class="c">校验行数用 Read Xlsx，不要用文件大小兜底</div></div>
+          </aside>
+        </div>
+        <div class="crop-note">选中段落在正文里保持一条蓝色左标，写的时候能一直看到上下文；右栏适合连写三四条。</div>
+      </div>
+    </div>
+
+    <div class="frame">
+      <div class="cap"><b>C · 底部批注条</b><span class="why">像 PDF 阅读器，横条不挡正文</span></div>
+      <div class="crop">
+        <div class="crop-head"><span class="stitle">任务书</span><span class="chip">7 步</span><span class="stip">选中正文可单独提意见</span><span class="x">✕</span></div>
+        <div class="crop-body">
+          <div class="crop-main" style="padding-bottom:56px">
+            <div class="mini-step"><span class="n">1</span>打开终端资产模块的登录页面。</div>
+            <div class="mini-step"><span class="n">2</span>填写账号密码，点击登录并完成滑块验证。</div>
+            <div class="mini-step"><span class="n">3</span><mark>点击「终端管理」菜单。</mark></div>
+            <div class="mini-step"><span class="n">4</span>点击「终端资产」进入资产页面。</div>
+            <div class="mini-step"><span class="n">5</span>点击导出，等待文件下载并按预期校验文件大小。</div>
+            <div class="mini-step"><span class="n">6</span>点击「导入」按钮。</div>
+            <div class="mini-step"><span class="n">7</span>点击「下载导入模板」，等待模板文件下载。</div>
+          </div>
+          <aside class="crop-side">
+            <div class="sc-head"><span>你的意见</span><span class="count">0</span></div>
+            <div class="empty">选中正文任意一段，底部输入。</div>
+          </aside>
+          <div class="dock">
+            <div class="q">「点击「终端管理」菜单。」</div>
+            <div class="box">写对这一步的意见…</div>
+            <button class="btn ghost sm">取消</button><button class="btn primary sm">添加</button>
+          </div>
+        </div>
+        <div class="crop-note">横条固定在窗口底部，正文一行都不遮；缺点是离选中处远，眼睛要往下跳一次。</div>
+      </div>
+    </div>
+
+    <p class="note-line"><b>怎么选：</b>A 最贴手，气泡就在选中处下方，适合「看到哪写到哪」；B 不遮挡正文，适合一次写多条；C 最不打扰阅读，但输入时要向下跳。</p>
+  </div>
+
+  <!-- ============ 三 · 执行进度 ============ -->
+  <div class="sec">
+    <div class="sec-head"><span class="idx">03</span><h2>点「按此执行」之后</h2></div>
+    <p>现在点了执行，任务书停在原地、按钮转圈，最长要等两三分钟，中间只有面板底部一条 6px 的进度条——用户不知道是在写、在校验、还是在真跑。后端其实一直在报阶段（prepare / detect / snapshot / writing / check / validate / repair / run / record），只是前端没接出来。三个方向都是把这些阶段摊开：A 给了运行 / 完成 / 失败三种状态，B 不开第二层窗口，C 是给调脚本的人看的日志流。</p>
+
+    <!-- A 运行中 -->
+    <div class="frame">
+      <div class="cap"><b>A · 阶段清单弹窗</b><span class="pill">推荐</span><span class="why">六个阶段，当前那条展开写细节</span></div>
+      <div class="modal">
+        <div class="mhead"><span class="mtitle">正在生成脚本</span><span class="mmeta">第 4 / 7 阶段 · 已用 1m 24s</span><span class="mx">✕</span></div>
+        <div class="msub">写入 <code>测试用例层/终端管理/终端资产/终端资产导入导出测试用例.robot</code> · 只写这一个文件</div>
+        <div class="mbody">
+          <ul class="flow">
+            <li class="done"><span class="dot">✓</span><div class="tx"><b>检查录制步骤与定位</b><em>7 步 · 无待确认</em></div><span class="t">0.4s</span></li>
+            <li class="done"><span class="dot">✓</span><div class="tx"><b>识别项目框架与工具链</b><em>Robot Framework · 已有 utils</em></div><span class="t">1.2s</span></li>
+            <li class="done"><span class="dot">✓</span><div class="tx"><b>记录工作区快照</b><em>128 个文件，用于失败时还原</em></div><span class="t">0.3s</span></li>
+            <li class="run">
+              <span class="dot"><i></i></span>
+              <div class="tx">
+                <b>正在让 AI 写脚本</b>
+                <div class="bar"><i style="width:56%"></i></div>
+                <em>已读到登录资源与终端资产页面资源，正在生成 7 步</em>
+              </div>
+              <span class="t">1m 12s</span>
+            </li>
+            <li class="wait"><span class="dot"></span><div class="tx"><b>校验脚本</b><em>robot --dryrun</em></div></li>
+            <li class="wait"><span class="dot"></span><div class="tx"><b>真实执行一遍</b><em>跑通才算完成</em></div></li>
+            <li class="wait"><span class="dot"></span><div class="tx"><b>登记生成记录</b></div></li>
+          </ul>
+        </div>
+        <div class="mfoot">
+          <button class="btn danger-text">停止生成</button>
+          <span class="hint">关掉窗口不影响生成，进度会留在面板底部</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- A 完成态 -->
+    <div class="frame">
+      <div class="cap"><b>A · 完成态</b><span class="why">同一位置收成结果卡，不用另开一个页面</span></div>
+      <div class="modal">
+        <div class="mhead"><span class="mtitle">已生成脚本</span><span class="mmeta">7 个阶段全部完成 · 用时 2m 06s</span><span class="mx">✕</span></div>
+        <div class="msub">写入 <code>测试用例层/终端管理/终端资产/终端资产导入导出测试用例.robot</code></div>
+        <div class="mbody">
+          <div class="result">
+            <div class="rt"><span>✓</span>校验通过 · 真实执行通过 3.2s</div>
+            <div class="rr">7 步全部通过，无降级定位；另有 2 个文件被改动（utils/captcha.ts、requirements.txt），可在结果里逐个还原。</div>
+          </div>
+          <ul class="flow done-flow">
+            <li><span class="dot">✓</span><div class="tx"><b>检查录制步骤与定位</b></div><span class="t">0.4s</span></li>
+            <li><span class="dot">✓</span><div class="tx"><b>识别项目框架与工具链</b></div><span class="t">1.2s</span></li>
+            <li><span class="dot">✓</span><div class="tx"><b>记录工作区快照</b></div><span class="t">0.3s</span></li>
+            <li><span class="dot">✓</span><div class="tx"><b>AI 写脚本</b></div><span class="t">1m 52s</span></li>
+            <li><span class="dot">✓</span><div class="tx"><b>校验脚本</b></div><span class="t">3.1s</span></li>
+            <li><span class="dot">✓</span><div class="tx"><b>真实执行</b></div><span class="t">3.2s</span></li>
+          </ul>
+        </div>
+        <div class="mfoot"><button class="btn">关闭</button><button class="btn primary" style="margin-left:auto">查看结果</button></div>
+      </div>
+    </div>
+
+
+    <!-- A 失败态 -->
+    <div class="frame">
+      <div class="cap"><b>A · 失败态</b><span class="why">红色落在挂掉的那一步，文件保留、可重试</span></div>
+      <div class="modal">
+        <div class="mhead"><span class="mtitle">生成失败</span><span class="mmeta">第 5 / 7 阶段 · 用时 1m 58s</span><span class="mx">✕</span></div>
+        <div class="msub">已写入 <code>测试用例层/终端管理/终端资产/终端资产导入导出测试用例.robot</code> · 文件保留</div>
+        <div class="mbody">
+          <div class="errbox">
+            <div class="et">校验没通过 · robot --dryrun 报 2 个错误</div>
+            <div class="el">No keyword with name 'Wait Until File Downloaded' found.</div>
+            <ul class="errlist">
+              <li>第 5 步：等文件落地用了未导入的关键字</li>
+              <li>建议：改用 <code>Wait Until Keyword Succeeds</code> + <code>OperatingSystem.File Should Exist</code></li>
+            </ul>
+          </div>
+          <ul class="flow">
+            <li class="done"><span class="dot">✓</span><div class="tx"><b>检查录制步骤与定位</b></div><span class="t">0.4s</span></li>
+            <li class="done"><span class="dot">✓</span><div class="tx"><b>识别项目框架与工具链</b></div><span class="t">1.2s</span></li>
+            <li class="done"><span class="dot">✓</span><div class="tx"><b>记录工作区快照</b></div><span class="t">0.3s</span></li>
+            <li class="done"><span class="dot">✓</span><div class="tx"><b>AI 写脚本</b></div><span class="t">1m 52s</span></li>
+            <li class="fail"><span class="dot">✕</span><div class="tx"><b>校验脚本</b><em>robot --dryrun 退出码 1</em></div><span class="t">3.4s</span></li>
+            <li class="wait"><span class="dot"></span><div class="tx"><b>真实执行一遍</b><em>未执行</em></div></li>
+            <li class="wait"><span class="dot"></span><div class="tx"><b>登记生成记录</b></div></li>
+          </ul>
+        </div>
+        <div class="mfoot">
+          <button class="btn">关闭</button>
+          <span class="hint">上一版快照可一键还原</span>
+          <button class="btn primary" style="margin-left:8px">重新生成</button>
+        </div>
+      </div>
+    </div>
+    <!-- B 原地 -->
+    <div class="frame">
+      <div class="cap"><b>B · 任务书原地替换</b><span class="why">不开第二层弹窗，正文位置直接变进度</span></div>
+      <div class="inplace">
+        <div class="shead"><span class="stitle">任务书</span><span class="chip">7 步</span><span class="chip">生成中</span><span class="stip">已用 1m 24s</span><span class="x">✕</span></div>
+        <div class="ip-body">
+          <div class="ip-stage">
+            <b>正在让 AI 写脚本</b>
+            <p>已读到登录资源与终端资产页面资源，正在生成 7 步。后面还有校验、真实执行、登记三步。</p>
+            <div class="ip-bar" style="margin-top:14px"><i style="width:56%"></i></div>
+            <ul class="flow" style="margin-top:12px">
+              <li class="done"><span class="dot">✓</span><div class="tx"><b>检查步骤与定位</b></div><span class="t">0.4s</span></li>
+              <li class="done"><span class="dot">✓</span><div class="tx"><b>识别框架 · 记录快照</b></div><span class="t">1.5s</span></li>
+              <li class="run"><span class="dot"><i></i></span><div class="tx"><b>AI 写脚本</b><em>已用 1m 12s</em></div></li>
+              <li class="wait"><span class="dot"></span><div class="tx"><b>校验 · 真实执行 · 登记</b></div></li>
+            </ul>
+          </div>
+          <div class="ip-side">
+            <div class="sc-head"><span>这次授权</span></div>
+            <div class="row"><span>写入</span><b>1 个文件</b></div>
+            <div class="row"><span>快照</span><b>128 文件</b></div>
+            <div class="row"><span>框架</span><b>Robot</b></div>
+            <div class="row"><span>意见</span><b>1 条</b></div>
+            <div class="hint" style="margin-top:10px">生成中不能改任务书；关掉窗口会继续。</div>
+            <button class="btn danger-text sm" style="margin-top:12px">停止生成</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- C 控制台 -->
+    <div class="frame">
+      <div class="cap"><b>C · 控制台日志流</b><span class="why">给想看清每一步的人，信息最全</span></div>
+      <div class="console">
+        <div class="con-head"><span class="t">正在生成脚本</span><span class="chip">1m 24s</span><span class="pct">64%</span></div>
+        <div class="con-bar"><i></i></div>
+        <pre class="term"><span class="ts">14:02:11</span><span class="ok">✓</span> 检查步骤与定位 · 7 步，0 待确认
+<span class="ts">14:02:12</span><span class="ok">✓</span> 识别框架 · <span class="key">robotframework</span>，utils 已存在
+<span class="ts">14:02:14</span><span class="ok">✓</span> 工作区快照 · 128 文件
+<span class="ts">14:02:15</span><span class="key">→</span> 写入 测试用例层/终端管理/终端资产/终端资产导入导出测试用例.robot
+<span class="ts">14:02:15</span>  读 Resource ../../登录/公共的前置后置.resource
+<span class="ts">14:02:41</span>  读 资源/终端资产页面.resource
+<span class="ts">14:03:12</span>  正在生成第 3–5 步（菜单 / 模块 / 导出校验）
+<span class="ts">14:03:35</span><span class="warn">!</span> 未找到可复用封装，7 步全部手写
+<span class="ts">14:03:36</span><span class="cur">正在写入文件…</span></pre>
+      </div>
+    </div>
+
+    <p class="note-line"><b>怎么选：</b>A 最直接回答「到哪一步了」，失败时能指出是哪一步挂的；B 少一层弹窗、上下文最连贯，但用户可能没意识到「关掉窗口还在跑」；C 信息最全，适合调脚本的人，对普通用户像天书。</p>
+  </div>
+
+</div>
+</body>
+</html>

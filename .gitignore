@@ -108,3 +108,15 @@ storage/healer_sandbox/
 # 有独立 .git 和 node_modules —— 单独 add 会把 22M 和一堆 gitlink 带进来。
 # 这些是一次性验证产物，留在本地即可。
 .probe/
+
+# ---- 提示词实验工作区（2026-11 的 A/B 对照）----
+# .tmp-promptlab 里有探针脚本、chromedriver、判分产物和 60M 归档，全是一次性验证物；
+# opencode.promptlab-*.json 是那轮实验临时生成的模型配置（每个变体一份），
+# .opencode/prompts/promptlab-*.md 是对应的提示词快照。实验结论已写进 docs/，
+# 原始材料留在本地即可，不占仓库体积。
+# 注意：.opencode/* 本来被整目录忽略，prompts/ 是显式放行的白名单，
+# 所以 promptlab 这组要在白名单之后单独再挡一次。
+.tmp-prompt/
+.tmp-promptlab/
+opencode.promptlab-*.json
+.opencode/prompts/promptlab-*.md
