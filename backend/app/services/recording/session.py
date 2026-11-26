@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import subprocess
 import tempfile
@@ -43,6 +44,59 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RECORDER_JS = os.path.join(HERE, 'recorder.js')
 # 录制时给目标元素打的临时属性，用来算出「用户点的是第几个匹配」（见 _count）。
 TARGET_MARK_ATTR = 'data-autocase-target'
+
+
+def _route_segment_is_id(seg):
+    """路由里这一段是不是「具体某一条」，而不是页面本身。
+
+    不压掉的话，/terminal/asset/123 和 /terminal/asset/456 会被当成两个页面，
+    录一次资产列表就散出几十个「页面」，按页面划分资源文件反而更乱。
+    """
+    if seg.isdigit():
+        return True
+    if re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', seg, re.I):
+        return True
+    # mongo id / 长 hash：16 位以上纯十六进制。
+    return len(seg) >= 16 and bool(re.fullmatch(r'[0-9a-f]+', seg, re.I))
+
+
+def normalize_route(url):
+    """把一条完整地址压成页面标识：只留路由，去掉 host / query / 具体 ID。
+
+    两种路由都要认：
+    - hash 路由（#/terminal/asset）：SPA 常见写法，路由在 fragment 里；
+    - history 路由（/terminal/asset）：路由在 path 里。
+    只有以 / 开头的 fragment 才当路由，`#section` 这种页内锚点退回 pathname。
+
+    返回值统一成 path 形状（不带 #），同一条路由在两种模式下写法一致。
+    取不到地址返回 None——调用方据此不写 page 字段，老数据也不会凭空多一个 /。
+    """
+    if not url:
+        return None
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return None
+    raw = parts.fragment if parts.fragment.startswith('/') else parts.path
+    # 查询串也可能在 fragment 里（#/asset?page=2），一起剥掉。
+    raw = raw.split('?', 1)[0].split('#', 1)[0]
+    out = [':id' if _route_segment_is_id(seg) else seg
+           for seg in raw.split('/') if seg]
+    return '/' + '/'.join(out)
+
+
+def page_of(doc):
+    """由录制时读到的地址与标题，得到「这一步在哪个页面」。
+
+    title 常常没有区分度（很多 SPA 从头到尾一个标签页标题），所以它只是展示用的
+    首选值，route 才是划分依据；前端会在标题重复时自动退回 route。
+    """
+    doc = doc or {}
+    route = normalize_route(doc.get('url'))
+    if not route:
+        return None
+    title = (doc.get('title') or '').strip()
+    return {'route': route, 'title': title or None}
 
 # 无壳面板是独立进程，不归 Playwright 管：后端要是异常退出（调试时最常见的收场），
 # 它就留在桌面上不走了，还占着一个临时 profile。退出时统一收掉。
@@ -262,7 +316,8 @@ LOC_DIALOG_MARGIN_CSS = 20
 # 用 timeOrigin 判「是不是同一个 document」，重复上报就一眼能看出来。
 NAV_INFO_JS = (
     "() => { try { const e = performance.getEntriesByType('navigation')[0];"
-    ' return { type: e ? e.type : null, origin: performance.timeOrigin || null } }'
+    ' return { type: e ? e.type : null, origin: performance.timeOrigin || null,'
+    ' title: document.title || null } }'
     ' catch (err) { return null } }'
 )
 
@@ -367,6 +422,14 @@ EDITABLE_FIELDS = {
     'click': ('settle',),
 }
 MAX_VALUE_LENGTH = 500
+# 新录入的点击默认带「执行前等待」（面板上那个闹钟）：先等元素可见再点。
+# 不补历史草稿——同一个录制重新生成时，不该凭空多出一堆等待。
+DEFAULT_SETTLE_SECONDS = 5
+
+
+def default_settle(kind):
+    """新录入的步骤要不要带默认等待。只有点击带，别的类型没有「先等可见」这层语义。"""
+    return {'timeout': DEFAULT_SETTLE_SECONDS} if kind == 'click' else None
 # 文本框里这些键只改文本或移光标，结果由紧随其后的 fill 全量表达（见 _press_only_edits_text）。
 TEXT_EDIT_KEYS = frozenset([
     'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
@@ -3623,15 +3686,19 @@ class RecordingSession(object):
         except Exception:
             url = None
         stamp = self._doc_stamp.get(id(frame))
+        title = None
         if stamp is None:
             try:
                 info = frame.evaluate(NAV_INFO_JS)
                 stamp = info.get('origin') if isinstance(info, dict) else None
+                # 顺手把标题读回来：这条兜底路径只在旧版注入脚本（没发 _doc_url）时走，
+                # 读得到就带上，读不到前端退回用路由末段显示。
+                title = info.get('title') if isinstance(info, dict) else None
             except Exception:
                 stamp = None
             if stamp is not None:
                 self._doc_stamp[id(frame)] = stamp
-        return {'url': url, 'stamp': stamp}
+        return {'url': url, 'title': title, 'stamp': stamp}
 
     def _same_page(self, doc, frame):
         """target 录制时的页面是否还是这个 frame 当前的那一个。
@@ -4354,7 +4421,9 @@ class RecordingSession(object):
         mark = snap.pop('_mark', None)
         # 记下元素属于哪个 document：停止录制时只对「还在当前页面上」的 target 重算。
         # 优先用 recorder.js 在页面里读到的值，避免和导航抢时序；旧注入脚本没有这两个字段时兜底。
-        doc = {'url': snap.pop('_doc_url', None), 'stamp': snap.pop('_doc_stamp', None)}
+        doc = {'url': snap.pop('_doc_url', None),
+               'title': snap.pop('_doc_title', None),
+               'stamp': snap.pop('_doc_stamp', None)}
         if not doc['url'] and doc['stamp'] is None:
             doc = self._doc_identity(frame)
         counted = None
@@ -4386,7 +4455,7 @@ class RecordingSession(object):
             primary = vanished_primary(ordered)
             unverified = primary is not None
         status = 'stale' if unverified else status_of(primary)
-        target = ir.make_target(snap, ordered, primary, status)
+        target = ir.make_target(snap, ordered, primary, status, page=page_of(doc))
         # 合并键要提前算：fill 每敲一个字符来一条，截图得知道「是不是同一个元素」才能复用。
         key = self._merge_key(snap, primary, frame)
         if vanished_after:
@@ -4450,6 +4519,10 @@ class RecordingSession(object):
 
             step = ir.make_step(kind, no=0, target=target, value=data.get('value'),
                                 label=data.get('label'), page_index=index)
+            if kind == 'click':
+                # 新录的点击默认带 5 秒执行前等待（面板上的闹钟）：先等元素可见再点，
+                # 慢页面不会一上来就扑空。用户仍然可以点闹钟关掉或改秒数。
+                step['settle'] = default_settle('click')
             if kind == 'press':
                 # 键名走 value：生成端两种框架都是「对元素发一个键」，只需要一个字符串。
                 step['value'] = data.get('key')

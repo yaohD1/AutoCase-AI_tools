@@ -85,6 +85,21 @@ def migrate_db(app: Flask):
             cols = [r[1] for r in cur.fetchall()]
             if 'teardown_json' not in cols:
                 cur.execute("ALTER TABLE recording_drafts ADD COLUMN teardown_json TEXT")
+        # 执行测试的 AI 诊断结果：跟着某一次运行走，存成 JSON 列。
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='test_runs'")
+        if cur.fetchone():
+            cur.execute("PRAGMA table_info(test_runs)")
+            cols = [r[1] for r in cur.fetchall()]
+            if 'diagnoses_json' not in cols:
+                cur.execute("ALTER TABLE test_runs ADD COLUMN diagnoses_json TEXT")
+        # 生成时平台在任务书之外写的共享库：不记下来，记录页就只有 .robot，
+        # 用户却在目录里看到 .autocase/，对不上账。
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recording_generations'")
+        if cur.fetchone():
+            cur.execute("PRAGMA table_info(recording_generations)")
+            cols = [r[1] for r in cur.fetchall()]
+            if 'platform_files' not in cols:
+                cur.execute("ALTER TABLE recording_generations ADD COLUMN platform_files TEXT")
         # 模型配置改由 opencode.models.json 提供，旧的纯 API 配置表直接丢掉。
         # 里面的数据是早期手填的、早已失效；留着只会让「到底哪份在生效」更难判断。
         cur.execute("DROP TABLE IF EXISTS ai_configs")

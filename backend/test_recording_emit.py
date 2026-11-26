@@ -108,13 +108,37 @@ class EmitTest(unittest.TestCase):
         self.assertTrue((self.ws / TARGET).is_file())
         self.assertIn('Input Text', runner.prompts[0])
 
-    def test_prompt_carries_locator_keywords_and_target_path(self):
+    def test_prompt_carries_locator_var_instead_of_raw_locator(self):
+        """定位抽到资源文件后，提示词只给变量名。
+
+        两样同时给的话写手一定挑省事的那条（它对长 xpath 有很强的改写冲动），
+        资源文件就白建了。
+        """
         runner = FakeRunner(write(TARGET, ROBOT()))
         self._gen(runner, [(True, 'ok')])
-        # prompt 内是 JSON，引号会被转义成 \"，用 chr(92) 显式拼出反斜杠。
-        bs = chr(92)
-        self.assertIn('"locator": "css=[id=' + bs + '"user' + bs + '"]"', runner.prompts[0])
-        self.assertIn('"target_path": "tests/login.robot"', runner.prompts[0])
+        prompt = runner.prompts[0]
+        self.assertIn('"locator_var": "${tests用户名输入框}"', prompt)
+        self.assertIn('"target_path": "tests/login.robot"', prompt)
+        self.assertNotIn('css=[id=', prompt, '裸定位不该再进提示词')
+        # 定位必须落在资源文件里，否则变量是空的
+        body = (self.ws / '.autocase/locators/login页面元素.resource').read_text(encoding='utf-8')
+        self.assertIn("css=[id='user']", body.replace('"', "'"))
+
+    def test_script_gets_resource_line_and_reports_the_file(self):
+        """资源文件路径要从用例目录往后退着写，并出现在「平台另外写入」里。
+
+        路径写绝对路径换台机器就断；不报出来用户只会看到 .robot，目录里却多出
+        .autocase/，账对不上。
+        """
+        runner = FakeRunner(write(TARGET, ROBOT()))
+        result = self._gen(runner, [(True, 'ok')])
+        text = (self.ws / TARGET).read_text(encoding='utf-8')
+        self.assertIn(
+            'Resource    ${CURDIR}/../.autocase/locators/login页面元素.resource', text)
+        paths = [item['path'] for item in result['platform_files']]
+        self.assertIn('.autocase/locators/login页面元素.resource', paths)
+        self.assertEqual(result['locator']['variables'], 1)
+        self.assertEqual(result['locator']['bare'], [], '正文不该留裸定位')
 
     def test_generate_uses_the_confirmed_plan_and_does_not_plan_again(self):
         """规划已经独立成一步：写入只认传进来的任务书，不许自己再烧一次模型调用。"""
@@ -431,12 +455,14 @@ class EmitTest(unittest.TestCase):
         self.assertEqual(result['degraded'][0]['no'], 7)
         self.assertEqual(result['degraded'][0]['matches'], 2)
         self.assertEqual(result['degraded'][0]['nth'], 1)
+        # css 选择器带不了序号，nth 仍要告诉写手；定位本身已经是变量。
         self.assertIn('"nth": 1', runner.prompts[0])
+        self.assertIn('${tests用户名输入框_2}', runner.prompts[0])
         self.assertIn('"match_count": 2', runner.prompts[0])
         self.assertTrue((self.ws / TARGET).is_file())
 
-    def test_rf_row_scoped_locator_reaches_the_prompt(self):
-        """行锚定的 RF 定位是一条自足的 xpath，写手原样用，不该再被 nth 改写。"""
+    def test_rf_row_scoped_locator_reaches_the_resource_file(self):
+        """行锚定的 RF 定位是一条自足的 xpath，原样进资源文件，不该再被 nth 改写。"""
         step = _rf_step(no=9, text='删除 WO-2 这一行')
         locator = ("xpath=//tr[contains(normalize-space(.), 'WO-2')]"
                    "//button[normalize-space(.)='删除']")
@@ -448,9 +474,11 @@ class EmitTest(unittest.TestCase):
         step['target']['primary'] = row
         runner = FakeRunner(write(TARGET, ROBOT()))
         self._gen(runner, [(True, 'ok')], steps=[_rf_step(), step])
-        self.assertIn(locator, runner.prompts[0])
-        # 唯一命中时不再下发 nth / candidates（纯冗余）：locator 原样出现，且没有被拼上序号
+        body = (self.ws / '.autocase/locators/login页面元素.resource').read_text(encoding='utf-8')
+        self.assertIn(locator, body)
+        # 唯一命中时不再下发 nth（纯冗余），定位也没有被拼上序号
         self.assertNotIn('"nth":', runner.prompts[0])
+        self.assertNotIn(locator + '[', body)
 
     def test_target_that_matches_nothing_still_blocks(self):
         """连一条候选都命不中（元素已不在页面上）才拒绝——那种情况写不出任何定位。"""
@@ -537,7 +565,7 @@ class NormalizeHeaderTest(unittest.TestCase):
         path.parent.mkdir(parents=True)
         path.write_text(content, encoding='utf-8')
         emit._normalize_rf_script(str(root), self.TARGET, self.STEPS,
-                                  slider_lib='tests/libraries/SliderLibrary.py')
+                                  slider_lib='../.autocase/libraries/SliderLibrary.py')
         return path.read_text(encoding='utf-8')
 
     def test_rewrites_settings_and_keeps_one_boot(self):
@@ -555,7 +583,7 @@ class NormalizeHeaderTest(unittest.TestCase):
         self.assertEqual(text.count('Create Webdriver'), 1)
         self.assertEqual(text.count('--ignore-certificate-errors'), 1)
         self.assertIn('Set Selenium Implicit Wait', text)
-        self.assertIn('Library    ${CURDIR}/libraries/SliderLibrary.py', text)
+        self.assertIn('Library    ${CURDIR}/../.autocase/libraries/SliderLibrary.py', text)
         self.assertIn('*** Keywords ***', text)
 
     def test_adds_goto_when_only_test_cases(self):
@@ -655,7 +683,7 @@ class DownloadDirHeaderTest(unittest.TestCase):
             '    Go To    https://x/#/\n'
             "    ${f}=    Download File    xpath=//b    min_bytes=1\n")
 
-    def _run(self, files_lib='tests/libraries/FilesLibrary.py'):
+    def _run(self, files_lib='../.autocase/libraries/FilesLibrary.py'):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, str(root), True)
         path = root / self.TARGET
@@ -666,7 +694,7 @@ class DownloadDirHeaderTest(unittest.TestCase):
 
     def test_binds_download_dir_when_library_present(self):
         text = self._run()
-        self.assertIn('Library    ${CURDIR}/libraries/FilesLibrary.py    ${CURDIR}/downloads', text)
+        self.assertIn('Library    ${CURDIR}/../.autocase/libraries/FilesLibrary.py    ${CURDIR}/downloads', text)
         self.assertIn('${download_dir}=    Ensure Download Dir', text)
         self.assertIn('download.default_directory=${download_dir}', text)
         self.assertIn("download.prompt_for_download=${False}", text)
@@ -678,6 +706,37 @@ class DownloadDirHeaderTest(unittest.TestCase):
         text = self._run(files_lib=None)
         self.assertNotIn('Ensure Download Dir', text)
         self.assertNotIn('add_experimental_option', text)
+
+
+class SettlePromptTest(unittest.TestCase):
+    """点击的「执行前等待」（新录步骤默认 5 秒）要原样进提示词。
+
+    写错的地方只有两种：等错元素（写成下一步的），或给没有开关的步骤也补等待。
+    所以数据和规则都要说清楚「等这一步自己的元素」「只对带 settle 的步骤」。
+    """
+
+    def test_prompt_step_keeps_settle(self):
+        items = emit._steps_for_prompt(
+            [{'no': 1, 'type': 'click', 'settle': {'timeout': 5}, 'target': None}],
+            emit.RF_FRAMEWORK)
+        self.assertEqual(items[0]['settle'], {'timeout': 5})
+
+    def test_rules_tell_writer_to_wait_before_click(self):
+        text = emit._settle_rules({
+            'framework': emit.RF_FRAMEWORK,
+            'steps': [{'no': 1, 'type': 'click', 'settle': {'timeout': 5}}],
+        })
+        self.assertIn('Wait Until Element Is Visible', text)
+        self.assertIn('<settle.timeout>s', text)
+        self.assertIn('没有 settle 的步骤一律不要加', text)
+
+    def test_no_rules_without_settle(self):
+        # 老草稿里的点击没有 settle，提示词里就不该出现等待规则。
+        for framework in (emit.RF_FRAMEWORK, emit.PW_FRAMEWORK):
+            self.assertEqual(emit._settle_rules({
+                'framework': framework,
+                'steps': [{'no': 1, 'type': 'click'}],
+            }), '')
 
 
 if __name__ == '__main__':

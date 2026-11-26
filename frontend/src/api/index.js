@@ -227,6 +227,12 @@ batchDeleteTestcases(ids) {
   getTestRun(id) {
     return api.get(`/automation/testrun/runs/${id}`)
   },
+  // AI 初步诊断：异步任务，202 立刻返回，结果靠轮询 run 详情里的 diagnoses 拿。
+  // indexes 是 results 数组下标；不传就诊断全部失败（后端默认最多 5 条）。
+  diagnoseTestRun(id, indexes = null) {
+    return api.post(`/automation/testrun/runs/${id}/diagnose`,
+      indexes ? { indexes } : {}, { timeout: 30000 })
+  },
   stopTestRun(id) {
     return api.post(`/automation/testrun/runs/${id}/stop`)
   },

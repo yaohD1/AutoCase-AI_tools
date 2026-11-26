@@ -141,6 +141,18 @@
             <div class="rec-label">生成 Agent 的说明</div>
             <div class="rec-reply">{{ selected.reply }}</div>
           </div>
+
+          <!-- 平台自己写/复用的共享库：任务书里没有，但目录里有，必须列出来 -->
+          <div v-if="selected.platform_files && selected.platform_files.length" class="rec-block">
+            <div class="rec-label">平台另外写入的辅助文件（所有用例共用）</div>
+            <div class="rec-reply">
+              <div v-for="item in selected.platform_files" :key="item.path" class="rec-platform-row">
+                <code>{{ item.path }}</code>
+                <span class="rec-platform-state">{{ platformStateName(item.state) }}</span>
+              </div>
+            </div>
+            <div class="rec-hint">内容没变就直接复用，不会重复写；模板更新过时才会覆盖</div>
+          </div>
           </template>
         </div>
 
@@ -366,6 +378,11 @@ async function revertSelected() {
 
 function frameworkName(value) {
   return (FRAMEWORKS.find(f => f.value === value) || {}).label || (value || '—')
+}
+
+// 平台辅助文件的三种状态：新建、覆盖旧版本、内容一致直接复用。
+function platformStateName(state) {
+  return ({ created: '新建', updated: '已更新', reused: '已存在·复用' })[state] || state || ''
 }
 
 function stepKindLabel(type) { return STEP_LABELS[type] || type }
@@ -668,6 +685,25 @@ function errorText(error) {
   color: var(--ink-2);
   white-space: pre-wrap;
 }
+
+/* 平台辅助文件：路径一行一条，状态贴在右边，不让长路径把布局撑开 */
+.rec-platform-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.8;
+}
+.rec-platform-row code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rec-platform-state { flex: none; color: var(--muted); font-family: var(--mono); }
+.rec-hint { margin-top: 6px; color: var(--faint); font-size: 11.5px; line-height: 1.5; }
 
 /* 提交盒：钉在底栏，和上方内容用一条细线分开 */
 .rec-commit {

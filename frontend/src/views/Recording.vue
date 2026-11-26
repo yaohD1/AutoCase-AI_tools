@@ -909,7 +909,7 @@
                     <!-- 带等待的断言和立即断言在列表里必须一眼分得开，加个小钟做标识 -->
                     <el-icon v-if="step.type === 'wait'" class="kind-icon"><Timer /></el-icon>{{ stepKindLabel(step.type) }}
                   </span>
-                  <span class="step-text">{{ compactMode ? panelStepText(step) : stepDescription(step) }}</span>
+                  <span class="step-text" :title="stepDescription(step)">{{ compactMode ? panelStepText(step) : stepDescription(step) }}</span>
                 </div>
                 <!-- 面板窄：goto 的地址单独一行等宽小字。挤在同一行时它会被省略成「打开 https:」，
                      而地址恰恰是这一步最该看清的东西。 -->
@@ -932,6 +932,8 @@
                   <span class="step-nav-url">{{ navPath(step.nav_to) }}</span>
                 </div>
                 <div v-if="step.target" class="step-locator">
+                  <!-- 页面归属：两个页面都有「确定」时，只看元素名分不出是哪个。 -->
+                  <span v-if="pageLabel(step)" class="step-page" :title="pageTitleAttr(step)">{{ pageLabel(step) }}</span>
                   <span class="step-alias">{{ step.target.alias || '未命名元素' }}</span>
                   <code class="locator-code">{{ locatorText(step.target) }}</code>
                   <el-tag size="small" :type="statusTone(effectiveStatus(step))" effect="light" :title="statusHint(step)">
@@ -996,58 +998,54 @@
               </template>
             </div>
             <div v-if="!selectMode" class="step-actions">
-              <!-- 点击的「执行前等待」：打开后先等这个元素出现，再点它。
-                   只给 click，别的类型没有「等自己再动」这层语义。 -->
+              <!-- 上移/下移已删掉：排序拖编号就行，省下的宽度留给标题。
+                   执行前等待平时只显示「⏱ 5s」；点时钟才展开秒数输入，再点一次收回。 -->
               <span v-if="step.type === 'click'" class="settle-ctrl">
                 <el-button
                   text
                   :icon="Timer"
                   :class="['settle-toggle', { 'is-on': step.settle }]"
                   :disabled="!canEdit"
-                  :title="step.settle ? `执行前最多等 ${step.settle.timeout} 秒` : '加执行前等待：先等这个元素出现再点'"
+                  :title="step.settle ? `执行前最多等 ${step.settle.timeout} 秒，点一下修改` : '加执行前等待：先等这个元素出现再点'"
                   @click.stop="toggleSettle(step)"
                 />
-                <el-input-number
-                  v-if="step.settle"
-                  :model-value="step.settle.timeout"
-                  :min="0.5"
-                  :max="360"
-                  :step="0.5"
-                  size="small"
-                  controls-position="right"
-                  class="settle-input"
-                  @click.stop
-                  @change="value => setStepSettle(step, value)"
-                />
+                <button
+                  v-if="step.settle && settleEditNo !== step.no"
+                  type="button"
+                  class="settle-value"
+                  :disabled="!canEdit"
+                  title="点击修改等待秒数"
+                  @click.stop="settleEditNo = step.no"
+                >{{ step.settle.timeout }}s</button>
+                <template v-if="step.settle && settleEditNo === step.no">
+                  <el-input-number
+                    :model-value="step.settle.timeout"
+                    :min="0.5"
+                    :max="360"
+                    :step="0.5"
+                    :controls="false"
+                    size="small"
+                    class="settle-input"
+                    @click.stop
+                    @change="value => setStepSettle(step, value)"
+                  />
+                  <el-button
+                    text
+                    :icon="Close"
+                    :disabled="!canEdit"
+                    title="取消执行前等待"
+                    @click.stop="clearSettle(step)"
+                  />
+                </template>
               </span>
-              <!-- 动作调用没有定位可编辑：改的是实参，或者解封回原始步骤 -->
-              <template v-if="step.type === 'call'">
-                <el-button
-                  v-if="callAction(step) && callAction(step).params.length"
-                  text
-                  :icon="EditPen"
-                  :disabled="!canEdit"
-                  title="改这一次调用的参数值"
-                  @click.stop="openArgsDialog(step)"
-                />
-                <el-button
-                  text
-                  :icon="Unlock"
-                  :disabled="!canEdit"
-                  title="解封：把这一步还原成封装前的几步（动作定义保留）"
-                  @click.stop="ungroupStep(step)"
-                />
-              </template>
-              <!-- 「在这一步之后插入」：hover 才出现，点开选断言 / 固定等待 / 刷新。
-                   拖拽只能挪已录的步骤，中途补一步才是高频动作，所以入口放在行尾。 -->
               <el-dropdown
                 v-if="canEdit"
-                class="step-insert-btn"
                 trigger="click"
                 placement="bottom-end"
+                popper-class="ui-buttons"
                 @command="kind => onInsertCommand(kind, step.no)"
               >
-                <el-button text :icon="Plus" title="在这一步之后插入断言 / 等待加载 / 固定等待 / 刷新" />
+                <el-button text :icon="Plus" title="在这一步之后插入断言 / 固定等待 / 刷新 / 关闭浏览器" />
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="assert">插入断言</el-dropdown-item>
@@ -1058,20 +1056,29 @@
                 </template>
               </el-dropdown>
               <el-button
-                v-if="editableFields(step).length"
+                v-if="step.type === 'call' && callAction(step) && callAction(step).params.length"
+                text
+                :icon="EditPen"
+                :disabled="!canEdit"
+                title="改这一次调用的参数值"
+                @click.stop="openArgsDialog(step)"
+              />
+              <el-button
+                v-else-if="editableFields(step).length"
                 text
                 :icon="EditPen"
                 :disabled="!canEdit"
                 title="编辑这一步的值"
                 @click="startEdit(step)"
               />
-              <!-- 收起后只留铅笔与删除：上移 / 下移 不 v-if 硬切，交给 .is-off 做宽度过渡，
-                   否则整行文字会瞬移一下，看着很生硬 -->
-              <div :class="['step-actions-extra', { 'is-off': stepsCollapsed }]">
-                <el-button text :icon="ArrowUp" :disabled="!canEdit" title="上移" @click="moveStep(step.no, 'up')" />
-                <el-button text :icon="ArrowDown" :disabled="!canEdit" title="下移" @click="moveStep(step.no, 'down')" />
-              </div>
-              <!-- 删除常驻（含收起态）：收起才是日常形态，删错一步不该还要先点展开 -->
+              <el-button
+                v-if="step.type === 'call'"
+                text
+                :icon="Unlock"
+                :disabled="!canEdit"
+                title="解封：把这一步还原成封装前的几步（动作定义保留）"
+                @click.stop="ungroupStep(step)"
+              />
               <el-button
                 text
                 class="step-delete-btn"
@@ -1083,6 +1090,14 @@
             </div>
           </li>
         </ol>
+
+        <!-- 本次录制落到过哪些页面。页面标签只标在「页面内操作」上，导航步骤一律不标
+             （它属于全局菜单，标哪个页面都是错的），所以光看标签会以为没录到页面信息。
+             这一行既是确认，也是资源文件按页面划分的依据。 -->
+        <div v-if="recordedPages.length > 1" class="steps-pages">
+          <span class="steps-pages-key">{{ recordedPages.length }} 个页面</span>
+          <span class="steps-pages-list">{{ recordedPages.map(p => p.name).join(' · ') }}</span>
+        </div>
 
         <!-- 后置处理：收尾动作（Test Teardown / afterEach），不在步骤列表里按顺序执行。
              放在列表末尾是因为它跑在整个流程之后；用例失败也会执行，这正是要它的原因。 -->
@@ -1719,6 +1734,45 @@
                 第 {{ item.no }} 步「{{ item.alias }}」：匹配 {{ item.matches }} 个，取第 {{ (item.nth ?? 0) + 1 }} 个
               </li>
             </ul>
+          </div>
+          <!-- 平台自己写的辅助库：不在任务书里，但不列出来用户只看到 .robot，
+               目录里却多出 .autocase/，账对不上。 -->
+          <!-- 定位资源单独一块：它是「改版只改一处」的载体，和工具库不是一回事。 -->
+          <div v-if="locatorFiles.length" class="gen-platform-files">
+            <div class="gen-platform-title">
+              定位变量写入了 {{ locatorFiles.length }} 个资源文件
+            </div>
+            <ul>
+              <li v-for="item in locatorFiles" :key="item.path">
+                <code>{{ item.path }}</code>
+                <span class="gen-file-state">{{ platformStateName(item.state) }}</span>
+              </li>
+            </ul>
+            <div class="field-hint">
+              同目录用例共用一份；以后页面改版只改这里，脚本正文不用动
+            </div>
+          </div>
+          <div v-if="utilFiles.length" class="gen-platform-files">
+            <div class="gen-platform-title">
+              平台另外写入了 {{ utilFiles.length }} 个辅助文件（所有用例共用）
+            </div>
+            <ul>
+              <li v-for="item in utilFiles" :key="item.path">
+                <code>{{ item.path }}</code>
+                <span class="gen-file-state">{{ platformStateName(item.state) }}</span>
+              </li>
+            </ul>
+            <div class="field-hint">内容没变就直接复用，不会重复写</div>
+          </div>
+          <!-- 写手没有全部走变量时的提醒：脚本还能跑，但失去了「改版改一处」的意义。 -->
+          <div v-if="shownResult.locator && shownResult.locator.bare && shownResult.locator.bare.length" class="gen-degraded">
+            <div class="gen-degraded-title">
+              正文里还有 {{ shownResult.locator.bare.length }} 条定位直接写死了，没走变量
+            </div>
+            <ul class="gen-outside-list">
+              <li v-for="item in shownResult.locator.bare" :key="item"><code>{{ item }}</code></li>
+            </ul>
+            <div class="field-hint">这些位置改版时要逐个改；其余步骤已用变量</div>
           </div>
           <div v-if="shownResult.outside && shownResult.outside.length" class="gen-degraded">
             <div class="gen-degraded-title">
@@ -2410,7 +2464,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Aim, ArrowUp, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, Download, EditPen, Files, FolderOpened, Loading, MoreFilled, Plus, Pointer, Postcard, Refresh, Search, Setting, Tickets, Timer, Unlock, Upload, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, Download, EditPen, Files, FolderOpened, Loading, MoreFilled, Plus, Pointer, Postcard, Refresh, Search, Setting, Tickets, Timer, Unlock, Upload, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -2569,12 +2623,10 @@ const panelCollapsed = ref(false)
 const panelWidth = ref(loadPanelWidth())
 const resizing = ref(false)
 
-// 步骤行一律完整显示：拖拽、铅笔、上移、下移、删除全在。
-// 标题右侧那颗「展开 / 收起」按钮已经删掉——它把上移 / 下移藏起来换 30px 高度，
-// 用户反而以为这两个功能被删了（实测反馈原话：「上移下移早都去掉了吗」）。
-// 面板宽度也不再跟着它联动，一律按 panelWidth（默认 520）走。
-// stepsCollapsed 保留成恒 false 的开关位：模板里的 .is-lean / .step-actions-extra.is-off
-// 两道样式不用动，将来要恢复行精简只改这一行。
+// 步骤行一律完整显示：拖拽、编辑、更多、删除全在。
+// 上移 / 下移已收进「更多」菜单（拖编号排序更快，它们只在精确挪一步时用），
+// 常驻图标从六个减到三个，宽度还给标题——面板窄时标题才不会被劈成两行。
+// stepsCollapsed 保留成恒 false 的开关位：.is-lean 的行内边距样式还在，将来要恢复行精简只改这一行。
 const stepsCollapsed = ref(false)
 
 // 面板最宽 900，同时保证被测页面至少还剩 900（页面优先，面板让位）。
@@ -2930,6 +2982,85 @@ const canInspect = computed(() => isRecording.value || (browserOpen.value && isS
 // 停止后浏览器还开着，但用户可能已经不想要那个窗口了，需要一个显式出口。
 const canCloseBrowser = computed(() => browserOpen.value && isStopped.value)
 const steps = computed(() => session.value?.steps || [])
+// 页面标签的显示值：标题有区分度就用标题，没有就退回路由。
+//
+// 很多 SPA 从头到尾一个标签页标题（「统一管理平台」），这时所有步骤的 title 都一样，
+// 拿它当页面名等于没加。判据是「一个标题是否只对应一条路由」，对应多条就是没区分度。
+const usefulPageTitles = computed(() => {
+  const routesOf = new Map()
+  for (const step of steps.value) {
+    const page = step.target && step.target.page
+    if (!page || !page.title) continue
+    if (!routesOf.has(page.title)) routesOf.set(page.title, new Set())
+    routesOf.get(page.title).add(page.route)
+  }
+  const keep = new Set()
+  for (const [title, routes] of routesOf) {
+    if (routes.size === 1) keep.add(title)
+  }
+  return keep
+})
+// 哪些步骤是「跳到别的页面」的导航。
+//
+// 录下来的 route 是**点这一下时所在的上一页**：点「终端资产」时还在故障自愈页，
+// 点完才到资产页。所以下一步的 route 变了，就说明这一步引起了跳转。
+// 这类元素是全局菜单，不属于任何一页——「日常运维」是从小区视图点开的，
+// 但它不属于小区视图，给它标页面只会误导。
+//
+// 最后一步没有下一步可比，用控件的 role 兜底：link / option / tab 都是导航控件。
+const NAV_ROLES = ['link', 'option', 'tab', 'menuitem']
+const navStepNos = computed(() => {
+  const list = steps.value
+  const nos = new Set()
+  for (let i = 0; i < list.length; i++) {
+    const target = list[i].target
+    const page = target && target.page
+    if (!page) continue
+    const next = list[i + 1] && list[i + 1].target && list[i + 1].target.page
+    const role = (target.snap && target.snap.role) || ''
+    if (next ? next.route !== page.route : NAV_ROLES.includes(role)) nos.add(list[i].no)
+  }
+  return nos
+})
+// 路由的中文名：谁跳到了这个路由，就用那个菜单的名字。
+// 「终端资产」跳到 /tab-index/asset-list，那这个页面在界面里就叫「终端资产」——
+// 比显示 asset-list 强得多，而且名字是用户自己点出来的，不会名不副实。
+//
+// 同一个路由被两个不同名字命中（详情页先后点开「张三」「李四」），说明它不是固定页面，
+// 这时宁可不采用，退回路由本身。
+const routeNames = computed(() => {
+  const list = steps.value
+  const names = new Map()
+  const conflicts = new Set()
+  for (let i = 0; i < list.length - 1; i++) {
+    if (!navStepNos.value.has(list[i].no)) continue
+    const next = list[i + 1].target && list[i + 1].target.page
+    const alias = (list[i].target && list[i].target.alias) || ''
+    if (!next || !alias) continue
+    if (names.has(next.route) && names.get(next.route) !== alias) {
+      conflicts.add(next.route)
+      continue
+    }
+    names.set(next.route, alias)
+  }
+  for (const route of conflicts) names.delete(route)
+  return names
+})
+// 本次录制落到过哪些页面。导航步骤不显示页面标签（见 pageLabel），
+// 只看标签会以为「没有页面信息」，所以在列表末尾给一份清单。
+const recordedPages = computed(() => {
+  const seen = new Map()
+  for (const step of steps.value) {
+    const page = step.target && step.target.page
+    if (!page || seen.has(page.route)) continue
+    const title = page.title && usefulPageTitles.value.has(page.title) ? page.title : ''
+    seen.set(page.route, {
+      route: page.route,
+      name: title || routeNames.value.get(page.route) || routeLabel(page.route),
+    })
+  }
+  return [...seen.values()]
+})
 const aliases = computed(() => session.value?.aliases || [])
 // 下拉里要能分清「删除」和「删除#2」：别名 + 它来自第几步。
 const aliasItems = computed(() => session.value?.alias_items || aliases.value.map((alias) => ({ alias, hint: '', desc: '' })))
@@ -3036,6 +3167,13 @@ const shownResult = computed(() => {
       && emit.value.result.generation_id !== local.generation_id) return emit.value.result
   return local
 })
+// 平台写了两类文件，界面上分开说：定位资源是「改版只改一处」的载体，
+// 工具库是平台自用的运行支撑，混在一起用户看不出哪个才是自己要维护的。
+// 按路径分类而不是让后端加字段：两边各有各的写入口，路径是最稳的判据。
+const locatorFiles = computed(() => ((shownResult.value || {}).platform_files || [])
+  .filter((item) => String(item.path || '').includes('/locators/')))
+const utilFiles = computed(() => ((shownResult.value || {}).platform_files || [])
+  .filter((item) => !String(item.path || '').includes('/locators/')))
 
 // ---- 执行进度弹窗 ----
 // 后端按 11 个阶段推进（见 progress.py），这里合并成 6 个用户能理解的步骤：
@@ -3400,6 +3538,9 @@ function applySession(data) {
 // ---- 定位预览：在浏览器里把匹配元素框出来，人眼确认「生成时会点到谁」 ----
 // peek.no 是当前展开的步骤号；只有它等于某一步时才在该步下面显示候选条。
 const peek = ref({})
+
+// 执行前等待的秒数弹层：同一时刻只开一个，值是步骤号。
+const settleEditNo = ref(null)
 
 async function peekTarget(step) {
   if (peek.value.no === step.no) {
@@ -4515,6 +4656,21 @@ function onRowClick(step) {
   if (selectMode.value) toggleStepPick(step.no)
 }
 
+// 暂停 / 继续：Ctrl+`（Backquote）。
+//
+// recorder.js 里那份只管被测页面——焦点落在面板或主窗口时，按键根本到不了那边
+// （键盘事件只发给当前聚焦的文档），和 Esc 退出拾取是同一个道理，所以这里必须也有一条。
+// 两边不会互相抵消：同一次按键只会被一个文档收到；真撞上了还有后端 250ms 去重兜住。
+function onPauseHotkey(event) {
+  if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return
+  if (event.code !== 'Backquote' && event.key !== '`') return
+  if (!isRecording.value || pausing.value) return
+  // 弹窗开着时不抢：封装动作、改参数时按到它，停下来反而挡路。
+  if (groupDialog.visible || argsDialog.visible || emitModal.open) return
+  event.preventDefault()
+  togglePause()
+}
+
 function onSelectKeydown(event) {
   if (event.key === 'Escape' && emitModal.open) {
     dismissEmitModal()
@@ -4796,8 +4952,20 @@ async function removeStep(no) {
 
 // 点击的「执行前等待」：空值表示关掉，数字表示先等这么多秒再点。
 // 存进 IR 的 settle 字段，生成脚本时翻译成 Wait Until Element Is Visible（等这一步自己的元素）。
-function toggleSettle(step) {
-  setStepSettle(step, step.settle ? null : 5)
+// 时钟：没有等待时先开启（默认 5 秒）并展开输入；已有等待时只展开 / 收回，不改数值。
+// 收回后再点一次时钟就能改；要取消等待，展开后点旁边的 ×。
+async function toggleSettle(step) {
+  if (!step.settle) {
+    await setStepSettle(step, 5)
+    settleEditNo.value = step.no
+    return
+  }
+  settleEditNo.value = settleEditNo.value === step.no ? null : step.no
+}
+
+async function clearSettle(step) {
+  await setStepSettle(step, null)
+  settleEditNo.value = null
 }
 
 async function setStepSettle(step, timeout) {
@@ -4807,15 +4975,6 @@ async function setStepSettle(step, timeout) {
     applySession(data)
   } catch (error) {
     ElMessage.error(errorText(error))
-  }
-}
-
-async function moveStep(no, direction) {
-  try {
-    const { data } = await api.moveRecordingStep(no, direction)
-    applySession(data)
-  } catch (error) {
-    ElMessage.warning(errorText(error))
   }
 }
 
@@ -5585,6 +5744,11 @@ function frameworkName(value) {
   return (FRAMEWORKS.find(f => f.value === value) || {}).label || (value ? value : '未识别')
 }
 
+// 平台辅助文件的三种状态：新建、覆盖旧版本、内容一致直接复用。
+function platformStateName(state) {
+  return ({ created: '新建', updated: '已更新', reused: '已存在·复用' })[state] || state || ''
+}
+
 // 检测结果里的绝对路径太长（Python 解释器常常三四层），chips 里只留末尾两段，完整路径放 title。
 function tailPath(path, depth = 2) {
   if (!path) return ''
@@ -5768,6 +5932,37 @@ function withNth(desc, index, count) {
   // RF 的定位本身就是 xpath 字符串，再拼 .nth() 是错的，用中文明说取第几个。
   if (config.framework === 'robot-selenium') return `${desc}  →  第 ${index + 1} 个`
   return `${desc}.nth(${index})`
+}
+
+// 这一步属于哪个页面。两个页面都有「确定」时，光看元素名分不出来。
+//
+// 导航步骤一律不标：它属于全局菜单，标成「点它时所在的页」是错的
+// （「终端资产」会被标成故障自愈页）。页面内操作才标，那才是它真正所在的页。
+// 名字优先级：有区分度的标题 → 从跳转推断出的中文名 → 路由末段。
+function pageLabel(step) {
+  const page = step.target && step.target.page
+  if (!page) return ''
+  if (navStepNos.value.has(step.no)) return ''
+  if (page.title && usefulPageTitles.value.has(page.title)) return page.title
+  return routeNames.value.get(page.route) || routeLabel(page.route)
+}
+
+function routeLabel(route) {
+  if (!route) return ''
+  const parts = String(route).split('/').filter(Boolean)
+  if (!parts.length) return '首页'
+  const last = parts[parts.length - 1]
+  // 详情页的路由末段是压过的 :id，本身没有信息量，退一段取资源名。
+  if (last === ':id' && parts.length > 1) return parts[parts.length - 2]
+  // 登录后的落地页没人「跳到」它，推断不出中文名，直接显示 dashboard 很突兀。
+  if (['dashboard', 'index', 'home', 'main', 'default'].includes(last.toLowerCase())) return '首页'
+  return last
+}
+
+function pageTitleAttr(step) {
+  const page = step.target && step.target.page
+  if (!page) return ''
+  return page.title ? `${page.title} · ${page.route}` : page.route
 }
 
 function locatorText(target) {
@@ -6533,6 +6728,8 @@ onMounted(async () => {
   window.addEventListener('resize', clampPanelWidth)
   // 多选态按 Esc 退出：框选到一半想放弃时，不必再去够工具栏那颗按钮。
   window.addEventListener('keydown', onSelectKeydown)
+  // 捕获阶段：焦点在输入框里也要能暂停，不能被输入框先吃掉。
+  window.addEventListener('keydown', onPauseHotkey, true)
   document.addEventListener('mousedown', onDocMouseDown, true)
   try {
     const { data } = await api.getAutomationModels()
@@ -6565,6 +6762,7 @@ onUnmounted(() => {
   clearInterval(tickTimer)
   window.removeEventListener('resize', clampPanelWidth)
   window.removeEventListener('keydown', onSelectKeydown)
+  window.removeEventListener('keydown', onPauseHotkey, true)
   window.removeEventListener('keydown', onSheetKeydown, true)
   document.removeEventListener('mousedown', onDocMouseDown, true)
   // 浮层开着就切走页面：body 的 overflow 是全局的，不还回去整站都滚不动。
@@ -7045,12 +7243,13 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .is-panel .step { padding:8px 10px; --rail-x:22.5px; }
 .is-panel .step-main { gap:8px; }
 .is-panel .step-text { font-size:13px; }
-/* 面板窄：正文单行省略，悬停才展开。少了这条，flex 会把 .step-text 压到 min-content，
-   一条长 URL 就变成每字一行（实测 320px 面板下的真实表现）。 */
+/* 面板窄：正文永远单行省略。少了这条，flex 会把 .step-text 压到 min-content，
+   一条长 URL 就变成每字一行（实测 320px 面板下的真实表现）。
+   **悬停不再切成换行**：悬停正是操作区最宽的时刻，以前一切换就把「点击「终端管理」」
+   从中间劈成两行；完整文案改由 title 提示给出。 */
 .is-panel .step-main, .is-embed .step-main { flex-wrap:nowrap; }
 .is-panel .step-text, .is-embed .step-text { flex:1 1 0; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .is-panel .step-url, .is-embed .step-url { margin-top:3px; font-family:var(--mono); font-size:10.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.is-panel .step:hover .step-text, .is-embed .step:hover .step-text { white-space:normal; overflow:visible; }
 .is-panel .step-locator { margin-top:4px; }
 .is-panel .step-note { margin-top:2px; font-size:12px; }
 /* 单行 flex 切成 3 列网格属于重排，没法补间；给按钮一个归位动画，切换时就不会「啪」地跳。
@@ -7160,6 +7359,23 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .step-nav-url { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .step-locator { margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .step-alias { color:var(--ink-2); font-size:12.5px; font-weight:600; }
+/* 页面归属标签：比元素名浅、比定位码实，一眼能分出「这是页面、后面那个才是元素」。
+   宽度封顶 + 省略号，面板窄时它先让路，不挤掉真正要看的元素名。 */
+.step-page {
+  color:var(--muted); font-size:11.5px; max-width:96px; flex-shrink:1; min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* 分隔符用伪元素：这一行本来就挤（别名 + 定位码 + 状态 + 两个图标），
+   多一个 flex 子项就多一份 8px 的 gap。 */
+.step-page::after { content:'›'; margin-left:5px; opacity:.55; }
+/* 本次录制落到过哪些页面：一行小字，放在步骤列表末尾。
+   导航步骤不标页面标签，没有这一行就看不出页面信息到底录到没有。 */
+.steps-pages {
+  margin-top:10px; padding-top:8px; border-top:1px dashed var(--line-soft);
+  font-size:11.5px; color:var(--muted); display:flex; gap:6px; flex-wrap:wrap;
+}
+.steps-pages-key { flex:none; font-weight:600; }
+.steps-pages-list { min-width:0; word-break:break-all; }
 .locator-code { color:var(--muted); font-size:11.5px; background:var(--bg-card); border:1px solid var(--line-soft); border-radius:6px; padding:2px 6px; word-break:break-all; }
 /* 面板窗口（悬浮窄条）里定位默认收起：一行只留「别名 + 状态」，鼠标移上去再把定位摊开。
    420px 宽下常显定位会把每一行撑成两三行，一屏只能看四步。 */
@@ -7168,17 +7384,24 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .is-panel .step:focus-within .locator-code {
   display:block; flex-basis:100%; margin-top:2px; max-height:60px; overflow:auto;
 }
-.step-actions { display:flex; flex-direction:row; align-items:center; gap:2px; flex-shrink:0;
-  opacity:.5; transition:opacity .15s ease; }
-/* 操作图标平时淡着，指针进到这一行才亮：一行里五个图标常驻太吵，压过正文了 */
-.step:hover .step-actions, .step:focus-within .step-actions { opacity:1; }
-/* 执行前等待：关着只显示一个秒表图标，打开后展开秒数输入，宽度够放「360」+ 步进箭头 */
-.settle-ctrl { display:flex; align-items:center; gap:2px; flex:none; }
-.settle-toggle { height:22px; width:22px; padding:0; color:var(--muted); }
+/* 操作条回到标题右侧同一行：正文占满剩余宽度，图标靠右。
+   上移/下移删掉后，常驻的只剩 插入 / 编辑 / 解封 / 删除。 */
+.step-actions { display:flex; flex-direction:row; align-items:center; gap:4px; flex-shrink:0; }
+/* Element Plus 给相邻按钮各加 12px 外边距。工具栏早重置了，这里不重置的话，
+   四个图标之间会白散出 36px——全是从标题那里抢来的。 */
+.step-actions :deep(.el-button + .el-button) { margin-left:0; }
+/* 执行前等待：平时只显示「⏱ 5s」，点时钟展开秒数输入，再点一次收回；
+   展开时旁边给一个 × 直接取消等待。 */
+.settle-ctrl { display:flex; align-items:center; gap:3px; flex:none; }
+.settle-toggle { height:24px; width:24px; padding:0; color:var(--muted); }
 .settle-toggle:hover { color:var(--accent); background:var(--accent-soft); }
 .settle-toggle.is-on { color:var(--accent); }
-.settle-input { width:78px; margin-left:2px; }
-.settle-input :deep(.el-input__wrapper) { padding-left:6px; padding-right:22px; }
+.settle-value { padding:0 2px; border:0; background:none; color:var(--accent);
+  font-size:11px; font-variant-numeric:tabular-nums; cursor:pointer; }
+.settle-value:hover { text-decoration:underline; }
+.settle-value:disabled { opacity:.6; cursor:default; }
+.settle-input { width:58px; }
+.settle-input :deep(.el-input__wrapper) { padding:0 6px; }
 /* 定位预览：行内小准星，点一下在浏览器里把匹配元素全框出来并编号 */
 .peek-btn { height:22px; width:22px; padding:0; margin-left:-2px; color:var(--muted); }
 .peek-btn:hover { color:var(--accent); background:var(--accent-soft); }
@@ -7468,22 +7691,9 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
   .shot-stage { max-width: calc(320px * var(--shot-ratio, 1.6)); }
 }
 
-/* 次要操作组（上移 / 下移）：收起时用 max-width 收进去，文字跟着回流而不是瞬移。
-   两个 30px 按钮之间还有 Element Plus 的 12px 相邻间距，实测 72px，上限给 84px 留余量。 */
-.step-actions-extra {
-  display:flex; align-items:center; gap:2px; flex:none; overflow:hidden;
-  max-width:84px; opacity:1;
-  transition:max-width .24s cubic-bezier(.4,0,.2,1), opacity .16s ease, margin-left .24s cubic-bezier(.4,0,.2,1);
-}
-.step-actions-extra :deep(.el-button) { flex:none; }
-.step-actions-extra.is-off { max-width:0; opacity:0; margin-left:-2px; pointer-events:none; }
-/* 删除在收起态也常驻：常态灰色，悬停才转红——每行一个红图标太吵，但得随手能删 */
+/* 删除常驻：常态灰色，悬停才转红——每行一个红图标太吵，但得随手能删 */
 .recording-page .step-actions .step-delete-btn:not(.is-disabled) { color:var(--faint); }
 .recording-page .step-actions .step-delete-btn:not(.is-disabled):hover { color:var(--danger); background:var(--danger-soft); }
-/* 「在这步之后插入」：位置常驻（避免 hover 时整行文字回流），只有图标淡入 */
-.step-insert-btn { opacity:0; transition:opacity .15s ease; }
-.step:hover .step-insert-btn, .step-insert-btn:focus-within { opacity:1; }
-@media (hover:none) { .step-insert-btn { opacity:1; } }
 /* 插入成功后闪一下，指认新步骤落在哪 */
 .step.is-flash { animation:step-flash 1.1s ease; }
 @keyframes step-flash {
@@ -7492,8 +7702,8 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 }
 /* 收起后只剩铅笔与删除：行内边距收紧，省出的宽度都给步骤文字 */
 .is-lean .step { gap:8px; padding:8px; }
-/* 步骤行图标：30×30 正方形，四个按钮从 176px 收到 126px */
-.recording-page .step-actions :deep(.el-button.is-text) { width:30px; height:30px; padding:0; border-radius:7px; }
+/* 步骤行图标：24×24，三个图标合计 80px；标题拿回两百多像素 */
+.recording-page .step-actions :deep(.el-button.is-text) { width:24px; height:24px; padding:0; border-radius:6px; }
 .recording-page .step-actions :deep(.el-button.is-text .el-icon) { font-size:14px; }
 
 /* 拖拽排序（sortablejs）：按住编号拖动 */
@@ -7656,6 +7866,19 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .gen-outside-list code { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .gen-outside-list .el-button { flex:none; height:20px; padding:0 4px; font-size:11.5px; }
 .gen-outside-actions { display:flex; align-items:center; gap:8px; margin-top:8px; }
+/* 平台辅助文件：不是问题，只是要让账目对得上，别用警告色 */
+.gen-platform-files {
+  margin-top:10px; padding:9px 11px; border-radius:8px;
+  background:var(--bg-sunken); border:1px solid var(--line-soft);
+}
+.gen-platform-title { color:var(--ink-2); font-size:12.5px; font-weight:600; }
+.gen-platform-files ul { margin:6px 0 0; padding-left:0 !important; list-style:none; }
+.gen-platform-files li { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted); }
+.gen-platform-files code {
+  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font:11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.gen-file-state { flex:none; font-size:11px; color:var(--muted); }
 /* 跑不起来时把 Playwright 的原始输出露一截：多半是配置/依赖问题，藏起来反而没法自查 */
 .gen-run-tail {
   margin:8px 0 0; padding:8px 10px; max-height:180px; overflow:auto;
@@ -8052,7 +8275,6 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 @media (prefers-reduced-motion: reduce) {
   .is-embed .page-col,
   .step,
-  .step-actions-extra,
   .toolbar { transition:none !important; }
   .toolbar :deep(.el-button) { animation:none !important; }
 }

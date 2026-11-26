@@ -3,6 +3,8 @@
 框架无关：只描述用户做了什么、目标是什么、用哪种定位。代码由后续的 adapter 生成。
 """
 
+import re
+
 STEP_TYPES = ('goto', 'reload', 'click', 'fill', 'select', 'press', 'dialog',
               'new_page', 'assert', 'wait', 'sleep', 'call', 'slider', 'captcha',
               'upload', 'download',
@@ -61,17 +63,92 @@ def step_type_for_intent(kind, intent=None):
 # 别名要显示在下拉里，也要写进给模型的提示词，太长会挤掉真正有区分度的部分。
 ALIAS_MAX_LENGTH = 40
 
+# 元素自己不带文字时（图标、纯图标按钮），别名以前直接退化成标签名，界面上于是出现
+# 一堆「i」「button」「div」，谁都分不清；把它抽成定位变量后，变量名也会变成
+# ${终端资产button} 这种没法用的东西。这里从 testid 末段反推一个能读的词。
+# 只收常见动作词，认不出就保留原名——猜错比不猜更麻烦。
+ALIAS_WORDS = {
+    'refresh': '刷新', 'reload': '刷新',
+    'add': '新增', 'create': '新增', 'new': '新增',
+    'delete': '删除', 'del': '删除', 'remove': '删除',
+    'edit': '编辑', 'update': '修改', 'modify': '修改',
+    'search': '查询', 'query': '查询', 'filter': '筛选',
+    'export': '导出', 'import': '导入', 'download': '下载', 'upload': '上传',
+    'close': '关闭', 'cancel': '取消', 'confirm': '确定', 'ok': '确定',
+    'save': '保存', 'submit': '提交', 'reset': '重置', 'back': '返回',
+    'more': '更多', 'menu': '菜单', 'expand': '展开', 'collapse': '收起',
+    'setting': '设置', 'settings': '设置', 'config': '配置',
+    'help': '帮助', 'info': '详情', 'detail': '详情',
+}
 
-def make_target(snap, candidates, primary, status):
-    """目标元素。alias 用于在模板里引用这个元素。"""
-    alias = snap.get('name') or snap.get('label') or snap.get('placeholder') or snap.get('text') or snap.get('tag')
-    return {
-        'alias': (alias or '')[:ALIAS_MAX_LENGTH],
+# 图标单独一张表：方向箭头在界面里的说法和按钮不一样，照搬词表反而看不懂。
+ICON_WORDS = {
+    'chevron-right': '展开箭头', 'chevron-down': '收起箭头',
+    'chevron-left': '左箭头', 'chevron-up': '上箭头',
+    'arrow-right': '右箭头', 'arrow-left': '返回箭头',
+    'dots-vertical': '更多', 'dots-horizontal': '更多',
+    'close': '关闭图标', 'plus': '新增图标', 'pencil': '编辑图标',
+    'magnify': '搜索图标', 'delete': '删除图标',
+}
+
+# testid 里这些词只说明「这是个什么控件」，不说明「它是干什么的」。
+TESTID_NOISE = ('btn', 'button', 'icon', 'ico', 'el', 'the')
+
+# 一个字的线索都没有时，至少把控件类型说成人话：`input` 当变量名比 `${xxx输入框}` 差得多。
+# 只收常见控件，div / span 这类还得保留原名——叫「区块」「文本」反而更看不懂。
+TAG_WORDS = {
+    'input': '输入框', 'select': '下拉框', 'textarea': '多行输入框',
+    'button': '按钮', 'a': '链接', 'img': '图片',
+}
+
+
+def alias_of(snap):
+    """这个元素该叫什么。
+
+    有文字的元素一直命名得对，不要动它——别名还被断言步骤用来指认目标，
+    改了会影响老草稿。只在「完全没有文字」时才从结构里推：
+    testid 末段 → 图标名 → 标签名（仍推不出来就认输）。
+    """
+    text = (snap.get('name') or snap.get('label') or snap.get('placeholder')
+            or snap.get('text') or '')
+    if str(text).strip():
+        return str(text)
+    testid = str(snap.get('testid') or '').strip()
+    if testid:
+        parts = [p for p in re.split(r'[-_\s]+', testid)
+                 if p and p.lower() not in TESTID_NOISE]
+        if parts:
+            tail = parts[-1].lower()
+            return ALIAS_WORDS.get(tail, tail)
+    icon = re.search(r'\bmdi-([a-z0-9]+(?:-[a-z0-9]+)*)', str(snap.get('class_raw') or ''))
+    if icon:
+        name = icon.group(1)
+        return ICON_WORDS.get(name, name)
+    tag = str(snap.get('tag') or '').lower()
+    return TAG_WORDS.get(tag, tag)
+
+
+# 旧名字保留：测试与外部调用用过 _alias_of。
+_alias_of = alias_of
+
+
+def make_target(snap, candidates, primary, status, page=None):
+    """目标元素。alias 用于在模板里引用这个元素。
+
+    page 是「这个元素在哪个页面」：{'route': '/terminal/asset', 'title': '终端资产'}，
+    由录制时读到的地址归一化而来（见 session.normalize_route）。取不到就不写这个键，
+    老数据、手动插入的步骤都保持原样，前端据 v-if 决定显不显示。
+    """
+    target = {
+        'alias': (alias_of(snap) or '')[:ALIAS_MAX_LENGTH],
         'snap': snap,
         'candidates': candidates,
         'primary': primary,
         'status': status,
     }
+    if page:
+        target['page'] = page
+    return target
 
 
 def make_step(step_type, no, target=None, value=None, label=None, url=None, page_index=0,

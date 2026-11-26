@@ -8,7 +8,9 @@ from app.services.recording import intent, ir
 from app.services.recording.locators import (
     PW_KINDS, build_specs, rank, render_pw, stale_check, status_of,
 )
-from app.services.recording.session import HUD_RECENT_STEPS, RecordingError, RecordingSession
+from app.services.recording.session import (DEFAULT_SETTLE_SECONDS, HUD_RECENT_STEPS,
+                                            RecordingError, RecordingSession,
+                                            default_settle, normalize_route, page_of)
 
 
 class LocatorRankingTest(unittest.TestCase):
@@ -367,6 +369,134 @@ class StepEditTest(unittest.TestCase):
         ]
         with self.assertRaises(RecordingError):
             session.move_step_to(2, 0)
+
+
+class DefaultSettleTest(unittest.TestCase):
+    """新录入的点击默认带 5 秒执行前等待（面板上那个闹钟）。
+
+    用户要的是「点一下就录的步骤本身就该先等元素可见」，不是生成时统一补：
+    默认值落在建的这一步上，界面能看到闹钟 5s，也能自己关掉或改秒数。
+    历史草稿不补——同一个录制重新生成时不该凭空多出一堆等待。
+    """
+
+    def test_click_defaults_to_five_seconds(self):
+        self.assertEqual(default_settle('click'), {'timeout': 5})
+        self.assertEqual(DEFAULT_SETTLE_SECONDS, 5)
+
+    def test_other_kinds_get_nothing(self):
+        # 输入 / 选择 / 按键没有「先等可见再动」这层语义；加了界面也没有地方关。
+        for kind in ('fill', 'select', 'press', 'goto', 'assert', 'wait', 'upload'):
+            self.assertIsNone(default_settle(kind))
+
+    def test_default_value_passes_edit_validation(self):
+        # 默认值必须是闹钟输入框认的值，否则一录就改不回去。
+        session = RecordingSession('http://example.test/')
+        session._steps = [ir.make_step('click', 1, target=None)]
+        session.update_step(1, {'settle': default_settle('click')})
+        self.assertEqual(session._steps[0]['settle'], {'timeout': 5})
+
+    def test_old_steps_stay_without_settle(self):
+        # 加载历史草稿时不能自动补 settle。
+        session = RecordingSession('http://example.test/')
+        session._steps = [ir.make_step('click', 1, target=None)]
+        self.assertNotIn('settle', session._steps[0])
+
+
+class PageOfStepTest(unittest.TestCase):
+    """每一步记下「它在哪个页面」，给资源文件按页面划分定位变量用。
+
+    地址在录制时早就读了（recorder.js 的 _doc_url），但取出来只用于重算定位，
+    没有进步骤。这里锁住归一化：两种路由、query、具体 ID 都要压成同一个页面标识。
+    """
+
+    def test_hash_and_history_route_agree(self):
+        # 同一套前端，hash 模式和 history 模式录出来必须是同一个标识，
+        # 否则换个部署方式，资源文件就得整体重来一遍。
+        self.assertEqual(normalize_route('https://h/#/terminal/asset'), '/terminal/asset')
+        self.assertEqual(normalize_route('https://h/terminal/asset'), '/terminal/asset')
+
+    def test_query_is_dropped(self):
+        self.assertEqual(normalize_route('https://h/#/terminal/asset?page=2'), '/terminal/asset')
+
+    def test_concrete_records_collapse_to_one_page(self):
+        # 详情页 / 列表第 N 条不是新页面，不压掉会散出几十个「页面」。
+        for url in ('https://h/terminal/asset/123',
+                    'https://h/terminal/asset/456/',
+                    'https://h/detail/a1b2c3d4-0000-1111-2222-333344445555',
+                    'https://h/detail/507f1f77bcf86cd799439011'):
+            self.assertIn(':id', normalize_route(url))
+
+    def test_anchor_is_not_a_route(self):
+        # #section 是页内锚点，不是路由，要退回 pathname。
+        self.assertEqual(normalize_route('https://h/list#section'), '/list')
+
+    def test_root_and_empty(self):
+        self.assertEqual(normalize_route('https://h/'), '/')
+        self.assertEqual(normalize_route('https://h/#/'), '/')
+        self.assertIsNone(normalize_route(''))
+        self.assertIsNone(normalize_route(None))
+
+    def test_page_keeps_title_but_blank_becomes_none(self):
+        self.assertEqual(page_of({'url': 'https://h/#/asset', 'title': ' 终端资产 '}),
+                         {'route': '/asset', 'title': '终端资产'})
+        # 空白标题不占位，前端才能顺着退回路由末段。
+        self.assertEqual(page_of({'url': 'https://h/#/asset', 'title': '   '}),
+                         {'route': '/asset', 'title': None})
+
+    def test_no_url_means_no_page(self):
+        # 取不到地址就不写这个字段，老数据和手动插入的步骤保持原样。
+        self.assertIsNone(page_of({'url': None, 'title': '终端资产'}))
+        self.assertIsNone(page_of(None))
+
+    def test_target_without_page_has_no_key(self):
+        # 手动插入 / 老草稿：不能凭空多一个 page=None，前端到处判空。
+        target = ir.make_target({'tag': 'div'}, [], None, 'unique')
+        self.assertNotIn('page', target)
+        target = ir.make_target({'tag': 'div'}, [], None, 'unique',
+                                page={'route': '/asset', 'title': '终端资产'})
+        self.assertEqual(target['page']['route'], '/asset')
+
+    def test_public_step_keeps_page(self):
+        # 前端读的是 public_step：页面标签要显示得出来，这个字段不能被剥掉。
+        step = ir.make_step('click', 1,
+                            target=ir.make_target({'tag': 'button'}, [], None, 'unique',
+                                                  page={'route': '/asset', 'title': '终端资产'}))
+        self.assertEqual(ir.public_step(step)['target']['page']['title'], '终端资产')
+
+
+class AliasNamingTest(unittest.TestCase):
+    """元素自己没有文字时，别名不能退化成标签名。
+
+    界面上两个步骤都叫「button」谁都分不清；抽成定位变量之后更糟，变量名会变成
+    ${终端资产button}。只补「完全没有文字」这一种情况——有文字的元素命名一直是对的，
+    别动它：别名还被断言步骤用来指认目标。
+    """
+
+    def test_text_wins(self):
+        self.assertEqual(ir._alias_of({'name': '导出', 'tag': 'button'}), '导出')
+        self.assertEqual(ir._alias_of({'text': '确定', 'tag': 'button'}), '确定')
+        self.assertEqual(ir._alias_of({'placeholder': '设备标识', 'tag': 'input'}), '设备标识')
+
+    def test_testid_tail(self):
+        self.assertEqual(
+            ir._alias_of({'tag': 'button', 'testid': 'topo-ne-list-action-refresh'}), '刷新')
+
+    def test_testid_noise_and_unknown(self):
+        # btn / icon 这类只说明控件类型，不说明用途，要跳过它往前取一段。
+        self.assertEqual(ir._alias_of({'tag': 'button', 'testid': 'toolbar-btn-close'}), '关闭')
+        # 认不出就保留原名，不硬猜。
+        self.assertEqual(ir._alias_of({'tag': 'button', 'testid': 'xyzzy'}), 'xyzzy')
+
+    def test_icon_class(self):
+        self.assertEqual(
+            ir._alias_of({'tag': 'i', 'class_raw': 'mdi-chevron-right mdi v-icon'}), '展开箭头')
+
+    def test_control_fallback(self):
+        # 连 testid 和图标名都没有：至少说清是什么控件，不要留个 input。
+        self.assertEqual(ir._alias_of({'tag': 'input', 'class_raw': 'v-field__input'}), '输入框')
+
+    def test_tag_is_last_resort(self):
+        self.assertEqual(ir._alias_of({'tag': 'div'}), 'div')
 
 
 class PauseTest(unittest.TestCase):

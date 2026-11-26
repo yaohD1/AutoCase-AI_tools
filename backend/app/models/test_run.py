@@ -30,6 +30,10 @@ class TestRun(db.Model):
     # 一条都没跑起来时，这里放原因；跑起来了则放输出尾部，排查用
     error = db.Column(db.Text)
     log_tail = db.Column(db.Text)
+    # AI 初步诊断：{state, model, items: {用例下标: {category, reason, detail, fixes, ...}}}
+    # 为什么不拆表：诊断天然跟着某一次运行走，没有跨运行查询的需求，
+    # 而 test_runs 已经是「一条记录一个 JSON 结果」的形态（results_json 就是这样）。
+    diagnoses_json = db.Column(db.Text)
     artifacts_dir = db.Column(db.String(1000))
     started_at = db.Column(db.DateTime, default=datetime.utcnow)
     finished_at = db.Column(db.DateTime)
@@ -57,6 +61,27 @@ class TestRun(db.Model):
         except ValueError:
             return []
 
+    def diagnoses(self):
+        """AI 诊断快照。没诊断过返回 idle，前端据此决定显不显示入口。"""
+        try:
+            data = json.loads(self.diagnoses_json or '{}')
+        except ValueError:
+            return {'state': 'idle', 'items': []}
+        if not isinstance(data, dict) or not data:
+            return {'state': 'idle', 'items': []}
+        items = data.get('items') or {}
+        ordered = [items[key] for key in sorted(items, key=lambda k: int(k) if str(k).isdigit() else 0)]
+        return {
+            'state': data.get('state') or 'idle',
+            'model': data.get('model') or '',
+            'started_at': data.get('started_at'),
+            'finished_at': data.get('finished_at'),
+            'total_failed': data.get('total_failed') or 0,
+            'pending': data.get('pending') or [],
+            'items': ordered,
+            'error': data.get('error') or '',
+        }
+
     def summary(self):
         return {
             'id': self.id,
@@ -78,6 +103,7 @@ class TestRun(db.Model):
         data = self.summary()
         data['selection'] = self.selection()
         data['env'] = self.env()
+        data['diagnoses'] = self.diagnoses()
         if with_results:
             data['results'] = self.results()
             data['log_tail'] = self.log_tail

@@ -26,6 +26,8 @@ class RecordingGeneration(db.Model):
     commit_message = db.Column(db.String(500))
     step_summary = db.Column(db.Text)
     reply = db.Column(db.Text)
+    # 平台在任务书之外写入/复用的共享库（JSON 数组）：任务书里看不到，但目录里有。
+    platform_files = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -34,6 +36,10 @@ class RecordingGeneration(db.Model):
             steps = json.loads(self.step_summary or '[]')
         except ValueError:
             steps = []
+        try:
+            platform_files = json.loads(self.platform_files or '[]')
+        except ValueError:
+            platform_files = []
         return {
             'id': self.id,
             'workspace': self.workspace,
@@ -45,6 +51,7 @@ class RecordingGeneration(db.Model):
             'commit_hash': self.commit_hash,
             'commit_message': self.commit_message,
             'steps': steps,
+            'platform_files': platform_files,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }

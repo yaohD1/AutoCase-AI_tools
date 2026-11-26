@@ -1078,6 +1078,7 @@ def generate_recording():
         record = records.create(
             ctx['workspace'], target_path, ctx['framework'], ctx['title'], ctx['model'], original,
             target_abs.read_bytes(), steps, result.get('reply'),
+            platform_files=result.get('platform_files'),
         )
         result['generation_id'] = record.id
         # 前端要凭这两个字段把用户送到执行页，并提前勾好刚写出的脚本：

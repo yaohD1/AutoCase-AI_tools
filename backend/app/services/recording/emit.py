@@ -13,7 +13,7 @@ import logging
 import re
 from pathlib import Path
 
-from app.services.recording import detect, guard, toolchain
+from app.services.recording import detect, guard, locator_vars, toolchain
 from app.services.recording.locators import (best_effort, false_positive, inline_nth,
                                             pick_for, pool_for)
 from app.services.recording.captcha_ts import CAPTCHA_TS
@@ -280,12 +280,17 @@ def target_problem(workspace, target_path, framework):
     return None
 
 
-def _steps_for_prompt(steps, framework, actions=None):
+def _steps_for_prompt(steps, framework, actions=None, locator_vars=None):
     """把 IR 整理成 agent 能直接用的形式：每一步只带需要的定位与意图，不带内部字段。
 
     call 步骤**不展开**：写手要看到「这是一次动作调用」才会写成函数调用；
     展开成平铺的 4 步，它就会真的写 4 行，封装等于白做。动作内容在 actions 里给。
+
+    locator_vars 给了「步骤号 → ${变量名}」时，只发变量名、不发裸定位。
+    两样同时给，写手一定会挑省事的那条（实测它对长 xpath 有很强的改写冲动），
+    资源文件就白建了。
     """
+    vars_by_no = locator_vars or {}
     known = actions or {}
     out = []
     for step in steps:
@@ -348,30 +353,46 @@ def _steps_for_prompt(steps, framework, actions=None):
             item['seconds'] = step['seconds']
         target = step.get('target')
         if target:
-            info = _locator_info(target, framework)
-            matches = info['matches'] if info else None
-            nth = info['nth'] if info else None
-            item['target'] = {'locator': info['locator'] if info else None}
-            if target.get('alias'):
-                item['target']['alias'] = target['alias']
-            # 候选清单是「录制时怎么挑定位」的中间产物：模型只需要一条能跑通的定位。
-            # 唯一命中（match_count == 1 且没有 nth）时整段不发——实测这能省掉提示词
-            # 三成体积，而写手从来没在里面挑过东西。真不唯一时才给，那时的候选才有用。
-            if matches != 1 or nth is not None:
-                item['target']['match_count'] = matches
-                item['target']['nth'] = nth
-                item['target']['candidates'] = _candidates_for_prompt(target, framework)
-            # 序号已经算进 locator 里了（RF 的 xpath=(...)[n]）：必须明说，
-            # 否则写手会照着 nth 再拼一次，变成「第 n 个里的第 n 个」，直接定位不到。
-            if info and info.get('nth_applied'):
-                item['target']['nth_applied'] = True
-            # 用户在界面上看过框、亲手挑的那个，要让它出现在提示词里，
-            # 否则模型只看到「取第 2 个」，却不知道这 2 个分别是什么，也就写不出有意义的注释。
-            matched = _match_texts(target)
-            if matched:
-                item['target']['matches'] = matched
-            # 元素在 iframe 里时，模型必须知道要先切框架，否则会写成顶层 page.getByRole。
             snap = target.get('snap') or {}
+            var = vars_by_no.get(str(step.get('no')))
+            if var:
+                # 定位已经写进资源文件，这里只给变量名——连候选都不必给，
+                # 写手没有任何理由再去拼一条自己的定位。
+                item['target'] = {'locator_var': var}
+                if target.get('alias'):
+                    item['target']['alias'] = target['alias']
+                # 但「实际用第几个」这条信息不能丢：css 选择器带不了序号，nth 没能
+                # 内联进定位，变量名里也看不出「这是第 2 个匹配」。不告诉写手，
+                # 它会以为变量指向唯一元素，页面上一改就点错。
+                info = _locator_info(target, framework)
+                if info and info.get('nth') is not None and not info.get('nth_applied'):
+                    item['target']['nth'] = info['nth']
+                    item['target']['match_count'] = info['matches']
+            else:
+                info = _locator_info(target, framework)
+                matches = info['matches'] if info else None
+                nth = info['nth'] if info else None
+                item['target'] = {'locator': info['locator'] if info else None}
+                if target.get('alias'):
+                    item['target']['alias'] = target['alias']
+                # 候选清单是「录制时怎么挑定位」的中间产物：模型只需要一条能跑通的定位。
+                # 唯一命中（match_count == 1 且没有 nth）时整段不发——实测这能省掉提示词
+                # 三成体积，而写手从来没在里面挑过东西。真不唯一时才给，那时的候选才有用。
+                if matches != 1 or nth is not None:
+                    item['target']['match_count'] = matches
+                    item['target']['nth'] = nth
+                    item['target']['candidates'] = _candidates_for_prompt(target, framework)
+                # 序号已经算进 locator 里了（RF 的 xpath=(...)[n]）：必须明说，
+                # 否则写手会照着 nth 再拼一次，变成「第 n 个里的第 n 个」，直接定位不到。
+                if info and info.get('nth_applied'):
+                    item['target']['nth_applied'] = True
+                # 用户在界面上看过框、亲手挑的那个，要让它出现在提示词里，
+                # 否则模型只看到「取第 2 个」，却不知道这 2 个分别是什么，也就写不出有意义的注释。
+                matched = _match_texts(target)
+                if matched:
+                    item['target']['matches'] = matched
+            # 元素在 iframe 里时，模型必须知道要先切框架，否则会写成顶层 page.getByRole。
+            # 这条和变量无关：变量只解决「定位写在哪」，切框架仍要写在正文里。
             if snap.get('frame_url') or snap.get('frame_name'):
                 item['target']['frame'] = {'url': snap.get('frame_url'), 'name': snap.get('frame_name')}
         # 标签页序号：0 是主标签页，非 0 说明这一步是在别的标签页里发生的。
@@ -387,7 +408,7 @@ def _steps_for_prompt(steps, framework, actions=None):
     return out
 
 
-def _actions_for_prompt(actions, framework, steps):
+def _actions_for_prompt(actions, framework, steps, action_vars=None):
     """动作定义：子步骤按写手需要的形状（定位串 + `{{参数}}` 占位符）。
 
     called_at 是抽函数的关键信号。**只调用一次也要抽**——用户封装就是要那个名字，
@@ -404,12 +425,13 @@ def _actions_for_prompt(actions, framework, steps):
             'desc': action.get('desc') or '',
             'params': [p.get('key') for p in action.get('params') or []],
             'called_at': calls,
-            'steps': _steps_for_prompt(action.get('steps') or [], framework),
+            'steps': _steps_for_prompt(action.get('steps') or [], framework,
+                                       locator_vars=(action_vars or {}).get(action.get('id'))),
         })
     return out
 
 
-def _teardown_for_prompt(teardown, framework):
+def _teardown_for_prompt(teardown, framework, action_vars=None):
     """后置处理给写手的形状：名字 + 参数 + 子步骤。
 
     它就是「一次不在流程里的调用」，所以子步骤和动作定义同一套形状；区别只在
@@ -424,7 +446,8 @@ def _teardown_for_prompt(teardown, framework):
         'desc': action.get('desc') or '',
         'params': [p.get('key') for p in action.get('params') or []],
         'args': {k: str(v) for k, v in ((teardown or {}).get('args') or {}).items()},
-        'steps': _steps_for_prompt(action.get('steps') or [], framework),
+        'steps': _steps_for_prompt(action.get('steps') or [], framework,
+                                   locator_vars=(action_vars or {}).get(action.get('id'))),
     }
 
 
@@ -1109,11 +1132,54 @@ def _has_slider(steps=None, actions=None):
     return False
 
 
-def _ensure_slider_utils(root, target_path, steps, framework, actions=None):
+# 平台工具的共享目录：放在工作区根，所有用例共用一份。
+# 以前是 target 同级一份 libraries/：同一个项目里每录一条用例就复制一份 9KB + 20KB 的库，
+# 内容完全一样；模板改了还得回头把历史目录逐个覆盖。
+SHARED_DIR = '.autocase'
+
+
+def _shared_lib_rel(target_path, name):
+    """从用例目录回到工作区根，取 .autocase/libraries/<name> 的相对路径。
+
+    返回值直接拼 `${CURDIR}/`（RF 里 CURDIR 是 suite 所在目录）。用相对路径而不是绝对路径，
+    是为了让整个项目换机器、进 CI 都能直接用；代价是用例被挪到别的深度要重新生成。
+    """
+    parents = [part for part in Path(target_path).parent.parts if part not in ('', '.')]
+    return '/'.join(['..'] * len(parents) + [SHARED_DIR, 'libraries', name])
+
+
+def _write_shared_library(path, content):
+    """内容一样就不动文件；返回 created / updated / reused。
+
+    「先检索、有就直接用」不能只判断存在：模板修过（比如上传那个 TypeError）之后，
+    旧文件还在，但里面是坏的。所以比对内容——一样才复用，不一样就更新。
+    """
+    try:
+        existing = path.read_text(encoding='utf-8')
+    except OSError:
+        existing = None
+    if existing == content:
+        return 'reused'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding='utf-8')
+    return 'created' if existing is None else 'updated'
+
+
+def _note_platform_file(notes, rel, state):
+    """把「平台自己写的文件」记下来，随生成结果返回给界面。
+
+    这些文件在 guard.snapshot 之前落盘，不会被算成越界写入，所以以前界面上只说
+    「未创建辅助文件」——用户只看到 .robot，目录里却多出 libraries/，对不上。
+    """
+    if notes is not None:
+        notes.append({'path': rel.replace('\\', '/'), 'state': state})
+
+
+def _ensure_slider_utils(root, target_path, steps, framework, actions=None, notes=None):
     """把滑块工具写进目标项目，返回相对路径；不需要就返回 None。
 
-    两个框架落盘位置不同：PW 放 utils/slider.ts，RF 放 libraries/SliderLibrary.py
-    （和 FilesLibrary 并排，.robot 里用 ${CURDIR}/libraries/ 引用）。
+    Robot 落盘到工作区根的 .autocase/libraries/（所有用例共用一份），Playwright
+    仍放 target 同级的 utils/（它要按相对路径 import，跨目录反而更绕）。
     两个文件里的算法是同一套，只差语言。
 
     必须在 guard.snapshot 之前落盘：写完才算「项目原有文件」，既不进 diff，
@@ -1124,10 +1190,11 @@ def _ensure_slider_utils(root, target_path, steps, framework, actions=None):
         return None
     target = Path(target_path)
     if framework == RF_FRAMEWORK:
-        folder = Path(root) / target.parent / 'libraries'
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / 'SliderLibrary.py').write_text(SLIDER_PY, encoding='utf-8')
-        return (target.parent / 'libraries' / 'SliderLibrary.py').as_posix()
+        rel = _shared_lib_rel(target_path, 'SliderLibrary.py')
+        # rel 是相对用例目录算的（${CURDIR} 往上退），落盘时要按同一个基准还原成绝对路径。
+        absolute = (Path(root) / target.parent / rel).resolve()
+        _note_platform_file(notes, rel, _write_shared_library(absolute, SLIDER_PY))
+        return rel
     utils_dir = Path(root) / target.parent / 'utils'
     utils_dir.mkdir(parents=True, exist_ok=True)
     (utils_dir / 'slider.ts').write_text(SLIDER_TS, encoding='utf-8')
@@ -1151,26 +1218,101 @@ def _ensure_captcha_utils(root, target_path, steps, framework):
     return (target.parent / 'utils' / 'captcha.ts').as_posix()
 
 
-def _ensure_files_utils(root, target_path, steps, framework):
+def _ensure_files_utils(root, target_path, steps, framework, notes=None):
     """把文件工具写进目标项目，返回相对路径；没有相关步骤就返回 None。
 
-    两个框架落盘位置不同：Playwright 放 utils/（和 slider.ts 并排），
-    Robot 放 libraries/（.robot 里用 ${CURDIR}/libraries/FilesLibrary.py 引用）。
-    和滑块一样必须在 guard.snapshot 之前写：写完才算「项目原有文件」，
-    既不进 diff，也不会被越界检查当成 agent 乱写。
+    Robot 落盘到工作区根的 .autocase/libraries/（所有用例共用一份，写前比对内容），
+    Playwright 仍放 target 同级的 utils/。和滑块一样必须在 guard.snapshot 之前写：
+    写完才算「项目原有文件」，既不进 diff，也不会被越界检查当成 agent 乱写。
     """
     if not any(step.get('type') in ('upload', 'download') for step in (steps or [])):
         return None
     target = Path(target_path)
     if framework == RF_FRAMEWORK:
-        folder = Path(root) / target.parent / 'libraries'
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / 'FilesLibrary.py').write_text(FILES_PY, encoding='utf-8')
-        return (target.parent / 'libraries' / 'FilesLibrary.py').as_posix()
+        rel = _shared_lib_rel(target_path, 'FilesLibrary.py')
+        # rel 是相对用例目录算的（${CURDIR} 往上退），落盘时要按同一个基准还原成绝对路径。
+        absolute = (Path(root) / target.parent / rel).resolve()
+        _note_platform_file(notes, rel, _write_shared_library(absolute, FILES_PY))
+        return rel
     folder = Path(root) / target.parent / 'utils'
     folder.mkdir(parents=True, exist_ok=True)
     (folder / 'files.ts').write_text(FILES_TS, encoding='utf-8')
     return (target.parent / 'utils' / 'files.ts').as_posix()
+
+
+def _rel_from_case(rel_path, target_path):
+    """工作区相对路径 → 从用例目录往后退的形式（拼在 ${CURDIR}/ 后面用）。
+
+    和 _shared_lib_rel 同一个思路：用相对路径，换机器、进 CI 都能直接用；
+    代价是用例挪到别的深度要重新生成。
+    """
+    parents = [p for p in Path(target_path).parent.parts if p not in ('', '.')]
+    return '/'.join(['..'] * len(parents) + [rel_path])
+
+
+def _bare_locators(script_path, vars_path):
+    """正文里原样出现了资源文件中的定位串，说明这一步没走变量。
+
+    只查资源文件里的那几条，不对全文禁 xpath / css：断言、轮询条件里用到的元素
+    是录制步骤之外的补充，本来就该由写手自己写定位。
+    """
+    try:
+        script = script_path.read_text(encoding='utf-8')
+        entries = locator_vars.parse(vars_path.read_text(encoding='utf-8'))
+    except OSError:
+        return []
+    return [item['locator'] for item in entries.values()
+            if item.get('locator') and item['locator'] in script]
+
+
+def _build_locator(root, target_path, steps, actions, framework, teardown=None, notes=None):
+    """把定位抽成资源文件里的变量，返回 _payload 要的结构。
+
+    和 _ensure_*_utils 一样必须在 guard.snapshot 之前调用：新写的文件要先成为
+    「项目原有文件」，否则会被越界检查当成写手乱写。
+
+    抽变量失败不阻断生成——退回内联定位，脚本照样能跑，只是回到老样子。
+    宁可生成一份「没有复用」的脚本，也不要因为整理定位而让整次生成失败。
+    """
+    def locator_of(target):
+        info = _locator_info(target, framework)
+        return info['locator'] if info else None
+
+    # 后置处理是「一次不在流程里的调用」，它的子步骤要按动作处理（进公共文件），
+    # 不能混进用例文件——那份文件是按用例目录共享的，后置却是跨用例复用的。
+    all_actions = dict(actions or {})
+    td_action = (teardown or {}).get('action') or {}
+    if td_action.get('id'):
+        all_actions[td_action['id']] = td_action
+
+    try:
+        built = locator_vars.build(steps, all_actions, target_path, root, locator_of)
+    except Exception:
+        logger.exception('录制生成：定位变量抽取失败，本次退回内联定位')
+        return None
+    if not built.get('files'):
+        return None
+
+    for item in built['files']:
+        _note_platform_file(notes, item['path'], item['state'])
+        logger.info('录制生成：定位资源 %s（%s，%d 个变量）',
+                    item['path'], item['state'], item['count'])
+
+    # 变量清单：给写手写断言时复用现成的名字。同一个元素可能出现在多步，按名字去重。
+    aliases = {}
+    for step in steps or []:
+        target = step.get('target') or {}
+        var = built['vars'].get(str(step.get('no')))
+        if var and var not in aliases:
+            aliases[var] = target.get('alias') or ''
+    rel = locator_vars.file_rel(target_path)
+    return {
+        'vars': built['vars'],
+        'action_vars': built['action_vars'],
+        'lib': _rel_from_case(rel, target_path),
+        'file': {'path': rel,
+                 'variables': [{'name': k, 'alias': v} for k, v in aliases.items()]},
+    }
 
 
 # 平台补头的固定内容：浏览器怎么启动、什么时候关。
@@ -1290,7 +1432,7 @@ def _is_close_line(body):
 
 
 def _normalize_rf_script(root, target_path, steps, actions=None,
-                         slider_lib=None, files_lib=None, teardown=None):
+                         slider_lib=None, files_lib=None, teardown=None, locator_lib=None):
     """把 agent 写的 .robot 改成「平台头 + 模型正文」，返回被替换掉的行。
 
     只保留 Test Cases / Keywords / Variables 三段，Settings 整段重写：
@@ -1372,12 +1514,16 @@ def _normalize_rf_script(root, target_path, steps, actions=None,
     out.append('*** Settings ***')
     out.append('Library    SeleniumLibrary    timeout=10')
     if files_lib:
-        # 下载目录必须显式给，不能用 FilesLibrary 的默认值：默认是相对当前工作目录的
-        # downloads/，换一个目录运行 robot 就换一个目录，而且同项目所有脚本共用一个，
-        # 并发跑时 A 脚本会看到 B 脚本刚下的文件。绑到脚本同级，产物跟着脚本走。
-        out.append('Library    ${CURDIR}/libraries/FilesLibrary.py    ${CURDIR}/downloads')
+        # 库在 .autocase/libraries（工作区根，所有用例共用），路径从 CURDIR 往上退到根。
+        # 下载目录仍然按用例隔离：默认相对当前工作目录的 downloads/ 会让同项目所有脚本
+        # 共用一个目录，并发跑时 A 脚本会看到 B 脚本刚下的文件。
+        out.append('Library    ${CURDIR}/%s    ${CURDIR}/downloads' % files_lib)
     if slider_lib:
-        out.append('Library    ${CURDIR}/libraries/SliderLibrary.py')
+        out.append('Library    ${CURDIR}/%s' % slider_lib)
+    if locator_lib:
+        # 定位变量：同目录用例共享一份，改版只改这一个文件。
+        # 放在 Library 之后、Teardown 之前，和项目里人工维护的资源文件写法一致。
+        out.append('Resource    ${CURDIR}/%s' % locator_lib)
     if teardown_name:
         # 实参由平台写：后置是用户在界面上设的，模型只负责写同名关键字。
         args = [str((teardown.get('args') or {}).get(p.get('key'), ''))
@@ -1649,6 +1795,16 @@ def _prompt(payload, resumed=False):
         )
     head += _slider_rules(payload)
     head += _settle_rules(payload)
+    if payload.get('locator_file'):
+        head += (
+            '本次的**定位已经抽到资源文件里**，正文只写变量名：\n'
+            '- steps 里每一步的 target.locator_var 就是这一步该用的变量，原样写；'
+            '不要换成 xpath / css，也不要自己拼一条「更稳」的。\n'
+            '- 资源文件由平台写好，`*** Settings ***` 的 Resource 行也由平台补，不要自己写。\n'
+            '- 不要新增变量，也不要改那个文件。\n'
+            '- 录制步骤之外的判断（断言、轮询条件）用到的元素如果出现在 '
+            'locator_file.variables 里，优先用现成的变量；那里没有的才自己写定位。\n'
+        )
     if any(step.get('type') == 'captcha' for step in payload.get('steps') or []):
         head += (
             '本次步骤里有**图形验证码识别**（steps 里 type 为 captcha 的项）。\n'
@@ -1719,7 +1875,10 @@ def _plan_for_prompt(plan):
 
 def _payload(framework, steps, target_path, title, detected, keywords, plan=None,
              plan_feedback=None, memory=None, context_reused=False, write_scope='exact',
-             actions=None, teardown=None):
+             actions=None, teardown=None, locator=None):
+    """locator 是 locator_vars.build 的结果再补一个 file 清单：
+    {'vars': {步骤号: '${变量}'}, 'action_vars': {动作id: {子步骤号: '${变量}'}},
+     'file': {'path': ..., 'variables': [...]}}。为空表示这次没抽变量。"""
     samples = list(detected.get('samples') or [])
     snippet = (memory or {}).get('snippet') or {}
     if snippet.get('code'):
@@ -1741,7 +1900,8 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
         'framework': framework,
         'target_path': target_path,
         'title': title,
-        'steps': _steps_for_prompt(steps, framework, actions),
+        'steps': _steps_for_prompt(steps, framework, actions,
+                                   (locator or {}).get('vars')),
         'evidence': detected.get('evidence', []),
         'samples': samples,
         # keywords 不再下发。176 条清单占 11,000 字符，而一次用例平均只用 6~8 个关键字；
@@ -1770,8 +1930,13 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
                               else 'exact')
     if actions:
         # 只在真有过封装时才加这个键：没有动作时多一个空列表会让写手以为漏了什么。
-        payload['actions'] = _actions_for_prompt(actions, framework, steps)
-    shaped = _teardown_for_prompt(teardown, framework)
+        payload['actions'] = _actions_for_prompt(actions, framework, steps,
+                                                 (locator or {}).get('action_vars'))
+    if (locator or {}).get('file'):
+        # 变量清单给出来是让它写断言时能复用现成的名字，而不是为了让它挑定位——
+        # 定位已经在文件里，改动由平台统一管。
+        payload['locator_file'] = locator['file']
+    shaped = _teardown_for_prompt(teardown, framework, (locator or {}).get('action_vars'))
     if shaped:
         payload['teardown'] = shaped
     return payload
@@ -1877,15 +2042,20 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
     teardown_steps = list(((teardown or {}).get('action') or {}).get('steps') or [])
     all_steps = list(steps or []) + teardown_steps
     # 有滑块 / 验证码步骤时先把工具文件落到项目里（在快照之前，见函数注释）。
-    slider_utils = _ensure_slider_utils(root, target_path, all_steps, framework, actions)
+    platform_files = []
+    slider_utils = _ensure_slider_utils(root, target_path, all_steps, framework, actions,
+                                        notes=platform_files)
     captcha_utils = _ensure_captcha_utils(root, target_path, all_steps, framework)
-    files_utils = _ensure_files_utils(root, target_path, all_steps, framework)
-    if slider_utils:
-        logger.info('录制生成：已注入滑块工具 %s', slider_utils)
-    if captcha_utils:
-        logger.info('录制生成：已注入验证码工具 %s', captcha_utils)
-    if files_utils:
-        logger.info('录制生成：已注入文件工具 %s', files_utils)
+    files_utils = _ensure_files_utils(root, target_path, all_steps, framework,
+                                      notes=platform_files)
+    # 定位抽成资源文件里的变量。只传顶层 steps：后置的子步骤走 teardown 里的动作，
+    # 混进来的话会用用例目录前缀命名，和动作那条路径撞车。
+    locator = None
+    if framework == RF_FRAMEWORK:
+        locator = _build_locator(root, target_path, steps, actions, framework,
+                                 teardown=teardown, notes=platform_files)
+    for item in platform_files:
+        logger.info('录制生成：平台文件 %s（%s）', item['path'], item['state'])
     if slider_utils or captcha_utils:
         _write_slider_env(root)
     try:
@@ -1896,7 +2066,7 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         payload = _payload(framework, steps, target_path, title, detected, keywords,
                            plan, plan_feedback, memory,
                            context_reused=resumed, write_scope=write_scope,
-                           actions=actions, teardown=teardown)
+                           actions=actions, teardown=teardown, locator=locator)
         prompt = _prompt(payload, resumed=resumed)
 
         if resumed:
@@ -1918,7 +2088,8 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         # 遮掉了，所以「怎么打开浏览器」这件事在 IR 里根本不存在，只能由平台保证。
         if framework == RF_FRAMEWORK:
             replaced = _normalize_rf_script(root, target_path, steps, actions,
-                                            slider_utils, files_utils, teardown)
+                                            slider_utils, files_utils, teardown,
+                                            locator_lib=(locator or {}).get('lib'))
             if replaced:
                 logger.info('录制生成：头部已由平台重写，替换 %s 行：%s',
                             len(replaced), ' / '.join(replaced[:4]))
@@ -1932,7 +2103,8 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
             """修复轮之后重新盖平台头：模型重写整个文件时会把它改回自己的写法。"""
             if framework == RF_FRAMEWORK:
                 _normalize_rf_script(root, target_path, steps, actions,
-                                     slider_utils, files_utils, teardown)
+                                     slider_utils, files_utils, teardown,
+                                     locator_lib=(locator or {}).get('lib'))
             elif framework == PW_FRAMEWORK:
                 _normalize_pw_script(root, target_path)
 
@@ -1973,6 +2145,19 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
             backup_id, _entries = guard.capture(before, outside)
         except Exception:  # noqa: BLE001 - 备份失败不该让已经写好的文件判成失败
             logger.exception('导出越界备份失败：%s', target_path)
+    # 正文里还留着资源文件中的定位原文 = 写手没用变量。只提示不失败：
+    # 脚本照样能跑，只是失去「改版改一处」的意义，得让人知道。
+    locator_report = None
+    if locator:
+        locator_report = {
+            'file': locator['file']['path'],
+            'variables': len(locator['file']['variables']),
+            'bare': _bare_locators(target_abs, Path(root) / locator['file']['path']),
+        }
+        if locator_report['bare']:
+            logger.warning('录制生成：正文里有 %d 条定位没走变量：%s',
+                           len(locator_report['bare']),
+                           ' / '.join(locator_report['bare'][:2]))
     return {
         'path': target_path,
         'changed': after,
@@ -1986,10 +2171,15 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         'framework': framework,
         'detected': detected.get('framework'),
         'reply': reply,
+        # 平台自己在任务书之外写/复用的辅助文件（共享库）。不列出来，用户只会看到
+        # .robot，却在目录里发现 .autocase/，对不上账。
+        'platform_files': platform_files,
         # 任务书：前端/记录页用它展示「这次打算复用哪些现成封装」。
         'plan': plan,
         # 哪些步骤是降级生成的（定位不唯一，按第 n 个匹配写入），前端据此提醒用户回放确认。
         'degraded': degraded,
+        # 定位资源文件：写了哪个文件、几个变量、正文里还有几条没走变量。
+        'locator': locator_report,
     }
 
 

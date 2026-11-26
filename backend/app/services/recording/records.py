@@ -35,11 +35,12 @@ def _summary(steps):
 
 
 def create(workspace, target_path, framework, title, model, original, generated, steps, reply,
-           status='generated'):
+           status='generated', platform_files=None):
     """original / generated 为字节内容；original 为 None 表示生成前文件不存在。
 
     status='failed' 用于「写了一半就失败」的场景：这时没有可信的 generated 内容，
     但 original 仍然要留下来，否则覆盖掉的旧文件就再也拿不回来了。
+    platform_files 是平台自己写/复用的共享库，任务书里没有，但目录里有。
     """
     record = RecordingGeneration(
         workspace=str(Path(workspace).resolve()),
@@ -54,6 +55,7 @@ def create(workspace, target_path, framework, title, model, original, generated,
         generated_sha256=_sha(generated) if generated is not None else '',
         step_summary=json.dumps(_summary(steps), ensure_ascii=False),
         reply=reply or '',
+        platform_files=json.dumps(platform_files or [], ensure_ascii=False),
     )
     db.session.add(record)
     db.session.commit()
@@ -89,12 +91,17 @@ def preview(record):
         changed = current is not None
     else:
         changed = current is None or _sha(current) != record.generated_sha256
+    try:
+        platform_files = json.loads(record.platform_files or '[]')
+    except ValueError:
+        platform_files = []
     return {
         'content': text[:PREVIEW_LIMIT],
         'truncated': len(text) > PREVIEW_LIMIT,
         'file_exists': current is not None,
         'changed_since_generation': changed,
         'reply': record.reply or '',
+        'platform_files': platform_files,
     }
 
 

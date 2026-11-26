@@ -221,6 +221,7 @@
             <span class="run-stamp">{{ formatTime(run.started_at) }}</span>
             <span :class="['chip', statusTone(run.status)]">{{ statusLabel(run.status) }}</span>
             <span v-if="run.duration_ms" class="run-cost">{{ seconds(run.duration_ms) }}</span>
+            <span v-if="diagSummary" class="run-diag-chip">{{ diagSummary }}</span>
             <span class="run-bar-spacer"></span>
             <el-button v-if="run.status === 'running'" size="small" @click="stopRun">停止</el-button>
             <el-button
@@ -273,6 +274,9 @@
           </div>
 
           <div v-if="run.error" class="run-error">{{ run.error }}</div>
+          <div v-if="run.diagnoses?.state === 'failed'" class="run-hint is-warn">
+            AI 诊断没跑起来：{{ run.diagnoses.error || '未知原因' }}（不影响这次执行结果）
+          </div>
 
           <!-- 筛选条：状态 + 分组开关。用例上百条时，先筛掉通过的一批比往下翻更快 -->
           <div v-if="run.results?.length" class="run-filters">
@@ -350,9 +354,144 @@
                     <div v-if="row.where" class="run-hint">
                       失败位置 <span class="run-where">{{ row.where }}</span>
                     </div>
-                    <pre v-if="row.error" class="run-case-error">{{ row.error }}</pre>
-                    <div v-else-if="row.steps?.length" class="run-hint">这条用例没报错，下面是它跑过的每一步。</div>
-                    <div v-else class="run-hint">这条用例没有输出错误信息。</div>
+                    <pre v-if="row.error" class="run-case-error">{{ errorParts(row.error).main }}</pre>
+                    <!-- 后置处理里的连带失败、Playwright 的 Call log：都比主错误长，
+                         默认收起来，要查细节再展开。 -->
+                    <div
+                      v-if="errorParts(row.error).more"
+                      :class="['run-err-more', { 'is-open': errorMore.has(caseKey(row)) }]"
+                    >
+                      <button
+                        type="button"
+                        class="run-err-more-head"
+                        @click="toggleSet(errorMore, caseKey(row))"
+                      >
+                        <span class="run-err-caret">›</span>
+                        {{ errorParts(row.error).label }}（{{ errorLines(row.error) }} 行）
+                      </button>
+                      <pre v-if="errorMore.has(caseKey(row))" class="run-err-more-body">{{ errorParts(row.error).more }}</pre>
+                    </div>
+                    <div v-else-if="!row.error && row.steps?.length" class="run-hint">这条用例没报错，下面是它跑过的每一步。</div>
+                    <div v-else-if="!row.error" class="run-hint">这条用例没有输出错误信息。</div>
+
+                    <!-- AI 初步诊断：只回答「为什么挂、怎么改」，绝不改脚本。
+                         默认只给结论 + 一条改法 + 失败截图，依据和推理收在「展开详情」里——
+                         一张卡片铺七八块，三条失败就能把报告冲垮。
+                         定位类失败会明确写「需要重录」：实测模型看得见截图上的文字、
+                         看不见 DOM，编出来的定位真跑还是失败，给假方案不如不给。 -->
+                    <div v-if="row.diag" :class="['run-diag', 'is-' + (row.diag.status || 'done')]">
+                      <div class="run-diag-head">
+                        <span class="run-diag-badge">AI 诊断</span>
+                        <span v-if="row.diag.category" class="run-diag-cat">{{ row.diag.category }}</span>
+                        <span class="run-diag-spacer"></span>
+                        <button
+                          type="button"
+                          class="run-diag-again"
+                          :disabled="diagBusy || diagRunning"
+                          @click="rediagnose(row)"
+                        >重新诊断</button>
+                      </div>
+
+                      <div class="run-diag-main">
+                        <div class="run-diag-main-text">
+                          <p class="run-diag-reason">{{ row.diag.reason || 'AI 没有给出结论' }}</p>
+                          <div v-if="primaryFix(row)" class="run-diag-fix">
+                            <div class="run-diag-fix-head">
+                              <span class="run-diag-fix-label">{{ primaryFix(row).label }}</span>
+                              <span v-if="primaryFix(row).where" class="run-diag-fix-where">
+                                {{ primaryFix(row).where }}
+                              </span>
+                            </div>
+                            <p v-if="primaryFix(row).advice" class="run-diag-fix-advice">
+                              {{ primaryFix(row).advice }}
+                            </p>
+                            <div v-if="primaryFix(row).before" class="run-diag-code is-before">
+                              <span class="run-diag-sign">−</span>{{ primaryFix(row).before }}
+                            </div>
+                            <div v-if="primaryFix(row).after" class="run-diag-code is-after">
+                              <span class="run-diag-sign">+</span>{{ primaryFix(row).after }}
+                            </div>
+                          </div>
+                        </div>
+
+                        <!-- 失败截图：诊断本身也可能失败或跳过，图照样要给——
+                             模型说不清的时候，人得自己看一眼现场。 -->
+                        <div v-if="shotList(row).length" class="run-diag-shots">
+                          <a
+                            v-for="shot in shotList(row)"
+                            :key="shot"
+                            :href="artifactUrl(shot)"
+                            target="_blank"
+                            rel="noopener"
+                            class="run-diag-shot"
+                            :title="shot"
+                          >
+                            <img :src="artifactUrl(shot)" :alt="shot" loading="lazy" @error="markShotBroken(shot)" />
+                          </a>
+                          <span v-if="shotCount(row) > shotList(row).length" class="run-diag-shot-more">
+                            共 {{ shotCount(row) }} 张
+                          </span>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        :class="['run-diag-fold', { 'is-open': diagDetail.has(caseKey(row)) }]"
+                        @click="toggleSet(diagDetail, caseKey(row))"
+                      >
+                        <span class="run-err-caret">›</span>
+                        {{ diagDetail.has(caseKey(row)) ? '收起详情' : '展开详情' }}
+                        <span class="run-diag-fold-hint">{{ diagFoldHint(row) }}</span>
+                      </button>
+
+                      <div v-if="diagDetail.has(caseKey(row))" class="run-diag-more">
+                        <p v-if="row.diag.detail" class="run-diag-detail">{{ row.diag.detail }}</p>
+
+                        <div v-if="extraFixes(row).length" class="run-diag-fixes">
+                          <span class="run-diag-sec">其他改法</span>
+                          <div v-for="(fix, i) in extraFixes(row)" :key="i" class="run-diag-fix">
+                            <div class="run-diag-fix-head">
+                              <span class="run-diag-fix-label">{{ fix.label }}</span>
+                              <span v-if="fix.where" class="run-diag-fix-where">{{ fix.where }}</span>
+                            </div>
+                            <p v-if="fix.advice" class="run-diag-fix-advice">{{ fix.advice }}</p>
+                            <div v-if="fix.before" class="run-diag-code is-before">
+                              <span class="run-diag-sign">−</span>{{ fix.before }}
+                            </div>
+                            <div v-if="fix.after" class="run-diag-code is-after">
+                              <span class="run-diag-sign">+</span>{{ fix.after }}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div v-if="row.diag.evidence?.length" class="run-diag-ev">
+                          <span class="run-diag-sec">依据</span>
+                          <div v-for="(line, i) in row.diag.evidence" :key="i" class="run-diag-ev-row">{{ line }}</div>
+                        </div>
+
+                        <div class="run-diag-meta">
+                          <span v-if="row.diag.confidence">置信度 {{ confidenceLabel(row.diag.confidence) }}</span>
+                          <span v-if="row.diag.elapsed">耗时 {{ row.diag.elapsed }}s</span>
+                          <span v-if="row.diag.model">{{ row.diag.model }}</span>
+                        </div>
+                        <div v-if="row.diag.fixes?.some(fix => fix.after)" class="run-diag-note">
+                          带 + 的写法是 AI 的建议、没跑过验证；改完请再执行一次这条用例。
+                        </div>
+                      </div>
+                    </div>
+                    <div v-else-if="row.diagPending" class="run-diag-wait">
+                      AI 正在分析这一条…
+                    </div>
+                    <button
+                      v-else-if="FAILED_STATES.includes(row.status)"
+                      type="button"
+                      class="run-diag-idle"
+                      :disabled="diagBusy || diagRunning"
+                      @click="rediagnose(row)"
+                    >
+                      <span class="run-diag-idle-icon">✦</span>
+                      AI 分析这条失败
+                    </button>
 
                     <!-- 执行步骤：原始 keyword 树是代码级的（一百步里大半是 Call Method 这种胶水），
                          默认只铺顶层，点开才往下钻；失败那条路径自动展开 -->
@@ -389,13 +528,15 @@
                         >{{ step.children?.length ? '›' : '' }}</span>
                         <span class="run-step-title">{{ step.title }}</span>
                         <span v-if="step.category" class="run-step-cat">{{ step.category }}</span>
-                        <span :class="['run-step-cost', { 'is-slow': isSlowStep(step, row) }]">
+                        <span class="run-step-cost">
                           {{ msText(step.duration_ms) }}
                         </span>
                       </div>
                     </div>
 
-                    <div v-if="row.screenshots?.length" class="run-shots">
+                    <!-- 有诊断卡时截图已经在卡里，这里不再重复；没有诊断（还没点分析）
+                         才留在原处，保证「没点 AI 也能看到失败现场」。 -->
+                    <div v-if="row.screenshots?.length && !row.diag" class="run-shots">
                       <template v-for="shot in row.screenshots" :key="shot">
                         <a
                           v-if="!brokenShots.has(shot)"
@@ -474,6 +615,10 @@ const brokenShots = reactive(new Set())
 // RF 的 keyword 树是代码级的：一个登录用例能有一百步，全铺出来没法看。
 const expandedSteps = reactive(new Set())
 const showQuiet = reactive(new Set())
+// 诊断卡默认只给结论和一条改法，依据/推理/元信息收在「展开详情」里；
+// 错误原文默认只给主错误，后置的连带失败收在「其他失败」里。
+const diagDetail = reactive(new Set())
+const errorMore = reactive(new Set())
 
 const activeFolder = ref('')
 const expandedDirs = reactive(new Set())
@@ -486,6 +631,13 @@ const historyScope = ref('workspace')
 // missing 非空表示「文件确实写了，但这一次没枚举出来」，提示条要换个说法。
 const focus = reactive({ file: '', cases: 0, missing: '', scanning: false })
 let pollTimer = null
+// AI 诊断是跑完之后才开始的第二段异步：一条实测 20～45 秒，5 条要两三分钟。
+// 跑完就停轮询的话，界面上永远看不到结论，所以单独一个轮询接力。
+let diagTimer = null
+let diagPolls = 0
+const DIAG_POLL_MS = 4000
+const DIAG_MAX_POLLS = 120
+const diagBusy = ref(false)
 
 // 报告区的筛选状态。换一次运行就重置——上一批的标签在下一批里往往不存在，
 // 留着会把新结果筛成空列表，看起来像「没跑出来」。
@@ -687,6 +839,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   clearTimeout(pollTimer)
+  clearTimeout(diagTimer)
 })
 
 function pickWorkspace() {
@@ -948,6 +1101,62 @@ function firstLine(text) {
   return String(text || '').split('\n').find(line => line.trim()) || ''
 }
 
+/* 错误原文拆成「主错误 + 其余」。
+   RF 会把后置里的连带失败接在主错误后面（Also teardown failed: ...），
+   Playwright 会接一大段 Call log —— 两样都比主错误长，全铺出来就把结论挤到屏幕外了。
+   只认这两种已知格式，别的原样当主错误，不猜。 */
+function errorParts(text) {
+  const raw = String(text || '')
+  const marks = [
+    { mark: '\nAlso teardown failed', label: '其他失败' },
+    { mark: '\nCall log:', label: '调用日志' }
+  ]
+  for (const item of marks) {
+    const at = raw.indexOf(item.mark)
+    if (at > 0) {
+      return { main: raw.slice(0, at).trim(), more: raw.slice(at).trim(), label: item.label }
+    }
+  }
+  return { main: raw.trim(), more: '', label: '' }
+}
+
+function errorLines(text) {
+  return errorParts(text).more.split('\n').filter(line => line.trim()).length
+}
+
+function toggleSet(set, key) {
+  if (set.has(key)) set.delete(key)
+  else set.add(key)
+}
+
+// 诊断卡默认只放第一条改法，其余进「展开详情」：失败一多，每条两三个改法会把报告冲垮。
+function primaryFix(row) {
+  return (row.diag?.fixes || [])[0] || null
+}
+
+function extraFixes(row) {
+  return (row.diag?.fixes || []).slice(1)
+}
+
+// 卡片里最多两张缩略图，再多就只报个数——失败截图常有四五张，
+// 其中大半是后置阶段拍的，全铺出来反而看不出主现场。
+function shotList(row) {
+  return (row.screenshots || []).filter(shot => !brokenShots.has(shot)).slice(0, 2)
+}
+
+function shotCount(row) {
+  return (row.screenshots || []).length
+}
+
+function diagFoldHint(row) {
+  const diag = row.diag || {}
+  const bits = []
+  if (diag.detail) bits.push('推理')
+  if (diag.evidence?.length) bits.push(`依据 ${diag.evidence.length} 条`)
+  if (extraFixes(row).length) bits.push(`另 ${extraFixes(row).length} 条改法`)
+  return bits.join(' · ')
+}
+
 // 报告行的元信息。分组视图下文件名已经在组头上，这里不重复；平铺时才补回来。
 function reportMeta(row) {
   const bits = []
@@ -961,15 +1170,6 @@ function reportMeta(row) {
 function msText(value) {
   const millis = Number(value || 0)
   return millis < 1000 ? `${millis}ms` : `${(millis / 1000).toFixed(1)}s`
-}
-
-// 单步耗时占这条用例最慢一步的 60% 以上且超过 200ms → 标黄。
-// 「Go To 花了 7 秒、其余几步加起来 0.3 秒」这种一眼就能看出来。
-function isSlowStep(step, row) {
-  let max = 0
-  for (const item of row.steps || []) max = Math.max(max, item.duration_ms || 0)
-  const cost = step.duration_ms || 0
-  return cost > 200 && cost >= max * 0.6
 }
 
 /* ---------------------------------------------------------------- 步骤树
@@ -1082,7 +1282,7 @@ function toggleQuietSteps(row) {
 function stepSummary(row) {
   const total = (row.steps || []).length
   const roots = stepRootCount(row)
-  if (roots >= total) return `共 ${total} 步，最慢的一步已标黄`
+  if (roots >= total) return `共 ${total} 步`
   return `${roots} 个顶层步骤 · 共 ${total} 步明细`
 }
 
@@ -1205,19 +1405,96 @@ async function openRun(id) {
 async function showRun(id) {
   try {
     const { data } = await api.getTestRun(id)
-    run.value = data
+    run.value = withDiag(data)
     // 换了运行就重置筛选：上一批的标签往往不在下一批里，留着会把结果筛成空列表。
     statusFilter.value = 'all'
     tagFilter.clear()
     collapsedGroups.clear()
+    diagDetail.clear()
+    errorMore.clear()
     if (data.status === 'running') {
       schedulePoll()
     } else {
       clearTimeout(pollTimer)
       autoOpenFailures(data)
+      // 执行刚结束时诊断往往才开跑：接力轮询，否则回来时只看到「正在诊断」不动。
+      if (data.diagnoses?.state === 'running') {
+        diagPolls = 0
+        scheduleDiagPoll()
+      }
     }
   } catch (error) {
     ElMessage.error(errorText(error))
+  }
+}
+
+// 诊断结果按 results 下标对应（后端就是按下标存的）。行对象会参与排序和筛选，
+// 数组位置随时会变，所以下标挂在行上，不能靠位置反推。
+function withDiag(data) {
+  if (!data) return data
+  const byIndex = new Map()
+  for (const item of data.diagnoses?.items || []) byIndex.set(item.index, item)
+  // 只有「这一条还没出结果」才显示进行中，不能整页失败用例一起转圈。
+  const pending = new Set(data.diagnoses?.pending || [])
+  ;(data.results || []).forEach((row, index) => {
+    row.diagIndex = index
+    row.diag = byIndex.get(index) || null
+    row.diagPending = pending.has(index)
+  })
+  return data
+}
+
+const diagRunning = computed(() => run.value?.diagnoses?.state === 'running')
+
+const diagSummary = computed(() => {
+  const state = run.value?.diagnoses
+  if (!state || state.state === 'idle') return ''
+  const done = (state.items || []).filter(item => item.status === 'done').length
+  if (state.state === 'running') return `AI 正在诊断（已完成 ${done} 条）`
+  if (state.state === 'failed') return 'AI 诊断中断'
+  if (!done) return 'AI 诊断没得出结论'
+  return `AI 诊断 ${done} 条`
+})
+
+function confidenceLabel(value) {
+  return ({ high: '高', medium: '中', low: '低' })[value] || value
+}
+
+function scheduleDiagPoll() {
+  clearTimeout(diagTimer)
+  diagTimer = setTimeout(pollDiagOnce, DIAG_POLL_MS)
+}
+
+async function pollDiagOnce() {
+  const current = run.value
+  if (!current || current.diagnoses?.state !== 'running') return
+  // 兜底：模型卡住时最多问 120 次（约 8 分钟），别让页面一直转。
+  if (diagPolls >= DIAG_MAX_POLLS) return
+  diagPolls += 1
+  try {
+    const { data } = await api.getTestRun(current.id)
+    run.value = withDiag(data)
+    if (data.diagnoses?.state === 'running') scheduleDiagPoll()
+  } catch {
+    // 网络抖一下不该让结论永远出不来，下一轮接着问。
+    scheduleDiagPoll()
+  }
+}
+
+async function rediagnose(row) {
+  if (!run.value || diagBusy.value) return
+  const index = row.diagIndex
+  if (typeof index !== 'number') return
+  diagBusy.value = true
+  try {
+    const { data } = await api.diagnoseTestRun(run.value.id, [index])
+    run.value = withDiag({ ...run.value, diagnoses: data })
+    diagPolls = 0
+    scheduleDiagPoll()
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    diagBusy.value = false
   }
 }
 
@@ -1230,7 +1507,7 @@ async function pollOnce() {
   if (!run.value || run.value.status !== 'running') return
   try {
     const { data } = await api.getTestRun(run.value.id)
-    run.value = data
+    run.value = withDiag(data)
     syncHistory(data)
     if (data.status === 'running') {
       schedulePoll()
@@ -1239,6 +1516,10 @@ async function pollOnce() {
       await loadHistory()
       if (data.failed) ElMessage.warning(`执行完成：${data.failed} 条失败`)
       else ElMessage.success(`执行完成：${data.passed} 条通过`)
+      if (data.diagnoses?.state === 'running') {
+        diagPolls = 0
+        scheduleDiagPoll()
+      }
     }
   } catch {
     // 网络抖一下不该把界面卡在「执行中」，下次轮询接着来。
@@ -1255,7 +1536,7 @@ async function execute() {
       framework: framework.value,
       cases: [...selected]
     })
-    run.value = data
+    run.value = withDiag(data)
     opened.clear()
     await loadHistory()
     schedulePoll()
@@ -1839,14 +2120,15 @@ function errorText(error) {
 .run-group-count { flex: none; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .run-group-bad { flex: none; font-size: 10.5px; color: var(--danger); }
 
-/* 步骤树：缩进表达层级，耗时分列右对齐；最慢的一步标黄 */
+/* 步骤树：缩进表达层级，耗时分列右对齐。没有额外着色——
+   耗时本来就写在行尾，超时失败那一步也已经整行标红，再加一层颜色只会互相干扰。 */
 .run-steps {
   margin-top: 10px;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
   overflow: hidden;
   /* 失败卡片整块是淡红底，步骤区要铺自己的底色：
-     否则每一行都泡在红里，层级和最慢步都看不出来。 */
+     否则每一行都泡在红里，缩进层级就看不出来了。 */
   background: var(--bg-card);
   /* 一条用例可能有上百步：限高让卡片保持可读，靠内部滚动看剩下的 */
   max-height: 340px;
@@ -1904,7 +2186,6 @@ function errorText(error) {
 /* 库名紧跟步骤名（靠左），耗时单独靠右：两个都挤到右边会读成一句话 */
 .run-step-cat { flex: none; margin-right: auto; font-size: 10px; color: var(--faint); }
 .run-step-cost { flex: none; margin-left: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.run-step-cost.is-slow { color: var(--warn); font-weight: 600; }
 .run-where { font-family: ui-monospace, Consolas, monospace; color: var(--accent); word-break: break-all; }
 
 .run-error {
@@ -1995,6 +2276,194 @@ function errorText(error) {
   color: var(--ink-2);
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* ---- AI 诊断 ---- */
+/* 结论区刻意比错误块更「安静」：错误原文才是事实，AI 的话是推断，视觉上不能抢。
+   默认只铺三样——结论、一条改法、失败截图；依据和推理收进「展开详情」。 */
+.run-diag-chip {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.run-diag {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-left: 2px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+.run-diag.is-skipped,
+.run-diag.is-failed { border-left-color: var(--warn); }
+.run-diag-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.run-diag-badge {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+.run-diag-cat {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  background: var(--bg-card);
+  font-size: 10.5px;
+  color: var(--ink-2);
+}
+.run-diag-spacer { margin-left: auto; }
+.run-diag-again,
+.run-diag-idle {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line-soft);
+  background: var(--bg-card);
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.run-diag-again:hover:not(:disabled),
+.run-diag-idle:hover:not(:disabled) { border-color: var(--accent-line); color: var(--accent); }
+.run-diag-again:disabled,
+.run-diag-idle:disabled { color: var(--faint); cursor: default; }
+.run-diag-idle { margin-top: 8px; display: inline-flex; align-items: center; gap: 5px; }
+.run-diag-idle-icon { color: var(--accent); font-size: 11px; }
+.run-diag-wait { margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+
+/* 结论 + 截图并排：截图放右边，正文不被压成窄条；
+   窄屏（<980px）时自动堆叠，图在结论下面。 */
+.run-diag-main { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; margin-top: 5px; }
+.run-diag-main-text { flex: 1 1 300px; min-width: 300px; }
+.run-diag-shots { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.run-diag-shot {
+  display: block;
+  width: 120px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-card);
+  line-height: 0;
+}
+.run-diag-shot img { display: block; width: 100%; height: auto; }
+.run-diag-shot:hover { border-color: var(--accent-line); }
+.run-diag-shot-more { font-size: 10.5px; color: var(--faint); }
+.run-diag-reason {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.55;
+}
+.run-diag-detail {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.run-diag-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.run-diag-fold:hover { color: var(--accent); }
+.run-diag-fold .run-err-caret { font-size: 11px; }
+.run-diag-fold-hint { color: var(--faint); }
+.run-diag-more { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line-faint); }
+.run-diag-sec { display: block; margin: 8px 0 2px; font-size: 10.5px; color: var(--faint); }
+.run-diag-ev { margin-top: 2px; }
+.run-diag-ev-row {
+  margin-top: 2px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.6;
+  word-break: break-word;
+}
+.run-diag-fixes { display: flex; flex-direction: column; gap: 7px; }
+.run-diag-fix {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: var(--bg-card);
+  border: 1px solid var(--line-soft);
+}
+.run-diag-fix-head { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.run-diag-fix-label { font-size: 11.5px; font-weight: 600; color: var(--ink-2); }
+.run-diag-fix-where { font-size: 10.5px; color: var(--faint); font-family: var(--mono); }
+.run-diag-fix-advice { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); line-height: 1.65; }
+.run-diag-code {
+  margin-top: 3px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.run-diag-code.is-before { background: var(--danger-soft); color: var(--ink-2); }
+.run-diag-code.is-after { background: var(--ok-soft); color: var(--ink-2); }
+.run-diag-sign { margin-right: 7px; font-weight: 600; color: var(--danger); }
+.run-diag-code.is-after .run-diag-sign { color: var(--ok); }
+.run-diag-meta { margin-top: 7px; display: flex; gap: 12px; flex-wrap: wrap; font-size: 10.5px; color: var(--faint); }
+.run-diag-note { margin-top: 6px; font-size: 10.5px; color: var(--warn); }
+
+/* 错误原文的「其他失败」折叠：后置连带失败、Playwright 的 Call log 都收在这里 */
+.run-err-more { margin-top: 4px; }
+.run-err-more-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.run-err-more-head:hover { color: var(--accent); }
+.run-err-caret {
+  display: inline-block;
+  font-size: 12px;
+  line-height: 1;
+  transition: transform .12s ease;
+}
+.run-err-more.is-open .run-err-caret,
+.run-diag-fold.is-open .run-err-caret { transform: rotate(90deg); }
+.run-err-more-body {
+  margin: 4px 0 0;
+  padding: 7px 9px;
+  max-height: 200px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+@media (max-width: 980px) {
+  .run-diag-main { flex-direction: column; }
+  .run-diag-shots { width: 100%; }
 }
 .run-shots { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .run-shot {

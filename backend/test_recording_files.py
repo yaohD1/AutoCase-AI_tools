@@ -5,15 +5,17 @@
 所以这里全部按纯逻辑测，不启浏览器。
 """
 import os
+import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
 
-from app.services.recording import assets, emit, files, ir
+from app.services.recording import assets, emit, files, files_bundle, ir
 from app.services.recording.session import RecordingError, RecordingSession
 
 
@@ -246,10 +248,53 @@ class EnsureUtilsTest(unittest.TestCase):
     def test_robot(self):
         rel = emit._ensure_files_utils(self.root, 'tests/login.robot',
                                        [{'type': 'download'}], emit.RF_FRAMEWORK)
-        self.assertEqual(rel, 'tests/libraries/FilesLibrary.py')
-        body = (Path(self.root) / rel).read_text(encoding='utf-8')
+        # 库在 工作区根/.autocase，路径是从 CURDIR 往上退一层。
+        self.assertEqual(rel, '../.autocase/libraries/FilesLibrary.py')
+        body = (Path(self.root) / '.autocase/libraries/FilesLibrary.py').read_text(encoding='utf-8')
         self.assertIn('Upload File', body)
         compile(body, rel, 'exec')  # 写出去的东西必须真是合法 Python
+
+    def test_robot_shares_one_copy_across_cases(self):
+        first = []
+        second = []
+        rel_a = emit._ensure_files_utils(self.root, '测试用例层/终端管理/终端资产/a.robot',
+                                         [{'type': 'upload'}], emit.RF_FRAMEWORK, notes=first)
+        rel_b = emit._ensure_files_utils(self.root, '测试用例层/接口测试/b.robot',
+                                         [{'type': 'upload'}], emit.RF_FRAMEWORK, notes=second)
+        # 两条用例深度不同，相对路径不同，但落在同一个文件上。
+        self.assertEqual(rel_a, '../../../.autocase/libraries/FilesLibrary.py')
+        self.assertEqual(rel_b, '../../.autocase/libraries/FilesLibrary.py')
+        # 相对路径是按各自用例目录算的，从各自目录还原后必须指向同一份。
+        self.assertEqual(
+            (Path(self.root) / '测试用例层/终端管理/终端资产' / rel_a).resolve(),
+            (Path(self.root) / '测试用例层/接口测试' / rel_b).resolve())
+        self.assertEqual(first[0]['state'], 'created')
+        # 第二次内容没变：不重写，直接复用。
+        self.assertEqual(second[0]['state'], 'reused')
+
+    def test_robot_rewrites_stale_library(self):
+        # 模板修过（比如上传那个 TypeError）时不能因为「文件已存在」就继续用坏的。
+        stale = Path(self.root) / '.autocase/libraries/FilesLibrary.py'
+        stale.parent.mkdir(parents=True)
+        stale.write_text('# 旧版本\n', encoding='utf-8')
+        notes = []
+        emit._ensure_files_utils(self.root, 'tests/a.robot', [{'type': 'upload'}],
+                                 emit.RF_FRAMEWORK, notes=notes)
+        self.assertEqual(notes[0]['state'], 'updated')
+        self.assertIn('Upload File', stale.read_text(encoding='utf-8'))
+
+    def test_robot_library_line_points_at_shared_dir(self):
+        gen = tempfile.mkdtemp(prefix='ac-gen-')
+        target = '测试用例层/终端管理/终端资产/用例.robot'
+        path = Path(gen) / target
+        path.parent.mkdir(parents=True)
+        path.write_text('*** Test Cases ***\n录制流程\n    Go To    https://a/#/\n', encoding='utf-8')
+        emit._normalize_rf_script(gen, target, [{'type': 'upload'}],
+                                  files_lib='../../../.autocase/libraries/FilesLibrary.py')
+        body = path.read_text(encoding='utf-8')
+        self.assertIn('${CURDIR}/../../../.autocase/libraries/FilesLibrary.py', body)
+        self.assertIn('${CURDIR}/downloads', body)
+        self.assertNotIn('${CURDIR}/libraries/FilesLibrary.py', body)
 
     def test_skipped_without_relevant_steps(self):
         for framework in (emit.PW_FRAMEWORK, emit.RF_FRAMEWORK):
@@ -264,6 +309,74 @@ class EnsureUtilsTest(unittest.TestCase):
         pw = emit.FRAMEWORK_RULES[emit.PW_FRAMEWORK]
         self.assertIn('uploadFile', pw)
         self.assertIn('downloadFile', pw)
+
+
+class RobotUploadLibraryTest(unittest.TestCase):
+    """生成给 Robot 的 FilesLibrary：上传必须真的把文件塞进 input。
+
+    这条链路曾经整段是坏的：`Execute Javascript` 在 SeleniumLibrary 3.x 里把每个
+    参数当成「同一段代码的另一行」，内部是 ''.join()，把 WebElement 拼进去直接
+    TypeError: sequence item 1: expected str instance, WebElement found。
+    报错跟「文件」毫无关系，所以既查源码不回退，也把生成的类 exec 出来跑一遍。
+    """
+
+    def _library(self):
+        # 测试环境不一定装了 robot，给个只提供 @keyword 的桩，避免为一个装饰器跳过。
+        deco = types.ModuleType('robot.api.deco')
+
+        def keyword(name=None, **kwargs):
+            if callable(name):
+                return name
+
+            def wrap(fn):
+                return fn
+
+            return wrap
+
+        deco.keyword = keyword
+        robot = types.ModuleType('robot')
+        api = types.ModuleType('robot.api')
+        api.deco = deco
+        robot.api = api
+        namespace = {}
+        with mock.patch.dict(sys.modules, {'robot': robot, 'robot.api': api,
+                                           'robot.api.deco': deco}):
+            exec(files_bundle.FILES_PY, namespace)
+        return namespace['FilesLibrary'], namespace['FIND_INPUT_JS']
+
+    def test_does_not_use_seleniumlibrary_execute_javascript(self):
+        # 这行一旦回来，upload 就会在真机上崩，且报错完全指不到文件。
+        self.assertNotIn('execute_javascript(', files_bundle.FILES_PY)
+        self.assertIn('driver.execute_script(', files_bundle.FILES_PY)
+
+    def test_file_input_passes_element_to_native_driver(self):
+        library, script = self._library()
+        lib = library.__new__(library)
+        driver = mock.Mock()
+        driver.execute_script.return_value = 'INPUT'
+        lib._selenium = mock.Mock(driver=driver,
+                                  execute_javascript=mock.Mock(
+                                      side_effect=AssertionError('不能走 Execute Javascript')))
+        element = object()
+        self.assertEqual(lib._file_input(element), 'INPUT')
+        driver.execute_script.assert_called_once_with(script, element)
+
+    def test_project_path_falls_back_to_parent_of_cwd(self):
+        # 从用例目录启动 robot 时 cwd 不是工作区根，资产仍然在根下的 .assets。
+        root = Path(tempfile.mkdtemp(prefix='ac-proj-'))
+        (root / '.assets').mkdir()
+        (root / '.assets' / 'a.xlsx').write_bytes(b'x')
+        deep = root / '测试用例层' / '终端资产'
+        deep.mkdir(parents=True)
+        library, _ = self._library()
+        lib = library.__new__(library)
+        previous = os.getcwd()
+        os.chdir(str(deep))
+        try:
+            self.assertEqual(lib._project_path('.assets/a.xlsx'),
+                             (root / '.assets' / 'a.xlsx').resolve())
+        finally:
+            os.chdir(previous)
 
 
 class SessionGuardTest(unittest.TestCase):

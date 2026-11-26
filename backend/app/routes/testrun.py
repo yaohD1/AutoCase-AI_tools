@@ -12,7 +12,7 @@ from werkzeug.utils import secure_filename
 
 from app.models import db
 from app.models.test_run import TestRun
-from app.services.recording import report_html, runner
+from app.services.recording import diagnose, report_html, runner
 
 testrun_bp = Blueprint('testrun', __name__)
 logger = logging.getLogger(__name__)
@@ -120,6 +120,32 @@ def stop_run(run_id):
     # 进程可能刚好自己结束了：这时 stop 返回 False，但状态本来就该是「跑完了」，
     # 不该回一个 409 让用户以为操作失败。
     return jsonify({'stopped': bool(stopped), 'status': run.status})
+
+
+@testrun_bp.route('/automation/testrun/runs/<run_id>/diagnose', methods=['POST'])
+def diagnose_run(run_id):
+    """让 AI 对失败用例做一次初步诊断。
+
+    只读：产出原因和改法，**不写脚本**。实测模型给的定位补丁跑起来仍然失败
+    （它从截图看得见文字，看不见 DOM），所以写回这件事不在这一层做。
+
+    异步：一条 20～45 秒，HTTP 请求扛不住；返回 202，前端轮询 run 详情拿结果。
+    """
+    run = db.session.get(TestRun, run_id)
+    if run is None:
+        return jsonify({'error': '运行记录不存在'}), 404
+    body = request.get_json(silent=True) or {}
+    indexes = body.get('indexes')
+    if indexes is not None and not isinstance(indexes, list):
+        return jsonify({'error': 'indexes 必须是数组'}), 400
+    try:
+        data = diagnose.start(current_app._get_current_object(), run_id, indexes)
+    except diagnose.DiagnoseError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        logger.exception('发起诊断失败')
+        return jsonify({'error': '发起诊断失败：%s' % exc}), 500
+    return jsonify(data), 202
 
 
 @testrun_bp.route('/automation/testrun/runs/<run_id>/artifact', methods=['GET'])

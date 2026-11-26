@@ -238,6 +238,8 @@ from robot.api.deco import keyword
 
 PART_SUFFIXES = ('.crdownload', '.part', '.download', '.tmp')
 ROW_TAG = re.compile(rb'<row[ >]')
+# 脚本体，不是箭头函数：它只给 driver.execute_script(JS, element) 用，靠 arguments[0] 拿元素。
+# 不要改成 (el) => ...：那样 arguments[0] 就没了，Selenium 侧会拿到 None。
 FIND_INPUT_JS = """
 const isFile = (n) => !!n && n.tagName === 'INPUT' && String(n.type || '').toLowerCase() === 'file';
 if (isFile(arguments[0])) return arguments[0];
@@ -289,7 +291,14 @@ class FilesLibrary:
         return {'name': path.name, 'size': path.stat().st_size, 'path': rel_path}
 
     def _file_input(self, element):
-        return self.selenium.execute_javascript(FIND_INPUT_JS, element)
+        """从 element 出发找最近的 input[type=file]。
+
+        必须走原生 driver.execute_script，不能用 SeleniumLibrary 的 `Execute Javascript`：
+        那个关键字把多个参数当成「同一段代码的多行」，内部是 `''.join(code)`，把 WebElement
+        拼进字符串会直接 TypeError: sequence item 1: expected str instance, WebElement found。
+        只有原生 execute_script 支持把元素作为 arguments[0] 传进脚本。
+        """
+        return self.selenium.driver.execute_script(FIND_INPUT_JS, element)
 
     # ---- 下载 ----
 
@@ -403,5 +412,15 @@ class FilesLibrary:
         candidate = Path(text)
         if candidate.is_absolute() or '..' in candidate.parts:
             raise AssertionError('文件路径必须是项目内的相对路径：%s' % text)
-        return (Path.cwd() / candidate).resolve()
+        here = Path.cwd()
+        direct = (here / candidate).resolve()
+        if direct.is_file():
+            return direct
+        # 资产是相对工作区根存的。robot 从根目录启动时上一行就命中；从用例目录、
+        # IDE 或别的 cwd 启动时往上找几层再试——否则同一份脚本换个入口就报「文件不存在」。
+        for parent in list(here.parents)[:5]:
+            probe = (parent / candidate).resolve()
+            if probe.is_file():
+                return probe
+        return direct
 '''
