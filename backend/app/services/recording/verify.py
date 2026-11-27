@@ -8,6 +8,7 @@
 
 正因为口径是「此刻」，结果里必须带上实际看到的值，让用户自己判断有没有意义。
 """
+from app.services.recording import table_probe
 from app.services.recording.locators import best_effort, build_locator, pick_for
 
 PW_FRAMEWORK = 'playwright-ts'
@@ -104,6 +105,12 @@ def _check(frame, target, intent):
             return _result(kind, value in url, url, expected=value)
         if kind in ('sleep',):
             return _result(kind, True, None, detail='固定等待不需要校验')
+        # 行断言不是「某个元素怎样」：条件在表格里横向铺开，交给 table_probe 判。
+        if kind == 'row_match':
+            try:
+                return table_probe.check(frame, intent)
+            except table_probe.TableProbeError as exc:
+                raise VerifyError(str(exc))
         if target is None:
             raise VerifyError('这一步需要目标元素')
         locator, chosen = _locator(frame, target)

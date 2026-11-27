@@ -20,6 +20,7 @@ from app.services.recording.captcha_ts import CAPTCHA_TS
 from app.services.recording.files_bundle import FILES_PY, FILES_TS
 from app.services.recording.slider_bundle import SLIDER_PY
 from app.services.recording.slider_ts import SLIDER_TS
+from app.services.recording.table_bundle import TABLE_PY, TABLE_TS
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,14 @@ FRAMEWORK_RULES = {
         'Element Text Should Be；value_equals → Wait Until Keyword Succeeds + Textfield Value Should Be；'
         'url_contains → Wait Until Location Contains；enabled → Wait Until Keyword Succeeds + Element Should Be Enabled；'
         'page_text_contains → Wait Until Page Contains。\n'
+        '- 表格行断言（intent.type 为 row_match，步骤里带 row_assert）：断言的是'
+        '「表格里同一行多列同时成立」，不是某个元素的文字。\n'
+        '  · 立即判定：原样写 row_assert.call。不要改行定位变量、表头、列序号，也不要调换条件顺序。\n'
+        '  · 带最长等待且 intent.reload 为 false：原样写 row_assert.wait_call。\n'
+        '  · intent.reload 为 true：按上面的轮询规则写 Wait Until Keyword Succeeds ... Reload And Check，'
+        'Reload And Check 里只放 Reload Page 和 row_assert.call（不要再写 timeout）。\n'
+        '  · 不要自己写 FOR 循环读单元格，也不要换成 Element Text Should Be / Page Should Contain：'
+        '它们断的是单格或整页，证明不了这些值在同一行。\n'
         '- 新标签页用 Switch Window 配合 Wait Until Keyword Succeeds；frame 内操作前先 Select Frame。\n'
         '- 刷新页面（type 为 reload）用 Reload Page，不要写成 Go To 同一地址（重新请求的语义不同）。'
         '刷新后文档是新的，后续每条交互仍要先 Wait Until Element Is Visible。\n'
@@ -153,6 +162,15 @@ FRAMEWORK_RULES = {
         '- 直接 click / fill / selectOption，不要用 waitForTimeout 充当等待。\n'
         '- 断言用 expect(locator)：toBeVisible / toBeHidden / toHaveText / toHaveValue；'
         '地址断言用 expect(page).toHaveURL(...)；整页文字断言用 expect(page.locator("body")).toContainText(...)。\n'
+        '- 表格行断言（intent.type 为 row_match，步骤里带 row_assert）：断言的是'
+        '「表格里同一行多列同时成立」。\n'
+        '  · 从平台生成的 utils/table 导入：`import { assertTableRow, tableRowMatches } from \'./utils/table\';`\n'
+        '  · 立即判定：原样写 row_assert.call；带 timeout 且不刷新：原样写 row_assert.wait_call。'
+        '不要改写选择器、条件、列序号、scope 或行号窗口。\n'
+        '  · reload 为 true：\n'
+        '    await expect.poll(async () => { await page.reload(); return <row_assert.matches_call>; },'
+        ' { timeout: <intent.timeout 毫秒>, intervals: [<intent.interval 毫秒，缺省 5000>] }).toBe(true);\n'
+        '  · 不要用 locator.filter({ hasText }) 把多列条件拍成一串文字：列对不上也能通过。\n'
         '- 新标签页用 context.waitForEvent("page")；frame 内用 page.frameLocator(目标 frame 的 url)。\n'
         '- 刷新页面（type 为 reload）用 page.reload()，不要写成 page.goto(page.url())：'
         '后者在 SPA 里可能根本不重载。\n'
@@ -280,7 +298,108 @@ def target_problem(workspace, target_path, framework):
     return None
 
 
-def _steps_for_prompt(steps, framework, actions=None, locator_vars=None):
+def _row_assert_payload(step, framework, locator_var=None):
+    """给写手一行可以直接照抄的行断言调用。
+
+    为什么整行都拼好：行断言有两个坐标系（表头文字 / 列序号）和两种范围
+    （任意一行 / 首行），让模型按规则自己拼，它一定会省掉列序号，或者把条件
+    退化成「表格里包含这些文字」——那就成了整页文字断言，列对齐的约束全丢了。
+    """
+    intent = step.get('intent') or {}
+    table = intent.get('table') or {}
+    columns = intent.get('columns') or []
+    scope = intent.get('scope') or 'any'
+    # 只有 custom 才带行号窗口；其余范围给空串，免得生成端把 'first' 和 '2-5' 混着用。
+    scope_rows = str(intent.get('scope_rows') or '').strip() if scope == 'custom' else ''
+    try:
+        timeout = int(intent.get('timeout') or 0)
+    except (TypeError, ValueError):
+        timeout = 0
+    try:
+        interval = int(intent.get('interval') or 0) or 5
+    except (TypeError, ValueError):
+        interval = 5
+
+    def flat(text):
+        # 连续空格在 Robot 里是分隔符，值里带两个空格会把一个参数劈成两半。
+        return ' '.join(str(text or '').split())
+
+    pairs = [[flat(c.get('header')), int(c.get('index') or 0), flat(c.get('value'))]
+             for c in columns]
+    if framework == RF_FRAMEWORK:
+        rows = locator_var or ('css=' + (table.get('rows_selector') or ''))
+        cond = '[%s]' % ', '.join('(%r, %d, %r)' % (h, i, v) for h, i, v in pairs)
+        base = 'Assert Table Row    %s    %s    scope=%s' % (rows, cond, scope)
+        if scope_rows:
+            base += '    row_range=%s' % scope_rows
+        payload = {
+            'rows': rows,
+            'conditions': pairs,
+            'scope': scope,
+            'scope_rows': scope_rows,
+            'timeout': timeout,
+            'interval': interval,
+            'call': base,
+        }
+        if timeout:
+            payload['wait_call'] = '%s    timeout=%d' % (base, timeout)
+        return payload
+
+    selector = table.get('rows_selector') or ''
+    cond_js = json.dumps(pairs, ensure_ascii=False)
+
+    def call(fn='assertTableRow', limit=None):
+        args = [json.dumps(selector, ensure_ascii=False), cond_js, "'%s'" % scope]
+        if fn == 'assertTableRow':
+            # 第 5 个位置参数是 timeout：要传 row_range 就必须先把这一位填上，
+            # 否则 '2-5' 会被当成秒数（字符串转数字失败，等 0 秒就立刻判失败）。
+            if limit is not None or scope_rows:
+                args.append(str(limit if limit is not None else 0))
+        if scope_rows:
+            args.append(json.dumps(scope_rows, ensure_ascii=False))
+        return 'await %s(page, %s);' % (fn, ', '.join(args))
+
+    payload = {
+        'rows_selector': selector,
+        'conditions': pairs,
+        'scope': scope,
+        'scope_rows': scope_rows,
+        'timeout': timeout,
+        'interval': interval,
+        'call': call(),
+        # 刷新轮询要的是「成不成立」，由 expect.poll 包住；assert 版本会直接抛错。
+        'matches_call': call(fn='tableRowMatches').rstrip(';'),
+    }
+    if timeout:
+        payload['wait_call'] = call(limit=timeout)
+    return payload
+
+
+def _aux_for_prompt(kind, config, aux, framework):
+    """滑块/验证码的配置：RF 下把裸 selector 换成资源文件里的变量名。
+
+    两样都给，写手会挑省事的那条写回裸定位（资源文件就白建了）。
+    Playwright 用不了 RF 的 `${变量}` 语法，保持原值。
+    """
+    out = dict(config or {})
+    if framework != RF_FRAMEWORK or not aux:
+        return out
+    if kind == 'slider':
+        var = aux.get('slider')
+        if var:
+            out.pop('selector', None)
+            out['selector_var'] = var
+        return out
+    if aux.get('captcha'):
+        out.pop('selector', None)
+        out['selector_var'] = aux['captcha']
+    if aux.get('captcha_input'):
+        out.pop('input_selector', None)
+        out['input_selector_var'] = aux['captcha_input']
+    return out
+
+
+def _steps_for_prompt(steps, framework, actions=None, locator_vars=None, aux_vars=None):
     """把 IR 整理成 agent 能直接用的形式：每一步只带需要的定位与意图，不带内部字段。
 
     call 步骤**不展开**：写手要看到「这是一次动作调用」才会写成函数调用；
@@ -291,6 +410,7 @@ def _steps_for_prompt(steps, framework, actions=None, locator_vars=None):
     资源文件就白建了。
     """
     vars_by_no = locator_vars or {}
+    aux_by_no = aux_vars or {}
     known = actions or {}
     out = []
     for step in steps:
@@ -326,23 +446,35 @@ def _steps_for_prompt(steps, framework, actions=None, locator_vars=None):
         if step.get('nav_to'):
             item['nav_to'] = step['nav_to']
         if step.get('intent'):
-            item['intent'] = step['intent']
+            intent = step['intent'] or {}
+            if intent.get('type') == 'row_match':
+                # 表格的选择器、表头清单对写手没有用，反而会诱使它自己拼一条定位。
+                # 只给判定语义 + 一行「原样照抄」的调用（见 FRAMEWORK_RULES）。
+                item['intent'] = {k: intent.get(k) for k in
+                                  ('type', 'scope', 'timeout', 'interval', 'reload')
+                                  if intent.get(k) is not None}
+                item['row_assert'] = _row_assert_payload(
+                    step, framework, vars_by_no.get(str(step.get('no'))))
+            else:
+                item['intent'] = intent
             # 轮询刷新是写手最容易自作主张的一步：它会把「刷新后要重新登录」推断成
             # 「把登录操作也写进轮询回调」，实测每轮从 0.3 秒涨到 2.9 秒，还会反复提交
             # 表单被风控拦掉。长规则里说一遍压不住，所以贴着这一步的数据再说一次。
-            if (step['intent'] or {}).get('reload'):
+            if intent.get('reload'):
                 item['poll_rule'] = ('轮询回调里只写 reload + 一句即时判断，'
                                      '不要重放前面的点击 / 输入')
         if step.get('dialog'):
             item['dialog'] = step['dialog']
         if step.get('slider') is not None:
-            # 滑块不是「点一个元素」，写手拿到 locator 也没用。把三个参数原样给它，
-            # 规则里会说明必须调 solveSlider，不要自己拼拖动代码。
-            item['slider'] = step['slider']
+            # 滑块不是「点一个元素」，写手要的是参数；定位已经写进资源文件，
+            # RF 下只给变量名，避免它把裸选择器硬编码回去。
+            item['slider'] = _aux_for_prompt(
+                'slider', step['slider'], aux_by_no.get(str(step.get('no'))), framework)
         if step.get('captcha') is not None:
-            # 同理：验证码是一段流程（截图 → 问模型 → 填入），把配置原样交出去，
-            # 规则里要求必须调 solveCaptcha。
-            item['captcha'] = step['captcha']
+            # 同理：验证码是一段流程（截图 → 问模型 → 填入），把配置交出去，
+            # 定位换成变量，规则里会说明必须调平台关键字。
+            item['captcha'] = _aux_for_prompt(
+                'captcha', step['captcha'], aux_by_no.get(str(step.get('no'))), framework)
         if step.get('file') is not None:
             # 文件上传：资产引用 + 体积。不把 selector 交给写手——那是录制那一刻的
             # 结构路径，只适合回放兜底；生成的代码按 target.locator 现场找更耐改版。
@@ -408,7 +540,7 @@ def _steps_for_prompt(steps, framework, actions=None, locator_vars=None):
     return out
 
 
-def _actions_for_prompt(actions, framework, steps, action_vars=None):
+def _actions_for_prompt(actions, framework, steps, action_vars=None, action_aux_vars=None):
     """动作定义：子步骤按写手需要的形状（定位串 + `{{参数}}` 占位符）。
 
     called_at 是抽函数的关键信号。**只调用一次也要抽**——用户封装就是要那个名字，
@@ -426,12 +558,13 @@ def _actions_for_prompt(actions, framework, steps, action_vars=None):
             'params': [p.get('key') for p in action.get('params') or []],
             'called_at': calls,
             'steps': _steps_for_prompt(action.get('steps') or [], framework,
-                                       locator_vars=(action_vars or {}).get(action.get('id'))),
+                                       locator_vars=(action_vars or {}).get(action.get('id')),
+                                       aux_vars=(action_aux_vars or {}).get(action.get('id'))),
         })
     return out
 
 
-def _teardown_for_prompt(teardown, framework, action_vars=None):
+def _teardown_for_prompt(teardown, framework, action_vars=None, action_aux_vars=None):
     """后置处理给写手的形状：名字 + 参数 + 子步骤。
 
     它就是「一次不在流程里的调用」，所以子步骤和动作定义同一套形状；区别只在
@@ -447,7 +580,8 @@ def _teardown_for_prompt(teardown, framework, action_vars=None):
         'params': [p.get('key') for p in action.get('params') or []],
         'args': {k: str(v) for k, v in ((teardown or {}).get('args') or {}).items()},
         'steps': _steps_for_prompt(action.get('steps') or [], framework,
-                                   locator_vars=(action_vars or {}).get(action.get('id'))),
+                                   locator_vars=(action_vars or {}).get(action.get('id')),
+                                   aux_vars=(action_aux_vars or {}).get(action.get('id'))),
     }
 
 
@@ -601,8 +735,13 @@ def _candidates_for_prompt(target, framework):
 
 PLAN_RULES = (
     '规划要求：\n'
-    '- 你只做三件事：定写入路径、定项目风格、给每一步一句施工说明。'
+    '- 你只做这几件事：定写入路径、定项目风格、给每一步一句施工说明、写一句总结目标'
+    '和本次不做的范围。'
     '「项目里有没有现成封装」不是你的职责——写手动笔时会读项目，别为了找封装翻目录。\n'
+    '- summary：一句话说清这条用例写成什么（例如「在终端资产页导入 CPE 文件，并断言行操作日志」），'
+    '不超过 60 字；重复标题没有意义，要写清业务结果。\n'
+    '- not_doing：2～4 条本次明确不做的（例如「不改公共封装」「不新增依赖」「不整理旧用例」），'
+    '写具体，不要写「不做无关修改」这种空话；确实没有就空数组。\n'
     '- 任务书里的每个 file / symbol / import 必须来自你真正读过的文件，不许编造。'
     'reusable 只填「读过的参考用例里本来就在调用、并且覆盖了该步全部意图」的封装；'
     '其余情况留空数组，不要专门去找。\n'
@@ -655,7 +794,19 @@ def _plan_step(step):
         if step.get(key) is not None:
             item[key] = step[key]
     if step.get('intent'):
-        item['intent'] = step['intent']
+        intent = step['intent']
+        if intent.get('type') == 'row_match':
+            # 规划只需要「要断哪几列、断成什么」，行定位和表头清单是生成阶段的事。
+            item['intent'] = {
+                'type': 'row_match',
+                'scope': intent.get('scope'),
+                'scope_rows': intent.get('scope_rows'),
+                'columns': [{'header': c.get('header'), 'value': c.get('value')}
+                            for c in (intent.get('columns') or [])],
+                'timeout': intent.get('timeout'),
+            }
+        else:
+            item['intent'] = intent
     if step.get('file'):
         # 规划阶段只要知道「这一步要导入哪个文件」，不影响它判断项目里有没有现成封装。
         item['file'] = {k: v for k, v in step['file'].items() if k != 'selector'}
@@ -761,8 +912,12 @@ def _plan_payload(framework, steps, target_path, title, feedback=None, previous_
     if notes:
         payload['feedback'] = notes
     if previous_plan:
-        # steps_sig 是服务端用来判过期的，不该混进给模型看的上一版里。
-        payload['previous_plan'] = {k: v for k, v in previous_plan.items() if k != 'steps_sig'}
+        # steps_sig 是服务端用来判过期的；files/commands 是平台算的，给模型看只会让它
+        # 以为这些能改，还可能照抄进输出。三者都不该混进给模型看的上一版里。
+        payload['previous_plan'] = {
+            k: v for k, v in previous_plan.items()
+            if k not in ('steps_sig', 'files', 'commands')
+        }
     return payload
 
 
@@ -868,7 +1023,211 @@ def _extract_plan(text):
     return data, None
 
 
-def _normalize_plan(plan, target_path, workspace=None, framework=None):
+# 改动清单里的角色：读任务书的人要一眼分清「写手写的」「平台顺手写的」。
+ROLE_TARGET = 'target'
+ROLE_LOCATOR = 'locator'
+ROLE_LOCATOR_COMMON = 'locator_common'
+ROLE_LIBRARY = 'library'
+
+
+def _case_steps_text(nos, limit=6):
+    """把步骤号拼成「第 2、5 步」；太多就收成「第 2、5、7 等 9 步」。"""
+    clean = sorted({int(n) for n in nos if n is not None})
+    if not clean:
+        return ''
+    if len(clean) > limit:
+        return '第 %s 等 %d 步' % ('、'.join(str(n) for n in clean[:limit]), len(clean))
+    return '第 %s 步' % '、'.join(str(n) for n in clean)
+
+
+def _locator_ready(target, framework):
+    """这一步能不能取出定位串——和 locator_vars.build 里的 locator_of 同一个判断。"""
+    if not target:
+        return False
+    try:
+        info = _locator_info(target, framework)
+        return bool(info and info.get('locator'))
+    except Exception:
+        # 定位串算不出来时生成会退回内联定位，清单不该因此报错。
+        return False
+
+
+def _aux_locator_ready(step):
+    """滑块/验证码有没有定位：它们的定位不在 target 上，但同样会进资源文件。"""
+    slider = step.get('slider') or {}
+    if str(slider.get('selector') or '').strip():
+        return True
+    captcha = step.get('captcha') or {}
+    return bool(str(captcha.get('selector') or '').strip()
+                or str(captcha.get('input_selector') or '').strip())
+
+
+def plan_files(workspace, target_path, steps, framework, actions=None, teardown=None):
+    """预演这次生成会动哪些文件。只判断，不写盘。
+
+    路径规则和 `_ensure_*_utils` / `locator_vars` 共用同一份实现：任务书说的
+    必须就是执行时真会写的，不能各算一套。
+    state:
+      create     文件不存在，会新建
+      overwrite  已存在且会被整份覆盖（PW 的 utils、用户指定的旧用例）
+       update    已存在，按需合并/更新（内容一样就原样复用）
+    """
+    out = []
+    target = str(target_path or '').replace('\\', '/').strip()
+    if not target:
+        return out
+    root = Path(workspace) if workspace else None
+
+    def exists(rel):
+        if root is None:
+            return False
+        try:
+            return (root / rel).exists()
+        except OSError:
+            return False
+
+    def add(rel, role, why, state=None):
+        rel = str(rel).replace('\\', '/')
+        out.append({
+            'path': rel,
+            'role': role,
+            'why': why,
+            'state': state or ('update' if exists(rel) else 'create'),
+        })
+
+    steps = steps or []
+    actions = actions or {}
+    target_state = 'overwrite' if exists(target) else 'create'
+    add(target, ROLE_TARGET, '用例脚本，写手只写这个文件', target_state)
+
+    # 后置处理是「一次不在流程里的调用」，它的定位进公共文件，和动作同样处理。
+    pool = dict(actions)
+    td_action = (teardown or {}).get('action') or {}
+    if td_action.get('id'):
+        pool[td_action['id']] = td_action
+    called = {s.get('action') for s in steps if s.get('type') == 'call'}
+
+    flow_nos = [s.get('no') for s in steps
+                if s.get('type') != 'call'
+                and (_locator_ready(s.get('target'), framework) or _aux_locator_ready(s))]
+    row_nos = [s.get('no') for s in steps
+               if (s.get('intent') or {}).get('type') == 'row_match']
+
+    action_nos = []
+    for action_id, action in pool.items():
+        if action_id not in called:
+            continue
+        action_nos += [sub.get('no') for sub in (action.get('steps') or [])
+                       if _locator_ready(sub.get('target'), framework) or _aux_locator_ready(sub)]
+
+    if flow_nos or row_nos:
+        why = '定位变量：' + _case_steps_text(flow_nos + row_nos)
+        add(locator_vars.file_rel(target), ROLE_LOCATOR, why + '；同目录用例共用')
+
+    if action_nos:
+        # 动作里的步骤号是动作内部的编号，和流程步骤号不是一套，别混着写。
+        add(locator_vars.common_rel(), ROLE_LOCATOR_COMMON,
+            '封装动作的定位变量；跨用例共用')
+
+    def shared_lib(name):
+        # 任务书里写工作区相对路径：_shared_lib_rel 是给 ${CURDIR}/ 拼的，
+        # 直接展示成 ../../.autocase/... 会让用户以为文件在工作区外面。
+        return '/'.join([SHARED_DIR, 'libraries', name])
+
+    def pw_util(name):
+        return (Path(target).parent / 'utils' / name).as_posix()
+
+    if any(s.get('type') in ('upload', 'download') for s in steps):
+        if framework == RF_FRAMEWORK:
+            add(shared_lib('FilesLibrary.py'), ROLE_LIBRARY,
+                '上传/下载的文件校验工具；所有用例共用一个')
+        else:
+            add(pw_util('files.ts'), ROLE_LIBRARY,
+                '上传/下载的文件校验工具；已存在会被覆盖',
+                'overwrite' if exists(pw_util('files.ts')) else 'create')
+
+    if _has_slider(steps, pool):
+        if framework == RF_FRAMEWORK:
+            add(shared_lib('SliderLibrary.py'), ROLE_LIBRARY,
+                '滑块拖动工具；所有用例共用一个')
+        else:
+            add(pw_util('slider.ts'), ROLE_LIBRARY,
+                '滑块工具；已存在会被覆盖',
+                'overwrite' if exists(pw_util('slider.ts')) else 'create')
+
+    if _has_row_match(steps):
+        if framework == RF_FRAMEWORK:
+            add(shared_lib('TableLibrary.py'), ROLE_LIBRARY,
+                '表格行断言工具；所有用例共用一个')
+        else:
+            add(pw_util('table.ts'), ROLE_LIBRARY,
+                '表格行断言工具；已存在会被覆盖',
+                'overwrite' if exists(pw_util('table.ts')) else 'create')
+
+    if framework == PW_FRAMEWORK and any(s.get('type') == 'captcha' for s in steps):
+        add(pw_util('captcha.ts'), ROLE_LIBRARY,
+            '验证码识别工具；已存在会被覆盖', 'overwrite' if exists(pw_util('captcha.ts')) else 'create')
+
+    return out
+
+
+def _cmd_token(text):
+    """命令里的一个参数：带空格就加引号，其余原样。"""
+    text = str(text or '')
+    if not text:
+        return ''
+    return '"%s"' % text if any(ch in text for ch in ' \t') else text
+
+
+def _python_token(python, workspace):
+    """解释器路径：在工作区内就写相对路径（换机器也能用），否则退回 python。"""
+    try:
+        return Path(python).resolve().relative_to(Path(workspace).resolve()).as_posix()
+    except (ValueError, OSError):
+        name = Path(str(python or '')).name.lower()
+        return 'python' if name.startswith('python') else str(python)
+
+
+def plan_commands(workspace, target_path, framework):
+    """任务书里的验收命令：在目标项目根目录下怎么跑这一条用例。
+
+    不采信模型编的命令：解释器从项目里探测，路径就是这次要写的目标文件。
+    """
+    target = str(target_path or '').replace('\\', '/').strip()
+    if not target:
+        return []
+    if framework == RF_FRAMEWORK:
+        python, basis = (detect.find_python(workspace) if workspace else (None, ''))
+        token = _python_token(python, workspace) if python else 'python'
+        note = '在项目根目录执行'
+        if python and str(basis or '').startswith('workspace:'):
+            note += '；Python 用项目自带的 %s' % token
+        elif python:
+            note += '；没找到项目虚拟环境，用的是系统 python'
+        else:
+            note += '；没探测到 Python，请换成本项目自己的解释器'
+        return [
+            {'label': '跑这一条用例',
+             'command': '%s -m robot %s' % (_cmd_token(token), _cmd_token(target)),
+             'note': note},
+            {'label': '只检查语法（不启动浏览器）',
+             'command': '%s -m robot --dryrun %s' % (_cmd_token(token), _cmd_token(target)),
+             'note': 'dryrun 只查关键字和语法，不校验变量是否已定义'},
+        ]
+    if framework == PW_FRAMEWORK:
+        return [
+            {'label': '跑这一条用例',
+             'command': 'npx playwright test %s' % _cmd_token(target),
+             'note': '在项目根目录执行；需要先安装项目依赖'},
+            {'label': '确认用例能被收集到',
+             'command': 'npx playwright test --list %s' % _cmd_token(target),
+             'note': '只列用例、不执行'},
+        ]
+    return []
+
+
+def _normalize_plan(plan, target_path, workspace=None, framework=None, flow_steps=None,
+                    actions=None, teardown=None):
     """整理任务书里的写入路径：用户给了就锁死，没给就采用规划提名的那条。
 
     以前是「永远用请求里的路径」：用户随手填一个根目录的 spec，模型读了
@@ -919,6 +1278,26 @@ def _normalize_plan(plan, target_path, workspace=None, framework=None):
         steps.append(step)
     data['steps'] = steps
     data['reusable'] = [x for x in (data.get('reusable') or []) if isinstance(x, dict)][:50]
+
+    # 目标与边界：模型给的一句话目标和「本次不做」。空着就不显示，不硬凑。
+    summary = str(data.get('summary') or '').strip()[:300]
+    if summary:
+        data['summary'] = summary
+    else:
+        data.pop('summary', None)
+    data['not_doing'] = [str(x).strip()[:200] for x in (data.get('not_doing') or [])
+                         if str(x).strip()][:6]
+
+    # 改动清单与验收命令由平台算：路径规则和执行时同一套，不采信模型编的文件名。
+    try:
+        data['files'] = plan_files(workspace, data.get('target_path'), flow_steps, framework,
+                                   actions=actions, teardown=teardown)
+        data['commands'] = plan_commands(workspace, data.get('target_path'), framework)
+    except Exception:
+        # 清单算不出来不该阻断规划：任务书仍然可用，只是少一段。
+        logger.exception('规划：改动清单/验收命令计算失败')
+        data['files'] = []
+        data['commands'] = []
     return data
 
 
@@ -1083,7 +1462,8 @@ def plan(runner, workspace, model, steps, framework, target_path, title, python=
         raise EmitError('任务书解析失败：%s' % error, details=[(text or '')[:500]])
     if partial:
         logger.warning('规划在中止前已写出完整任务书（%d 字符），直接采用', len(text))
-    data = _normalize_plan(data, target_path, workspace=workspace, framework=framework)
+    data = _normalize_plan(data, target_path, workspace=workspace, framework=framework,
+                           flow_steps=steps, actions=actions)
     # 指纹由服务端算，不采信模型给的：写入时要拿它判断「录制有没有变过」。
     data['steps_sig'] = steps_signature(steps)
     if not data['steps']:
@@ -1240,6 +1620,30 @@ def _ensure_files_utils(root, target_path, steps, framework, notes=None):
     return (target.parent / 'utils' / 'files.ts').as_posix()
 
 
+def _has_row_match(steps):
+    return any((step.get('intent') or {}).get('type') == 'row_match' for step in (steps or []))
+
+
+def _ensure_table_utils(root, target_path, steps, framework, notes=None):
+    """把表格行断言的辅助库写进目标项目，返回相对路径；没有行断言就返回 None。
+
+    和 FilesLibrary 同一个位置与同一个理由：必须在 guard.snapshot 之前落盘，
+    写完才算「项目原有文件」，既不进 diff，也不会被越界检查当成乱写。
+    """
+    if not _has_row_match(steps):
+        return None
+    target = Path(target_path)
+    if framework == RF_FRAMEWORK:
+        rel = _shared_lib_rel(target_path, 'TableLibrary.py')
+        absolute = (Path(root) / target.parent / rel).resolve()
+        _note_platform_file(notes, rel, _write_shared_library(absolute, TABLE_PY))
+        return rel
+    folder = Path(root) / target.parent / 'utils'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'table.ts').write_text(TABLE_TS, encoding='utf-8')
+    return (target.parent / 'utils' / 'table.ts').as_posix()
+
+
 def _rel_from_case(rel_path, target_path):
     """工作区相对路径 → 从用例目录往后退的形式（拼在 ${CURDIR}/ 后面用）。
 
@@ -1285,13 +1689,37 @@ def _build_locator(root, target_path, steps, actions, framework, teardown=None, 
     if td_action.get('id'):
         all_actions[td_action['id']] = td_action
 
+    # 表格行断言的行定位也要进资源文件：它是「定位」，不是普通参数，散在脚本里
+    # 改一次要翻所有用例。没有对应步骤，作为 extras 交给 build 一起合并命名。
+    extras = []
+    for step in steps or []:
+        intent = step.get('intent') or {}
+        if intent.get('type') != 'row_match':
+            continue
+        table = intent.get('table') or {}
+        selector = (table.get('rows_selector') or '').strip()
+        if not selector:
+            continue
+        extras.append({
+            'key': str(step.get('no')),
+            'name': locator_vars.table_row_name(table.get('route')),
+            'locator': 'css=' + selector,
+            'route': table.get('route') or None,
+        })
+
     try:
-        built = locator_vars.build(steps, all_actions, target_path, root, locator_of)
+        built = locator_vars.build(steps, all_actions, target_path, root, locator_of,
+                                   extras=extras)
     except Exception:
         logger.exception('录制生成：定位变量抽取失败，本次退回内联定位')
         return None
     if not built.get('files'):
         return None
+
+    # 行断言的变量没有对应步骤，按 build 给回的 key 补进同一个映射：
+    # 下游（提示词）只认 vars[no]，不必再区分两种来源。
+    for no, var in (built.get('extra_vars') or {}).items():
+        built['vars'].setdefault(no, var)
 
     for item in built['files']:
         _note_platform_file(notes, item['path'], item['state'])
@@ -1320,6 +1748,9 @@ def _build_locator(root, target_path, steps, actions, framework, teardown=None, 
     return {
         'vars': built['vars'],
         'action_vars': built['action_vars'],
+        # 滑块/验证码的定位也进了资源文件：它们没有 target，变量单独回填。
+        'aux_vars': built.get('aux_vars') or {},
+        'action_aux_vars': built.get('action_aux_vars') or {},
         # lib 保留成「用例那份」：老调用点只认一个路径，别让它们拿到公共文件。
         'lib': libs[0] if libs else None,
         'libs': libs,
@@ -1476,7 +1907,7 @@ def _resource_libs_for_script(root, target_path, candidates, text):
 
 def _normalize_rf_script(root, target_path, steps, actions=None,
                          slider_lib=None, files_lib=None, teardown=None,
-                         locator_lib=None, locator_libs=None):
+                         locator_lib=None, locator_libs=None, table_lib=None):
     """把 agent 写的 .robot 改成「平台头 + 模型正文」，返回被替换掉的行。
 
     只保留 Test Cases / Keywords / Variables 三段，Settings 整段重写：
@@ -1564,6 +1995,9 @@ def _normalize_rf_script(root, target_path, steps, actions=None,
         out.append('Library    ${CURDIR}/%s    ${CURDIR}/downloads' % files_lib)
     if slider_lib:
         out.append('Library    ${CURDIR}/%s' % slider_lib)
+    if table_lib:
+        # 表格行断言：同一行多列同时成立。库和 FilesLibrary 一样放在 .autocase/libraries。
+        out.append('Library    ${CURDIR}/%s' % table_lib)
     # 资源文件放 Library 之后、Teardown 之前，和项目里人工维护的资源文件写法一致。
     # 清单里的无条件导（抽了变量就建了文件）；再按正文引用补漏掉的——
     # 用例那份在前，动作的公共文件在后。缺哪份都是跑起来才报变量找不到。
@@ -1732,8 +2166,10 @@ def _slider_rules(payload):
     head += '- 不要自己写截图、找缺口、算坐标、拼拖动轨迹的代码，也不要去找页面上的 canvas。\n'
     if payload.get('framework') == RF_FRAMEWORK:
         head += (
-            '- 直接写一行 `Solve Slider    <selector>`：selector 取该项 slider.selector 原值，'
-            'attempts / timeout 用 slider 字段里的值（没给就省略）。\n'
+            '- 直接写一行 `Solve Slider    <selector>`：selector 优先用该项的'
+            ' slider.selector_var（资源文件里的变量，原样照抄）；没有 selector_var 时才用'
+            ' slider.selector 原值。attempts / timeout 用 slider 字段里的值（没给就省略）。\n'
+            '- 不要把 selector_var 换成裸选择器：那个变量就是给「页面改版只改一处」用的。\n'
             '- 这个关键字来自平台库，`Library` 行由平台写在文件头里，你不要写 Settings。\n'
         )
     else:
@@ -1859,17 +2295,28 @@ def _prompt(payload, resumed=False):
             'locator_file.variables 里，优先用现成的变量；那里没有的才自己写定位。\n'
         )
     if any(step.get('type') == 'captcha' for step in payload.get('steps') or []):
-        head += (
-            '本次步骤里有**图形验证码识别**（steps 里 type 为 captcha 的项）。\n'
-            '- 不要自己写截图、放大、调模型、填输入框的代码，也不要去读验证码元素的 innerText。\n'
-            '- 直接调用平台注入的 `solveCaptcha(page, config)`，config 用该项的 captcha 字段原值\n'
-            '  （字段名是 camelCase：selector / inputSelector / charset / length / attempts）。\n'
-            '- 从平台生成的 `utils/captcha` 导入：`import { solveCaptcha } from \'./utils/captcha\';`'
-            '（工具文件由平台写在 target_path 同级的 utils/ 里，不要覆盖它）。\n'
-            '- 这个调用是异步的，必须 await；它内部已经做了刷新重试，失败会抛错，不要再包一层重试。\n'
-            '- 它只负责把码填进输入框，**不点提交**：点击登录/确定是后面独立的步骤，不要并进来。\n'
-            '- 不要给这一步写断言。码对不对由后面的提交结果决定，这里断言不了。\n'
-        )
+        if payload.get('framework') == RF_FRAMEWORK:
+            head += (
+                '本次步骤里有**图形验证码识别**（steps 里 type 为 captcha 的项）。\n'
+                '- 验证码图片和输入框的定位已经在资源文件里：用 captcha.selector_var /'
+                ' input_selector_var 这两个变量，不要再写裸选择器。\n'
+                '- Robot 没有平台验证码关键字：识别与填入请用项目里已有的封装；'
+                '项目里没有就按 SeleniumLibrary 写最小实现，并在注释里标 TODO 让人确认，'
+                '不要调用 solveCaptcha（那是 Playwright 的）。\n'
+                '- 它只负责把码填进输入框，**不点提交**：点击登录/确定是后面独立的步骤。\n'
+            )
+        else:
+            head += (
+                '本次步骤里有**图形验证码识别**（steps 里 type 为 captcha 的项）。\n'
+                '- 不要自己写截图、放大、调模型、填输入框的代码，也不要去读验证码元素的 innerText。\n'
+                '- 直接调用平台注入的 `solveCaptcha(page, config)`，config 用该项的 captcha 字段原值\n'
+                '  （字段名是 camelCase：selector / inputSelector / charset / length / attempts）。\n'
+                '- 从平台生成的 `utils/captcha` 导入：`import { solveCaptcha } from \'./utils/captcha\';`'
+                '（工具文件由平台写在 target_path 同级的 utils/ 里，不要覆盖它）。\n'
+                '- 这个调用是异步的，必须 await；它内部已经做了刷新重试，失败会抛错，不要再包一层重试。\n'
+                '- 它只负责把码填进输入框，**不点提交**：点击登录/确定是后面独立的步骤，不要并进来。\n'
+                '- 不要给这一步写断言。码对不对由后面的提交结果决定，这里断言不了。\n'
+            )
     if payload.get('teardown'):
         if payload.get('framework') == RF_FRAMEWORK:
             head += (
@@ -1954,7 +2401,8 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
         'target_path': target_path,
         'title': title,
         'steps': _steps_for_prompt(steps, framework, actions,
-                                   (locator or {}).get('vars')),
+                                   (locator or {}).get('vars'),
+                                   (locator or {}).get('aux_vars')),
         'evidence': detected.get('evidence', []),
         'samples': samples,
         # keywords 不再下发。176 条清单占 11,000 字符，而一次用例平均只用 6~8 个关键字；
@@ -1984,12 +2432,14 @@ def _payload(framework, steps, target_path, title, detected, keywords, plan=None
     if actions:
         # 只在真有过封装时才加这个键：没有动作时多一个空列表会让写手以为漏了什么。
         payload['actions'] = _actions_for_prompt(actions, framework, steps,
-                                                 (locator or {}).get('action_vars'))
+                                                 (locator or {}).get('action_vars'),
+                                                 (locator or {}).get('action_aux_vars'))
     if (locator or {}).get('file'):
         # 变量清单给出来是让它写断言时能复用现成的名字，而不是为了让它挑定位——
         # 定位已经在文件里，改动由平台统一管。
         payload['locator_file'] = locator['file']
-    shaped = _teardown_for_prompt(teardown, framework, (locator or {}).get('action_vars'))
+    shaped = _teardown_for_prompt(teardown, framework, (locator or {}).get('action_vars'),
+                                  (locator or {}).get('action_aux_vars'))
     if shaped:
         payload['teardown'] = shaped
     return payload
@@ -2101,6 +2551,8 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
     captcha_utils = _ensure_captcha_utils(root, target_path, all_steps, framework)
     files_utils = _ensure_files_utils(root, target_path, all_steps, framework,
                                       notes=platform_files)
+    table_utils = _ensure_table_utils(root, target_path, all_steps, framework,
+                                      notes=platform_files)
     # 定位抽成资源文件里的变量。只传顶层 steps：后置的子步骤走 teardown 里的动作，
     # 混进来的话会用用例目录前缀命名，和动作那条路径撞车。
     locator = None
@@ -2142,7 +2594,8 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         if framework == RF_FRAMEWORK:
             replaced = _normalize_rf_script(root, target_path, steps, actions,
                                             slider_utils, files_utils, teardown,
-                                            locator_libs=(locator or {}).get('libs'))
+                                            locator_libs=(locator or {}).get('libs'),
+                                            table_lib=table_utils)
             if replaced:
                 logger.info('录制生成：头部已由平台重写，替换 %s 行：%s',
                             len(replaced), ' / '.join(replaced[:4]))
@@ -2157,7 +2610,8 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
             if framework == RF_FRAMEWORK:
                 _normalize_rf_script(root, target_path, steps, actions,
                                      slider_utils, files_utils, teardown,
-                                     locator_libs=(locator or {}).get('libs'))
+                                     locator_libs=(locator or {}).get('libs'),
+                                     table_lib=table_utils)
             elif framework == PW_FRAMEWORK:
                 _normalize_pw_script(root, target_path)
 

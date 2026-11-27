@@ -20,7 +20,19 @@ DOWNLOAD_PARSERS = ('none', 'xlsx', 'csv')
 INTENT_TYPES = (
     'visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled',
     'url_contains', 'page_text_contains', 'wait_visible', 'wait_hidden', 'sleep',
+    # 表格行断言：同一行里多列同时成立。目标不是单个元素，条件也不止一条，
+    # 所以单独一个类型，**只由面板直接给**——自然语言解析看不到页面结构，
+    # 让它产出这个类型只会编出不存在的表头（见 MANUAL_INTENT_TYPES）。
+    'row_match',
 )
+
+# 行范围：任意一行成立 / 只认第一行（最新一条）/ 自定义（第 N 行或第 N~M 行，见 scope_rows）。
+# custom 单独一档是因为「表里就 3 行、我要认第 2 行」这种场景用 any 会误判，
+# 用 first 又对不上——固定写死一个窗口最直接。
+ROW_SCOPES = ('any', 'first', 'custom')
+# 单元格比较方式。面板只产 contains；含 * ? 的值按 glob 处理，
+# equals 留给以后，读老数据也要能认。
+CELL_MATCHES = ('contains', 'equals', 'glob')
 
 # 轮询等待：带「最长等待」的条件判断。
 # 和立即断言的区别只有一条：暂时不成立在预期内，到点还没成立才算失败。
@@ -37,8 +49,13 @@ READY_STATES = ('load', 'domcontentloaded', 'networkidle')
 # 30 秒又会让真正挂掉的用例白等。超时算失败，所以不能给太大。
 DEFAULT_READY_SECONDS = 15
 
+# 只能由面板构造、不让自然语言解析产出的类型。行断言要知道表头长什么样，
+# 模型只看一句中文描述，产出的表头名和列序号一定是编的。
+MANUAL_INTENT_TYPES = ('row_match',)
+
 # 给用户和模型看的类型集合：等待不再是独立类型，而是任意条件 + timeout。
-CONDITION_INTENT_TYPES = tuple(t for t in INTENT_TYPES if t not in POLL_INTENT_TYPES)
+CONDITION_INTENT_TYPES = tuple(
+    t for t in INTENT_TYPES if t not in POLL_INTENT_TYPES and t not in MANUAL_INTENT_TYPES)
 
 
 def step_type_for_intent(kind, intent=None):

@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 from app.services.recording import intent as intent_mod
 from app.services.recording import actions as actions_mod
 from app.services.recording import assets, files
-from app.services.recording import emit, ir, progress, verify, winwindows
+from app.services.recording import emit, ir, progress, table_probe, verify, winwindows
 from app.services.recording.ask_pool import STOP_DELAY_SECONDS as ASK_STOP_DELAY_SECONDS
 from app.services.recording.ask_pool import AskPool, disabled_snapshot
 from app.services.recording.locators import (PW_SEMANTIC_KINDS, RF_SEMANTIC_KINDS,
@@ -746,6 +746,14 @@ class RecordingSession(object):
     def verify_intent(self, intent):
         """在当前页面上判断一条断言此刻是否成立。"""
         return self._call('verify', intent=intent)
+
+    def describe_table(self, target):
+        """把「刚拾取的那一格」所在的表读出来：行定位、表头、每列在行内的位置。
+
+        只在浏览器还开着时可用。结果给面板选列用，落进断言后生成端不再碰页面——
+        页面结构到生成那一刻可能已经变了，但表头名和列序号留得住。
+        """
+        return self._call('describe_table', target=target)
 
     def highlight(self, no, index=None, framework='playwright-ts'):
         """把这一步会用的定位所匹配到的元素全部框出来，index 指向的那个实心高亮。
@@ -2227,6 +2235,8 @@ class RecordingSession(object):
                     result = self._goto_back_now()
                 elif name == 'verify':
                     result = self._verify_now(kwargs['intent'])
+                elif name == 'describe_table':
+                    result = self._describe_table_now(kwargs['target'])
                 elif name == 'reload':
                     result = self._add_reload(kwargs.get('after_no'))
                 elif name == 'slider':
@@ -4610,6 +4620,38 @@ class RecordingSession(object):
 
     # ---- 插入前验证（只在录制线程里跑，直接读当前页面）----
 
+    def _describe_table_now(self, alias):
+        """读「拾取的那一格」所在的表。
+
+        用录制时那一格自己的 css 去找 —— 它是 cssPath 生成的完整路径，在当前文档里
+        唯一；比按别名重算定位可靠（重算会挑语义候选，命中的可能是同一列的别的格）。
+        """
+        target, frame = self._find_target_with_frame(alias)
+        if target is None:
+            raise RecordingError('没有名为 %r 的元素' % alias)
+        page = self._page_of(frame) or self._current_page()
+        if page is None:
+            raise RecordingError('浏览器里没有可用的页面')
+        frame = frame if self._page_of(frame) is not None else self._text_frame(page)
+        snap = target.get('snap') or {}
+        info = table_probe.describe(frame, snap.get('css') or '')
+        info['alias'] = alias
+        info['page_index'] = self._page_index(page)
+        meta = target.get('page') or {}
+        info['route'] = meta.get('route') or ''
+        info['title'] = meta.get('title') or ''
+        return info
+
+    def _page_at(self, index):
+        """按录制时记下的页序号取页面；取不到就退回「用户此刻在看的那一页」。"""
+        try:
+            pages = self._context.pages
+            if isinstance(index, int) and 0 <= index < len(pages):
+                return pages[index]
+        except Exception:
+            pass
+        return self._current_page()
+
     def _verify_now(self, intent):
         """在当前页面上判断这条断言此刻是否成立。
 
@@ -4617,6 +4659,16 @@ class RecordingSession(object):
         断言插在点击之后时，当前页面可能还没走到那一步。
         """
         kind = intent.get('type')
+        # 行断言没有目标别名：它要的是「表格在哪」。表格信息里带着拾取时的别名，
+        # 用它回到原来的 frame；别名被删了才退回按页序号找。
+        if kind == 'row_match':
+            table = intent.get('table') or {}
+            _, frame = self._find_target_with_frame(table.get('alias'))
+            page = self._page_of(frame) or self._page_at(table.get('page_index'))
+            if page is None:
+                raise RecordingError('浏览器里没有可用的页面')
+            frame = frame if self._page_of(frame) is not None else self._text_frame(page)
+            return verify.check(frame, None, intent)
         target, frame = self._find_target_with_frame(intent.get('target'))
         page = self._page_of(frame) or self._current_page()
         if page is None:

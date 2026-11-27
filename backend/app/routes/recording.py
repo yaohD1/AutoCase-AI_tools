@@ -16,7 +16,7 @@ from app.services.opencode_runner import OpenCodeRunner
 from app.models import db
 from app.models.recording_generation import RecordingGeneration
 from app.services.recording import assets, debug, detect, drafts, emit, guard, records, replay, runner
-from app.services.recording import emit_session, intent, memory, progress, verify
+from app.services.recording import emit_session, intent, memory, progress, table_probe, verify
 from app.services.recording.ask_pool import AskUnavailable
 from app.services.recording.session import RecordingBusy, RecordingError, RecordingSession
 
@@ -372,6 +372,29 @@ def verify_recording_intent():
     except verify.VerifyError as exc:
         return _error(str(exc), 422)
     return jsonify(result), 200
+
+
+@recording_bp.route('/automation/recording/table/describe', methods=['POST'])
+def describe_recording_table():
+    """读出「刚拾取的那一格」所在的表：行定位、表头、每列在行内的位置。
+
+    只读当前页面。面板拿它渲染列下拉；结果会落进断言，生成时不再回来看页面。
+    """
+    session = RecordingSession.current()
+    if session is None:
+        return _error('没有录制', 404)
+    if not session.snapshot().get('browser_open'):
+        return _error('浏览器已关闭，无法读取表格', 409)
+    body = request.get_json(silent=True) or {}
+    target = (body.get('target') or '').strip()
+    if not target:
+        return _error('缺少目标元素', 400)
+    try:
+        return jsonify(session.describe_table(target)), 200
+    except RecordingError as exc:
+        return _error(str(exc), 409)
+    except table_probe.TableProbeError as exc:
+        return _error(str(exc), 422)
 
 
 @recording_bp.route('/automation/recording/steps/<int:no>', methods=['DELETE'])

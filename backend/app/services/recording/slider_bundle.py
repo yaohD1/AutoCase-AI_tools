@@ -98,6 +98,14 @@ def _plausible(box):
             and box['width'] > box['height'])
 
 
+def _css_selector(selector):
+    """资源文件里的变量是 `css=...`，By.CSS_SELECTOR 不认这个前缀。"""
+    text = str(selector or '').strip()
+    if text.lower().startswith('css='):
+        return text[4:].strip()
+    return text
+
+
 def _elements(driver, css):
     try:
         return driver.find_elements(By.CSS_SELECTOR, css)
@@ -452,14 +460,15 @@ class SliderLibrary(object):
     def solve_slider(self, selector=None, attempts=2, timeout=40):
         """在当前页面过滑块。通过则返回结果字典，不通过抛 AssertionError。
 
-        selector  录制的容器选择器，空则自动识别
+        selector  录制的容器选择器，空则自动识别。支持 SeleniumLibrary 的
+                  `css=...` 写法（资源文件里的变量统一带前缀），内部按 CSS 用。
         attempts  失败后最多重试几次（默认 2，即最多拖 3 次）
         timeout   单次等结果的秒数
         """
         driver = _driver()
         attempts = max(0, min(int(attempts or 2), 5))
         timeout = max(5, min(int(timeout or 40), 90))
-        selector = str(selector or '').strip()
+        selector = _css_selector(selector)
 
         started = time.perf_counter()
         scene = _locate(driver, selector)

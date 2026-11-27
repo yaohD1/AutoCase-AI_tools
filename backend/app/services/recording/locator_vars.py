@@ -143,6 +143,63 @@ def _collect(steps, prefix, locator_of, out, scope=None):
     return out
 
 
+# 滑块和验证码没有 target：定位直接挂在步骤的配置里。它们同样是「页面元素」，
+# 改版时一样要跟着变，所以必须进同一份资源文件，不能留在脚本正文里硬编码。
+AUX_SUFFIX = {'slider': '滑块', 'captcha': '验证码', 'captcha_input': '验证码输入框'}
+
+
+def _collect_aux(steps, prefix, out, scope=None):
+    """收滑块 / 验证码的定位。
+
+    captcha 有两个定位（图片本身、要填的输入框），分别存两个变量；
+    输入框没指定（留空表示自动找）时不建变量，脚本仍按自动找处理。
+    """
+    seen = set()
+    for step in steps or []:
+        items = []
+        slider = step.get('slider')
+        if slider is not None and str(slider.get('selector') or '').strip():
+            items.append(('slider', 'css=' + str(slider['selector']).strip()))
+        captcha = step.get('captcha')
+        if captcha is not None:
+            if str(captcha.get('selector') or '').strip():
+                items.append(('captcha', 'css=' + str(captcha['selector']).strip()))
+            if str(captcha.get('input_selector') or '').strip():
+                items.append(('captcha_input', 'css=' + str(captcha['input_selector']).strip()))
+        for aux, locator in items:
+            key = (scope, step.get('no'), aux, locator)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                'no': step.get('no'),
+                'scope': scope,
+                'aux': aux,
+                'name': prefix + AUX_SUFFIX[aux],
+                'locator': locator,
+                # 滑块/验证码是手动步骤，没有 target.page，分组注释只能落到「未标记页面」。
+                'route': None,
+            })
+    return out
+
+
+def table_row_name(route):
+    """表格行定位的变量名后半段：路由末段 + 表格行。
+
+    用路由而不是拾取到的那一格文字：那一格常常是「成功」「CPE」这类值，做成变量名
+    既看不懂又会随数据变。末段取不到（根路由 / 只有 :id）就叫「表格行」，由目录前缀兜住。
+    """
+    leaf = ''
+    # 先切掉查询串与 hash：`?id=3` 会被当成最后一段，名字里就多出个 id3。
+    path = str(route or '').split('?')[0].split('#')[0]
+    for part in path.split('/'):
+        part = part.strip()
+        if part and not part.startswith(':'):
+            leaf = part
+    base = _clean(leaf)
+    return (base + '表格行') if base else '表格行'
+
+
 def parse(text):
     """读已有资源文件里的变量，返回 {归一化名: {name, locator, route}}（保序）。"""
     found = {}
@@ -294,23 +351,68 @@ def _fill(merged, entries, scope):
     for entry in entries:
         if entry.get('scope') != scope:
             continue
+        # 滑块/验证码一个步骤可能有两个定位，塞不进「一步一个变量」的映射，
+        # 由 _fill_aux 单独回填。
+        if entry.get('aux'):
+            continue
+        # 表格行这类定位不属于任何一步（no=None），只参与落盘，不回填步骤。
+        if entry.get('no') is None:
+            continue
         name = known.get(normalize_name(entry.get('name')))
         if name:
             out[str(entry['no'])] = '${%s}' % name
     return out
 
 
-def build(steps, actions, target_path, root, locator_of, page_names=None):
+def _fill_aux(merged, entries):
+    """滑块/验证码的变量回填：{no: {'slider': '${..}', 'captcha': '${..}'}}。
+
+    验证码图和输入框同属一步，所以这里比 _fill 多一层 aux 键。
+    """
+    known = {normalize_name(item['name']): item['name'] for item in merged.values()}
+    out = {}
+    for entry in entries:
+        aux = entry.get('aux')
+        if not aux or entry.get('no') is None:
+            continue
+        name = known.get(normalize_name(entry.get('name')))
+        if not name:
+            continue
+        out.setdefault(str(entry['no']), {})[aux] = '${%s}' % name
+    return out
+
+
+def build(steps, actions, target_path, root, locator_of, page_names=None, extras=None):
     """生成资源文件并返回「步骤 → 变量名」映射。
 
     locator_of(target) 由调用方给：定位跟框架有关，这里只负责命名和落盘。
+    extras 是不属于任何一步、但要进资源文件的定位（目前是表格行），
+    每项 {key, name, locator, route}；返回的 extra_vars 按 key 给出最终变量名。
+
     返回 {'files': [{path, state, count}], 'vars': {no: '${...}'},
-          'action_vars': {action_id: {no: '${...}'}}}
+          'action_vars': {action_id: {no: '${...}'}},
+          'aux_vars': {no: {'slider'|'captcha'|'captcha_input': '${...}'}},
+          'action_aux_vars': {action_id: {no: {...}}},
+          'extra_vars': {key: '${...}'}}
     """
     leaf = Path(target_path).parent.name or Path(target_path).stem
     prefix = _clean(leaf) or '页面'
 
     entries = _collect(steps, prefix, locator_of, [])
+    aux_entries = _collect_aux(steps, prefix, [])
+    extra_entries = []
+    for item in (extras or []):
+        if not item.get('locator'):
+            continue
+        extra_entries.append({
+            'no': None,
+            'scope': None,
+            'name': prefix + (item.get('name') or '表格行'),
+            'locator': item['locator'],
+            'route': item.get('route') or None,
+            '_key': item.get('key'),
+        })
+    entries = entries + extra_entries + aux_entries
     action_entries = []
     for action_id, action in (actions or {}).items():
         sub = (action or {}).get('steps') or []
@@ -318,10 +420,14 @@ def build(steps, actions, target_path, root, locator_of, page_names=None):
             continue
         act_prefix = _clean((action or {}).get('name') or '')
         _collect(sub, act_prefix, locator_of, action_entries, scope=action_id)
+        _collect_aux(sub, act_prefix, action_entries, scope=action_id)
 
     files = []
     step_vars = {}
     action_vars = {}
+    extra_vars = {}
+    aux_vars = {}
+    action_aux_vars = {}
 
     if entries:
         rel = file_rel(target_path)
@@ -333,6 +439,11 @@ def build(steps, actions, target_path, root, locator_of, page_names=None):
         # 回填按「来源 + 定位」找：同一个元素点两次只会留下一条变量，
         # 按 no 回填的话第二处就丢了（两个步骤共用一个变量才是对的）。
         step_vars.update(_fill(merged, entries, None))
+        aux_vars = _fill_aux(merged, aux_entries)
+        # merge 会把撞名后的最终名字写回 raw，这里直接取。
+        for item in extra_entries:
+            if item.get('_key'):
+                extra_vars[str(item['_key'])] = '${%s}' % item['name']
 
     if action_entries:
         rel = common_rel()
@@ -344,6 +455,11 @@ def build(steps, actions, target_path, root, locator_of, page_names=None):
         files.append({'path': rel.replace('\\', '/'), 'state': state, 'count': len(merged)})
         for action_id in {item.get('scope') for item in action_entries}:
             action_vars[action_id] = _fill(merged, action_entries, action_id)
+            action_aux_vars[action_id] = _fill_aux(
+                merged, [item for item in action_entries if item.get('scope') == action_id])
 
     return {'files': files, 'vars': step_vars,
-            'action_vars': {k: v for k, v in action_vars.items() if v}}
+            'action_vars': {k: v for k, v in action_vars.items() if v},
+            'aux_vars': aux_vars,
+            'action_aux_vars': {k: v for k, v in action_aux_vars.items() if v},
+            'extra_vars': extra_vars}

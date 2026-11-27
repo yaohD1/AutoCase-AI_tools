@@ -6,8 +6,9 @@
 import json
 import re
 
-from app.services.recording.ir import (CONDITION_INTENT_TYPES, DEFAULT_READY_SECONDS, INTENT_TYPES,
-                                       PAGE_READY, POLL_INTENT_TYPES, READY_STATES)
+from app.services.recording.ir import (CELL_MATCHES, CONDITION_INTENT_TYPES, DEFAULT_READY_SECONDS,
+                                       INTENT_TYPES, PAGE_READY, POLL_INTENT_TYPES, READY_STATES,
+                                       ROW_SCOPES)
 
 # 需要目标元素的意图。url_contains / page_text_contains 不需要目标。sleep 只需要秒数。
 NEEDS_TARGET = {'visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled',
@@ -90,6 +91,110 @@ def _extract_json(raw):
         raise IntentError('模型返回的 JSON 无法解析：%s' % exc)
 
 
+MAX_COLUMNS = 8
+MAX_SELECTOR = 600
+MAX_CELL_VALUE = 200
+# 自定义行号上限：一页几百行已经超出正常用法，再大基本是把总行数填进来了。
+MAX_SCOPE_ROW = 2000
+
+
+def scope_rows(raw):
+    """把「第几行」规范成 '2' 或 '2-5'；认不出来返回空串。
+
+    只认数字（允许「第」「行」和 ~ ～ - 至 这类连接词）。「倒数第二行」「最后一行」
+    不解析——那不是行号，猜错了会静默断到别的行上，不如让用户自己数清楚。
+    """
+    text = re.sub(r'\s+', '', str(raw or ''))
+    text = text.replace('～', '-').replace('~', '-').replace('—', '-').replace('－', '-')
+    text = text.replace('至', '-').replace('到', '-')
+    text = text.replace('第', '').replace('行', '')
+    m = re.match(r'^(\d{1,4})(?:-(\d{1,4}))?$', text)
+    if not m:
+        return ''
+    start = int(m.group(1))
+    end = int(m.group(2)) if m.group(2) else start
+    if start < 1 or end < start or end > MAX_SCOPE_ROW:
+        return ''
+    return str(start) if start == end else '%d-%d' % (start, end)
+
+
+def _row_match_fields(obj):
+    """校验「表格行断言」的表格与列条件。
+
+    条件是「同一行里这些列同时成立」，所以每一列都必须有位置。位置存两份：
+    表头文字（运行时优先按它找列）和录制时的列序号（表头找不到时兜底）。
+    """
+    table = obj.get('table')
+    if not isinstance(table, dict):
+        raise IntentError('表格行断言需要表格信息，请先拾取表格里的单元格')
+    rows = str(table.get('rows_selector') or '').strip()
+    if not rows:
+        raise IntentError('缺少表格行定位，请重新拾取表格')
+    if len(rows) > MAX_SELECTOR:
+        raise IntentError('表格行定位过长，请重新拾取表格')
+    try:
+        page_index = int(table.get('page_index') or 0)
+    except (TypeError, ValueError):
+        page_index = 0
+    headers = table.get('headers') or []
+    if not isinstance(headers, list):
+        headers = []
+    table_out = {
+        'rows_selector': rows,
+        'header_selector': str(table.get('header_selector') or '').strip()[:MAX_SELECTOR],
+        'headers': [str(h).strip()[:60] for h in headers if str(h).strip()][:40],
+        # alias 用来在「验证当前页面」时回到录制那一刻的 frame；表格在 iframe 里时
+        # 没有它就只能拿当前页猜，会读错文档。
+        'alias': str(table.get('alias') or '')[:80],
+        'route': str(table.get('route') or '')[:200],
+        'page_index': page_index,
+    }
+
+    raw_columns = obj.get('columns')
+    if not isinstance(raw_columns, list) or not raw_columns:
+        raise IntentError('至少填一列条件')
+    if len(raw_columns) > MAX_COLUMNS:
+        raise IntentError('一条断言最多 %d 列条件' % MAX_COLUMNS)
+    columns = []
+    for raw in raw_columns:
+        if not isinstance(raw, dict):
+            raise IntentError('列条件格式不对')
+        value = str(raw.get('value') or '').strip()
+        if not value:
+            raise IntentError('每列都要填期望值')
+        if len(value) > MAX_CELL_VALUE:
+            raise IntentError('期望值太长（最多 %d 字）' % MAX_CELL_VALUE)
+        try:
+            index = int(raw.get('index'))
+        except (TypeError, ValueError):
+            index = -1
+        if index < 0:
+            raise IntentError('列条件缺少列位置，请重新拾取表格')
+        # 面板只产 contains；值里带 * / ? 就是通配。存下来是为了生成端和回放端
+        # 不必各自再猜一遍（也方便以后加 equals）。
+        op = raw.get('op')
+        if op not in CELL_MATCHES:
+            op = 'glob' if ('*' in value or '?' in value) else 'contains'
+        columns.append({
+            'header': str(raw.get('header') or '').strip()[:60],
+            'index': index,
+            'value': value,
+            'op': op,
+        })
+
+    scope = obj.get('scope') or 'any'
+    if scope not in ROW_SCOPES:
+        raise IntentError('行范围只能是 %s' % ' / '.join(ROW_SCOPES))
+    spec = ''
+    if scope == 'custom':
+        spec = scope_rows(obj.get('scope_rows') or obj.get('scopeRows'))
+        if not spec:
+            raise IntentError('自定义行范围请填「第几行」，例如 2 或 2-5（最多 %d 行）'
+                              % MAX_SCOPE_ROW)
+    return {'table': table_out, 'columns': columns, 'scope': scope,
+            'scope_rows': spec or None}
+
+
 def validate(obj, aliases):
     """校验意图对象，返回规范化后的意图。字段不合法时抛 IntentError。"""
     if not isinstance(obj, dict):
@@ -99,7 +204,14 @@ def validate(obj, aliases):
         raise IntentError('未知的意图类型：%r' % kind)
 
     intent = {'type': kind, 'target': None, 'value': None, 'seconds': None,
-              'timeout': None, 'interval': None, 'reload': False}
+              'timeout': None, 'interval': None, 'reload': False,
+              # 只有 row_match 会用；其余类型保持 null，前端按类型判断，不需要额外分支。
+              'table': None, 'columns': None, 'scope': None, 'scope_rows': None}
+
+    if kind == 'row_match':
+        intent.update(_row_match_fields(obj))
+        intent.update(_poll_fields(obj))
+        return intent
 
     if kind in NEEDS_TARGET:
         target = obj.get('target')

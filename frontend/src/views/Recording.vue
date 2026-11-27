@@ -1611,6 +1611,102 @@
             />
           </div>
 
+          <!-- 表格行断言：同一行里多列同时成立。拾取只是「认表」——点表格里任意一格，
+               后端把表头读回来；条件按表头选列，生成后运行时也按表头找列，
+               页面加一列 / 调一下顺序都还对得上。 -->
+          <div v-if="draft.kind === 'assert' && draft.intentType === 'row_match'" class="row-assert">
+            <div class="slider-field">
+              <span class="poll-label">表格</span>
+              <el-input
+                :model-value="draft.tableTarget || ''"
+                readonly
+                placeholder="点「拾取」，再点表格里任意一格"
+              />
+              <el-button
+                size="small"
+                :type="draft.picking && draft.pickField === 'table' ? 'warning' : 'default'"
+                :disabled="!canInspect"
+                :title="canInspect ? '在页面里点表格中的任意一格，用来认出这张表' : '浏览器已关闭，无法拾取'"
+                @click="pickForDraft('table')"
+              >
+                {{ draft.picking && draft.pickField === 'table' ? '请点击…' : '拾取' }}
+              </el-button>
+            </div>
+            <div v-if="draft.tableLoading" class="field-hint">正在读取表头…</div>
+            <div v-else-if="draft.tableError" class="row-assert-error">{{ draft.tableError }}</div>
+            <template v-else-if="draft.table">
+              <div class="field-hint">
+                {{ draft.table.row_count }} 行 · 表头：{{ tableHeaderNames }}
+                <template v-if="!draft.table.has_header">（这张表没有表头，条件按列序号匹配）</template>
+              </div>
+              <div class="poll-row">
+                <span class="poll-label">行范围</span>
+                <el-radio-group v-model="draft.rowScope" size="small">
+                  <el-radio-button
+                    v-for="item in ROW_SCOPES"
+                    :key="item.value"
+                    :label="item.value"
+                  >
+                    {{ item.label }}
+                  </el-radio-button>
+                </el-radio-group>
+                <!-- 自定义行号窗口：写 2 就只认第 2 行，写 2-5 就是第 2~5 行。
+                     行号按表格里看到的数（从 1 开始），排序/筛选一变就对不上了。 -->
+                <el-input
+                  v-if="draft.rowScope === 'custom'"
+                  v-model="draft.rowScopeRows"
+                  size="small"
+                  class="row-scope-input"
+                  placeholder="如 2 或 2-5"
+                  maxlength="12"
+                  title="表格里的第几行（从 1 数）；2-5 表示第 2 到第 5 行"
+                />
+              </div>
+              <div v-for="(col, index) in draft.columns" :key="col.key" class="row-cond">
+                <el-select
+                  v-model="col.header"
+                  size="small"
+                  class="row-cond-col"
+                  @change="syncRowColumnIndex(col)"
+                >
+                  <el-option
+                    v-for="h in draft.table.headers"
+                    :key="h.name + h.index"
+                    :label="h.name"
+                    :value="h.name"
+                  />
+                </el-select>
+                <el-input
+                  v-model="col.value"
+                  size="small"
+                  placeholder="期望值，可用 * 通配"
+                  maxlength="200"
+                />
+                <el-button
+                  text
+                  :icon="Delete"
+                  :disabled="draft.columns.length <= 1"
+                  title="删掉这一列条件"
+                  @click="removeRowColumn(index)"
+                />
+              </div>
+              <el-button
+                size="small"
+                :icon="Plus"
+                :disabled="rowColumnsFull"
+                :title="rowColumnsFull ? '这张表的每一列都已经有条件了' : ''"
+                @click="addRowColumn"
+              >加一列条件</el-button>
+              <div class="field-hint">
+                同一行里这些条件要同时成立。值默认按「包含」比，写 <code>*</code> 或 <code>?</code> 按通配——
+                文件名带时间戳时用 <code>RF4039_REF_*</code>。
+              </div>
+            </template>
+            <div v-else class="field-hint">
+              还不知道是哪张表：先点右侧「拾取」，在页面里点表格中的任意一格。
+            </div>
+          </div>
+
           <!-- 高级：把「等待」收进断言。断言与等待本来就只差「容不容忍此刻还没成立」，
                所以不再单开一个按钮，默认不勾就是立即判定，勾上才变成轮询。 -->
           <div
@@ -2115,6 +2211,40 @@
                   录制步骤已经变了，这份任务书对不上。请重新规划后再执行。
                 </div>
 
+                <section v-if="planSummary || planNotDoing.length" id="plan-goal" class="plan-sec" data-plan-anchor="goal">
+                  <h3 class="plan-h"><span class="plan-h-no">{{ planSecNo('goal') }}</span>目标与边界</h3>
+                  <p v-if="planSummary" class="plan-goal">{{ planSummary }}</p>
+                  <div v-if="planNotDoing.length" class="plan-notdoing">
+                    <span class="plan-notdoing-title">本次不做</span>
+                    <ul class="plan-notdoing-list">
+                      <li v-for="(item, idx) in planNotDoing" :key="idx">{{ item }}</li>
+                    </ul>
+                  </div>
+                </section>
+
+                <section v-if="planFiles.length" id="plan-files" class="plan-sec" data-plan-anchor="files">
+                  <h3 class="plan-h">
+                    <span class="plan-h-no">{{ planSecNo('files') }}</span>改动清单
+                    <span class="plan-h-hint">{{ planFiles.length }} 个文件</span>
+                  </h3>
+                  <ul class="plan-filelist">
+                    <li v-for="file in planFiles" :key="file.path" class="plan-file">
+                      <span :class="['plan-file-state', 'is-' + file.state]">{{ planFileStateLabel(file.state) }}</span>
+                      <div class="plan-file-body">
+                        <code class="plan-file-path">{{ file.path }}</code>
+                        <span class="plan-file-why">{{ file.why }}</span>
+                      </div>
+                      <span v-if="file.actual" :class="['plan-file-actual', 'is-' + file.actual]">
+                        {{ planActualLabel(file.actual) }}
+                      </span>
+                    </li>
+                  </ul>
+                  <p v-if="!planFilesApplied" class="plan-file-hint">
+                    路径按当前写入位置推导；
+                    {{ planFilesPathMoved ? '写入位置改过了，执行时会按新路径重算。' : '执行后这里会回填实际结果。' }}
+                  </p>
+                </section>
+
                 <section id="plan-style" class="plan-sec" data-plan-anchor="style">
                   <h3 class="plan-h"><span class="plan-h-no">{{ planSecNo('style') }}</span>项目风格</h3>
                   <dl class="plan-fields">
@@ -2169,6 +2299,24 @@
                       >{{ notesOfStep(step.no) }}</button>
                     </li>
                   </ol>
+                </section>
+
+                <section v-if="planCommands.length" id="plan-commands" class="plan-sec" data-plan-anchor="commands">
+                  <h3 class="plan-h">
+                    <span class="plan-h-no">{{ planSecNo('commands') }}</span>验收
+                    <span class="plan-h-hint">在项目根目录执行</span>
+                  </h3>
+                  <div v-for="(cmd, idx) in planCommands" :key="idx" class="plan-cmd">
+                    <div class="plan-cmd-head">
+                      <span class="plan-cmd-label">{{ cmd.label }}</span>
+                      <button type="button" class="plan-cmd-copy" @click="copyPlanCommand(cmd.command)">复制</button>
+                    </div>
+                    <code class="plan-cmd-text">{{ cmd.command }}</code>
+                    <div v-if="cmd.note" class="plan-cmd-note">{{ cmd.note }}</div>
+                  </div>
+                  <p class="plan-file-hint">
+                    命令里的解释器取自目标项目；生成后平台也会自动跑一次，没跑过或没通过时文件会保留。
+                  </p>
                 </section>
 
                 <section v-if="planRisks.length" id="plan-risks" class="plan-sec" data-plan-anchor="risks">
@@ -2600,7 +2748,14 @@ const FRAMEWORKS = [
   { value: 'robot-selenium', label: 'Robot Framework（SeleniumLibrary）', short: 'Robot Framework' },
   { value: 'playwright-ts', label: 'Playwright TypeScript', short: 'Playwright TS' }
 ]
-const ASSERT_TYPES = ['visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled', 'url_contains', 'page_text_contains']
+const ASSERT_TYPES = ['visible', 'hidden', 'text_contains', 'text_equals', 'value_equals', 'enabled', 'url_contains', 'page_text_contains', 'row_match']
+// 行范围：任意一行（默认，抗插队/分页）、只认首行（最新一条）、自定义第几行。
+// custom 用在「表里就固定这几条、我认第 2 行」的场景：any 会放宽到全表，first 又对不上。
+const ROW_SCOPES = [
+  { value: 'any', label: '任意一行' },
+  { value: 'first', label: '首行' },
+  { value: 'custom', label: '自定义' }
+]
 // 合并前的老类型 wait_visible / wait_hidden 只会从历史数据里读到，不再出现在下拉里，
 // 落到表单时由 LEGACY_WAIT 拆成 visible / hidden + 「允许等待」。
 const SLEEP_TYPES = ['sleep']
@@ -2614,7 +2769,7 @@ const INTENT_LABELS = {
   visible: '元素可见', hidden: '元素隐藏', text_contains: '文字包含', text_equals: '文字等于',
   value_equals: '值等于', enabled: '元素可用', url_contains: '地址包含',
   page_text_contains: '页面包含文字', wait_visible: '等待出现', wait_hidden: '等待消失', sleep: '固定等待',
-  page_ready: '等待加载'
+  page_ready: '等待加载', row_match: '表格行包含'
 }
 // 「等待加载」的三档，与后端 ir.READY_STATES 一一对应。默认 load：
 // 用户说的「页面加载完」就是 window.onload，图片样式脚本都就绪那一档。
@@ -2852,6 +3007,9 @@ const closingBrowser = ref(false)
 const addingReload = ref(false)
 const addingClose = ref(false)
 const draft = ref(null)
+// 表格行断言里每条列条件的稳定 key：用自增值，避免用户在表头下拉里换列时
+// v-for 按 name 复用 DOM、输入框里的值跟着串到另一行。
+let rowColumnSeq = 0
 // 导入文件用的原生 file input：只负责唤起系统选文件，选完立刻把字节传给后端。
 const uploadInput = ref(null)
 // 刚插入的那一步短暂高亮，用来「指认」插入结果
@@ -2897,9 +3055,15 @@ const planWriteMode = computed(() => {
 })
 // 章节是动态的：没有复用 / 没有风险时不占编号，目录和正文用的是同一份。
 const planSections = computed(() => {
-  const list = [{ id: 'style', title: '项目风格', count: null }]
+  const list = []
+  if (planSummary.value || planNotDoing.value.length) {
+    list.push({ id: 'goal', title: '目标与边界', count: null })
+  }
+  if (planFiles.value.length) list.push({ id: 'files', title: '改动清单', count: planFiles.value.length })
+  list.push({ id: 'style', title: '项目风格', count: null })
   if (planReusable.value.length) list.push({ id: 'reuse', title: '可复用的封装', count: planReusable.value.length })
   list.push({ id: 'steps', title: '逐步做法', count: planSteps.value.length })
+  if (planCommands.value.length) list.push({ id: 'commands', title: '验收', count: planCommands.value.length })
   if (planRisks.value.length) list.push({ id: 'risks', title: '风险', count: planRisks.value.length, tone: 'warn' })
   if (planNeeds.value.length) list.push({ id: 'needs', title: '待补文件', count: planNeeds.value.length })
   list.push({ id: 'notes', title: '你的意见', count: planNotes.value.length })
@@ -2952,8 +3116,9 @@ function anchorLabelOf(anchorId) {
   if (!anchorId) return ''
   if (anchorId.indexOf('step-') === 0) return '第 ' + anchorId.slice(5) + ' 步'
   const map = {
+    goal: '目标与边界', files: '改动清单',
     style: '项目风格', reuse: '可复用的封装', steps: '逐步做法',
-    risks: '风险', needs: '待补文件', notes: '你的意见'
+    commands: '验收', risks: '风险', needs: '待补文件', notes: '你的意见'
   }
   return map[anchorId] || ''
 }
@@ -3504,6 +3669,63 @@ const planSteps = computed(() => planData.value?.steps || [])
 const planReusable = computed(() => planData.value?.reusable || [])
 const planRisks = computed(() => planData.value?.risks || [])
 const planNeeds = computed(() => planData.value?.needs || [])
+// 目标与边界：模型给的一句话 + 本次不做。没给就退回配置里的标题，别空着。
+const planSummary = computed(() => String(planData.value?.summary || '').trim()
+  || String(config.title || '').trim())
+const planNotDoing = computed(() => planData.value?.not_doing || [])
+const planCommands = computed(() => planData.value?.commands || [])
+
+// 改动清单：路径由平台按目标文件推导，主文件跟随底部编辑实时变。
+// 生成完成后按路径回填实际状态——只认「同一份任务书 + 同一个写入路径」的结果，
+// 重新规划后旧结果还在，不能张冠李戴。
+const PLAN_FILE_STATE = { create: '新建', overwrite: '覆盖', update: '按需更新' }
+const PLAN_ACTUAL_LABEL = {
+  created: '已创建', updated: '已更新', reused: '内容未变，复用',
+  written: '已写入', unchanged: '内容无变化', missing: '未写入'
+}
+const planResultSame = computed(() => {
+  const res = shownResult.value
+  const plan = planData.value
+  if (!res || !plan || !res.plan) return false
+  return res.plan.steps_sig === plan.steps_sig && res.path === planTarget.value
+})
+const planFiles = computed(() => {
+  const res = shownResult.value
+  const same = planResultSame.value
+  const platformStates = !same || res?.framework !== 'robot-selenium'
+  return (planData.value?.files || []).map((item) => {
+    const path = item.role === 'target' && planTarget.value ? planTarget.value : item.path
+    let actual = ''
+    if (same) {
+      if (item.role === 'target') {
+        actual = res.path ? (res.changed ? 'written' : 'unchanged') : 'missing'
+      } else if (!platformStates) {
+        // platform_files 只有 RF 会记：PW 的 utils 是直接覆盖写，没有状态可回填。
+        const hit = (res.platform_files || []).find((f) => f.path === item.path)
+        actual = hit ? hit.state : 'missing'
+      }
+    }
+    return { ...item, path, actual }
+  })
+})
+const planFilesApplied = computed(() => planFiles.value.some((f) => f.actual))
+// 清单只把主文件跟着新路径走，平台文件的目录仍是按原路径算的：改过路径就要说清。
+const planFilesPathMoved = computed(() => !!planTarget.value
+  && planTarget.value !== (planData.value?.target_path || ''))
+function planFileStateLabel(state) {
+  return PLAN_FILE_STATE[state] || state
+}
+function planActualLabel(state) {
+  return PLAN_ACTUAL_LABEL[state] || state
+}
+async function copyPlanCommand(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('命令已复制')
+  } catch {
+    ElMessage.warning('复制失败，请手动选中命令')
+  }
+}
 // 最终写哪个文件：任务书里的 target_path 才是唯一事实，配置只是「要不要锁死它」。
 // 用户在卡片上改路径时改的是这里，不是全局配置——改配置会影响下一次录制。
 const planTargetOverride = ref('')
@@ -3637,6 +3859,10 @@ function applySession(data) {
         draft.value.captchaSelector = selector
         draft.value.captchaPicked = '验证码：' + alias
       }
+    } else if (draft.value.intentType === 'row_match' && draft.value.pickField === 'table') {
+      // 行断言里这一格只是「认表」的锚点，不是断言目标：只拿它的别名回去读表头。
+      draft.value.tableTarget = latest.target.alias
+      loadTable(latest.target.alias)
     } else {
       draft.value.target = latest.target.alias
     }
@@ -5368,7 +5594,13 @@ function initActionSorter() {
     filter: '.is-tied',
     ghostClass: 'action-step-ghost',
     chosenClass: 'action-step-chosen',
-    onEnd: onDraftActionEnd
+    ...dragFallbackOptions,
+    fallbackClass: 'action-step-fallback',
+    onStart: () => startDragScroll(actionListEl.value),
+    onEnd: (evt) => {
+      stopDragScroll()
+      onDraftActionEnd(evt)
+    }
   })
 }
 
@@ -5607,6 +5839,83 @@ async function saveEdit() {
 const timelineEl = ref(null)
 let sortable = null
 
+// ---- 拖拽期间的自定义边缘滚动 ----
+// 不用 Sortable 内置 autoscroll 的原因（实测）：指针一离开滚动容器就彻底停滚——
+// 把末尾步骤往上拖时越过卡片顶边是常态；敏感带固定 30px、速度 10px/帧，长列表太慢。
+// 列表统一走 forceFallback（Sortable 自模拟拖拽，不进原生拖放会话）后，浏览器不再
+// 屏蔽滚轮，滚动全部交给这里的 rAF 循环：容器内边缘 70px 渐速，越出容器仍按方向滚；
+// 插入预览由 Sortable 每 50ms 的 elementFromPoint 轮询自动跟上，无需额外同步。
+const dragScrollState = { raf: 0, container: null, x: -1, y: -1 }
+const DRAG_SCROLL_BAND = 70
+
+function findScrollContainer(fromEl) {
+  for (let el = fromEl && fromEl.parentElement; el; el = el.parentElement) {
+    const style = getComputedStyle(el)
+    if ((style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+        el.scrollHeight > el.clientHeight + 1) return el
+  }
+  return null
+}
+
+// dist：指针超出敏感带内边界的距离（0~70）。起步慢一点，越贴近边缘越快。
+function dragScrollSpeed(dist) {
+  return Math.min(30, 6 + dist * 0.28)
+}
+
+function dragScrollTick() {
+  const c = dragScrollState.container
+  if (!c) {
+    dragScrollState.raf = 0
+    return
+  }
+  if (dragScrollState.x >= 0) {
+    const rect = c.getBoundingClientRect()
+    let delta = 0
+    if (dragScrollState.y < rect.top + DRAG_SCROLL_BAND) {
+      delta = -dragScrollSpeed(rect.top + DRAG_SCROLL_BAND - dragScrollState.y)
+    } else if (dragScrollState.y > rect.bottom - DRAG_SCROLL_BAND) {
+      delta = dragScrollSpeed(dragScrollState.y - (rect.bottom - DRAG_SCROLL_BAND))
+    }
+    // 指针在容器横向范围外（比如拖到了左侧配置卡上）不滚，避免误触发。
+    if (dragScrollState.x < rect.left - 48 || dragScrollState.x > rect.right + 48) delta = 0
+    if (delta) {
+      const max = c.scrollHeight - c.clientHeight
+      c.scrollTop = Math.max(0, Math.min(max, c.scrollTop + delta))
+    }
+  }
+  dragScrollState.raf = requestAnimationFrame(dragScrollTick)
+}
+
+function onDragPointerMove(event) {
+  dragScrollState.x = event.clientX
+  dragScrollState.y = event.clientY
+}
+
+function startDragScroll(rootEl) {
+  stopDragScroll()
+  dragScrollState.container = findScrollContainer(rootEl)
+  dragScrollState.x = dragScrollState.y = -1
+  document.addEventListener('mousemove', onDragPointerMove, true)
+  if (dragScrollState.container) dragScrollTick()
+}
+
+function stopDragScroll() {
+  dragScrollState.container = null
+  document.removeEventListener('mousemove', onDragPointerMove, true)
+  if (dragScrollState.raf) {
+    cancelAnimationFrame(dragScrollState.raf)
+    dragScrollState.raf = 0
+  }
+}
+
+// forceFallback 下两份拖拽配置是共用的：跟手克隆挂在 body 上（否则会被容器裁掉），
+// 内置 autoscroll 关掉（scroll:false），滚动统一交给上面的边缘滚动器。
+const dragFallbackOptions = {
+  forceFallback: true,
+  fallbackOnBody: true,
+  scroll: false
+}
+
 function initSortable(force = false) {
   if (!timelineEl.value) return
   // `.timeline` 是 v-if 渲染的，元素变化时重建实例；进/出动作编辑态也要重建，
@@ -5630,8 +5939,15 @@ function initSortable(force = false) {
     filter: actionEdit.open ? '.is-tied-step' : undefined,
     ghostClass: 'step-ghost',
     chosenClass: 'step-chosen',
+    ...dragFallbackOptions,
+    fallbackClass: 'step-fallback',
     disabled: !canEdit.value || selectMode.value,
-    onEnd: actionEdit.open ? onDraftFlowEnd : onFlowSortEnd
+    onStart: () => startDragScroll(timelineEl.value),
+    onEnd: (evt) => {
+      stopDragScroll()
+      if (actionEdit.open) onDraftFlowEnd(evt)
+      else onFlowSortEnd(evt)
+    }
   })
 }
 
@@ -5670,6 +5986,18 @@ function draftKindTypes(kind) {
 }
 
 const draftTypes = computed(() => draft.value ? draftKindTypes(draft.value.kind) : [])
+// 表头清单只用于展示（「10 行 · 表头：操作 / 操作对象 / …」），条件里的列是 col.header。
+const tableHeaderNames = computed(() => (draft.value?.table?.headers || []).map((h) => h.name).join(' / '))
+// 表里每一列都已经有条件下就没有「加一列」的余地了：再点只会插一条重复列，
+// 用户还得自己改回来。按「每个表头都出现过」判断，而不是数列数——
+// 同一列填两个包含条件是合法写法，那种情况下不该把按钮锁死。
+const rowColumnsFull = computed(() => {
+  const current = draft.value
+  const headers = (current?.table?.headers || []).map((h) => h.name)
+  if (!headers.length) return false
+  const used = new Set((current.columns || []).map((col) => col.header))
+  return headers.every((name) => used.has(name))
+})
 const draftTitle = computed(() => ({ assert: '添加断言', sleep: '固定等待', ready: '等待加载',
   slider: '添加滑块验证', captcha: '添加验证码识别',
   upload: '添加导入文件', download: '添加下载校验' })[draft.value?.kind] || '添加断言')
@@ -5697,7 +6025,10 @@ const formSig = computed(() => {
   const current = draft.value
   if (!current) return ''
   return [current.intentType, current.target || '', current.value || '', current.seconds ?? '',
-    current.allowWait ? 1 : 0, current.timeout ?? '', current.interval ?? '', current.reload ? 1 : 0].join('\u0001')
+    current.allowWait ? 1 : 0, current.timeout ?? '', current.interval ?? '', current.reload ? 1 : 0,
+    // 表格条件也要进签名：改了列 / 值 / 行范围，上一次「验证当前页面」的结论就该作废。
+    current.tableTarget || '', current.rowScope || '', current.rowScopeRows || '',
+    JSON.stringify((current.columns || []).map((c) => [c.header, c.index, c.value]))].join('\u0001')
 })
 const formDirty = computed(() => !!draft.value?.parsed && formSig.value !== (draft.value?.parsedSig || ''))
 
@@ -5733,6 +6064,16 @@ function openDraft(kind, afterNo = null) {
     intentType: first,
     target: null,
     value: '',
+    // 表格行断言：table 是探测回来的表结构（行定位 + 表头），columns 每项
+    // {key, header, index, value}——key 只给 v-for 用，index 是行内列序号。
+    table: null,
+    tableTarget: '',
+    tableLoading: false,
+    tableError: '',
+    columns: [],
+    rowScope: 'any',
+    // 「自定义」行范围：第几行 / 第几到第几行（'2' 或 '2-5'），后端会做规范化与校验。
+    rowScopeRows: '',
     seconds: 1,
     // 「等待加载」：默认就是用户嘴里说的「页面加载完」（load），超时 15 秒。
     state: 'load',
@@ -6042,6 +6383,61 @@ function revealInserted(afterNo) {
   if (step) revealStep(step.no)
 }
 
+// ---- 表格行断言（row_match） ----
+
+// 拾取表格里任意一格后，后端会在当前页面上把这张表读出来：行定位、表头、每列在行内的
+// 位置。这里只负责展示和编辑条件——判定口径在后端，生成出去的回放用的是同一段逻辑。
+async function loadTable(alias) {
+  const current = draft.value
+  if (!current || !alias) return
+  current.tableLoading = true
+  current.tableError = ''
+  try {
+    const { data } = await api.describeRecordingTable(alias)
+    // 等接口这段时间用户可能换了类型或关了草稿，结果不能盖到新草稿上。
+    if (draft.value !== current) return
+    current.table = data
+    current.rowScope = 'any'
+    const first = (data.headers || [])[0]
+    current.columns = first ? [makeRowColumn(first)] : []
+  } catch (error) {
+    if (draft.value === current) {
+      current.table = null
+      current.columns = []
+      current.tableError = errorText(error) || '这张表读不出来；换个单元格再拾取一次'
+    }
+  } finally {
+    if (draft.value === current) current.tableLoading = false
+  }
+}
+
+function makeRowColumn(header) {
+  const item = header || { name: '', index: 0 }
+  return { key: ++rowColumnSeq, header: item.name, index: item.index, value: '' }
+}
+
+function addRowColumn() {
+  const current = draft.value
+  if (!current || !current.table) return
+  const headers = current.table.headers || []
+  // 默认挑一个还没用过的表头，省得每次都要手选。
+  const used = new Set(current.columns.map((col) => col.header))
+  const next = headers.find((h) => !used.has(h.name)) || headers[0]
+  current.columns.push(makeRowColumn(next))
+}
+
+function removeRowColumn(index) {
+  const current = draft.value
+  if (!current || current.columns.length <= 1) return
+  current.columns.splice(index, 1)
+}
+
+// 换了表头就把列序号一起换掉：这个序号是「表头找不到时」的兜底，必须和名字一致。
+function syncRowColumnIndex(column) {
+  const hit = (draft.value?.table?.headers || []).find((h) => h.name === column.header)
+  if (hit) column.index = hit.index
+}
+
 function buildFormIntent(current) {
   // 「等待加载」只有两个参数，不参与断言那套目标 / 文字 / 轮询字段。
   if (current.kind === 'ready') {
@@ -6054,7 +6450,36 @@ function buildFormIntent(current) {
   }
   const type = current.intentType
   const intent = { type, target: null, value: null, seconds: null,
-    timeout: null, interval: null, reload: false }
+    timeout: null, interval: null, reload: false,
+    table: null, columns: null, scope: null }
+  if (type === 'row_match') {
+    if (!current.table) throw new Error('请先拾取表格：点「拾取」，再点表格里任意一格')
+    const columns = (current.columns || [])
+      .map((col) => ({
+        header: col.header || '',
+        index: Number(col.index) || 0,
+        value: String(col.value || '').trim()
+      }))
+      .filter((col) => col.value)
+    if (!columns.length) throw new Error('至少给一列填上期望值')
+    intent.table = {
+      rows_selector: current.table.rows_selector,
+      header_selector: current.table.header_selector || '',
+      headers: (current.table.headers || []).map((h) => h.name),
+      // alias 让「验证当前页面」能回到录制那一刻的 frame（表在 iframe 里时尤其重要）。
+      alias: current.tableTarget || '',
+      route: current.table.route || '',
+      page_index: current.table.page_index || 0
+    }
+    intent.columns = columns
+    intent.scope = current.rowScope || 'any'
+    if (intent.scope === 'custom') {
+      const spec = String(current.rowScopeRows || '').trim()
+      // 空着就拦住：交给后端会退化成「任意一行」，用户以为限定了行、其实没限。
+      if (!spec) throw new Error('自定义行范围请填「第几行」，例如 2 或 2-5')
+      intent.scope_rows = spec
+    }
+  }
   if (needsTarget(type)) {
     if (!current.target) throw new Error('请选择目标元素，或点击「拾取元素」')
     intent.target = current.target
@@ -6324,6 +6749,19 @@ function intentDescription(intent, target) {
   if (intent.type === 'page_ready') {
     const state = READY_LABELS[intent.state] || intent.state || '整页加载完'
     return `等待加载：${state}${intent.timeout ? `，最多 ${intent.timeout} 秒` : ''}`
+  }
+  // 行断言不是「某个元素等于某个值」，套下面的单元素模板会读成「表格行包含：」后面空着。
+  if (intent.type === 'row_match') {
+    const cells = (intent.columns || []).map(
+      (col) => `${col.header || `第 ${Number(col.index) + 1} 列`}=${col.value}`)
+    let text = `表格行包含：${cells.join('、')}`
+    if (intent.scope === 'first') text += '（首行）'
+    else if (intent.scope === 'custom') {
+      const spec = String(intent.scope_rows || '').replace('-', '~')
+      text += spec ? `（第 ${spec} 行）` : '（自定义行）'
+    } else text += '（任意一行）'
+    if (intent.timeout) text += `，最多 ${intent.timeout} 秒`
+    return text
   }
   const parts = [intentLabel(intent.type)]
   const alias = intent.target || (target && target.alias)
@@ -8288,6 +8726,13 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .step-ghost { opacity:.45; background:var(--bg-card); border-style:dashed; border-color:var(--accent-line); }
 .step-chosen { box-shadow:0 8px 22px rgba(16,24,40,.12); }
 .step-drag { opacity:.95; }
+/* fallback 拖拽的跟手克隆（挂在 body 上，Sortable 内联 opacity:.8 / zIndex:100000）：
+   投影 + 描边让「被拎起来的这份」和原地占位的虚线框一眼分开 */
+.step-fallback, .action-step-fallback {
+  opacity:.96 !important;
+  box-shadow:0 18px 40px rgba(16,24,40,.26), 0 0 0 1px var(--accent-line) !important;
+  border-radius:10px;
+}
 
 /* 就地编辑 */
 .step-editor { display:flex; flex-direction:column; gap:8px; }
@@ -8338,6 +8783,15 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .parsed-tag { flex-shrink:0; margin-left:auto; font-size:11.5px; color:var(--ok); background:var(--ok-soft); border-radius:999px; padding:2px 9px; }
 .parsed-tag.dirty { color:var(--warn); background:var(--warn-soft); }
 .form-grid { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:10px; }
+/* 表格行断言：窄面板里一行挤三件东西，只让期望值输入框收缩，下拉和删除按钮保持可点。 */
+.row-assert { display:flex; flex-direction:column; gap:8px; margin-top:10px; }
+.row-assert-error { font-size:12px; color:var(--danger); line-height:1.5; }
+.row-cond { display:flex; align-items:center; gap:6px; min-width:0; }
+/* 自定义行号跟在三个单选按钮后面；窄面板放不下时 .poll-row 会换行，不挤成一团。 */
+.row-scope-input { width:110px; flex:0 0 auto; }
+.row-cond-col { width:112px; flex:0 0 auto; }
+.row-cond .el-input { flex:1 1 auto; min-width:0; }
+.row-assert code { font-family:var(--mono); font-size:11.5px; background:var(--bg-sunken); padding:0 3px; border-radius:3px; }
 .alias-option { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
 .alias-option-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .alias-option-hint { flex:none; color:var(--faint); font-size:11.5px; }
@@ -8572,6 +9026,52 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .plan-fields dd { margin:0; color:var(--ink-2); line-height:1.7; word-break:break-word; }
 .plan-style-note { margin:10px 0 0; color:var(--muted); font-size:11.5px; line-height:1.75; }
 .plan-empty { margin:0 0 10px; color:var(--muted); font-size:12px; line-height:1.75; }
+
+/* 目标与边界 */
+.plan-goal { margin:0 0 12px; color:var(--ink-2); font-size:13px; line-height:1.8; }
+.plan-notdoing { display:flex; gap:10px; padding:9px 11px; border-radius:8px; background:var(--bg-sunken); }
+.plan-notdoing-title { flex:none; color:var(--muted); font-size:11.5px; line-height:1.75; }
+.plan-notdoing-list { margin:0; padding-left:16px; color:var(--ink-2); font-size:12px; line-height:1.8; }
+
+/* 改动清单：新建/覆盖/按需更新三档，覆盖已有文件时用 warn 色提醒 */
+.plan-filelist { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }
+.plan-file {
+  display:flex; align-items:flex-start; gap:9px; padding:8px 10px;
+  border:1px solid var(--line-faint); border-radius:8px; background:var(--bg-card);
+}
+.plan-file-state {
+  flex:none; min-width:46px; padding:1px 6px; border-radius:5px;
+  font-size:10.5px; line-height:1.7; text-align:center; white-space:nowrap;
+}
+.plan-file-state.is-create { color:var(--ok); background:var(--ok-soft); }
+.plan-file-state.is-overwrite { color:var(--warn); background:rgba(180,83,9,.12); }
+.plan-file-state.is-update { color:var(--accent-ink); background:var(--accent-soft); }
+.plan-file-body { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.plan-file-path { font-family:var(--mono); font-size:11.5px; color:var(--ink); word-break:break-all; }
+.plan-file-why { color:var(--muted); font-size:11px; line-height:1.6; }
+.plan-file-actual { flex:none; font-size:10.5px; color:var(--ok); white-space:nowrap; }
+.plan-file-actual.is-missing { color:var(--warn); }
+.plan-file-actual.is-unchanged { color:var(--muted); }
+.plan-file-hint { margin:8px 0 0; color:var(--faint); font-size:11px; line-height:1.7; }
+
+/* 验收命令：命令本身要能一眼复制走 */
+.plan-cmd {
+  margin-bottom:10px; padding:9px 11px;
+  border:1px solid var(--line-faint); border-radius:8px; background:var(--bg-sunken);
+}
+.plan-cmd-head { display:flex; align-items:center; gap:8px; margin-bottom:5px; }
+.plan-cmd-label { color:var(--ink-2); font-size:11.5px; font-weight:600; }
+.plan-cmd-copy {
+  margin-left:auto; padding:1px 7px; border:1px solid var(--line-faint); border-radius:5px;
+  background:var(--bg-card); color:var(--muted); font-size:10.5px; cursor:pointer;
+}
+.plan-cmd-copy:hover { color:var(--accent-ink); border-color:var(--accent-line); }
+.plan-cmd-text {
+  display:block; padding:6px 8px; border-radius:6px; background:var(--bg-card);
+  font-family:var(--mono); font-size:11.5px; color:var(--ink);
+  white-space:pre-wrap; word-break:break-all;
+}
+.plan-cmd-note { margin-top:5px; color:var(--muted); font-size:11px; line-height:1.6; }
 
 .plan-steplist { list-style:none; margin:0; padding:0; border-top:1px solid var(--line-faint); }
 .plan-steplist-item {

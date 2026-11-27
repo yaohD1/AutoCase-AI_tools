@@ -324,6 +324,10 @@ batchDeleteTestcases(ids) {
   verifyRecordingIntent(intent) {
     return api.post('/automation/recording/verify', { intent }, { timeout: 30000 })
   },
+  // 行断言：读出刚拾取的那一格所在的表（表头、行定位、列位置），给面板选列用
+  describeRecordingTable(target) {
+    return api.post('/automation/recording/table/describe', { target }, { timeout: 30000 })
+  },
   deleteRecordingStep(no) {
     return api.delete(`/automation/recording/steps/${no}`)
   },
