@@ -7,6 +7,7 @@
     append-to-body
     destroy-on-close
     class="path-picker-dialog"
+    :close-on-press-escape="!creating"
     @update:model-value="close"
     @open="onOpen"
   >
@@ -26,13 +27,43 @@
             >{{ segment }}</button>
           </template>
         </div>
-        <el-button text size="small" :disabled="!path" @click="go(parentPath)">↑ 上一级</el-button>
+        <div class="bar-actions">
+          <el-button
+            text
+            size="small"
+            :disabled="(mode === 'file' && !workspace) || !!error"
+            @click="startCreate"
+          >＋ 新建文件夹</el-button>
+          <el-button text size="small" :disabled="!path" @click="go(parentPath)">↑ 上一级</el-button>
+        </div>
       </div>
 
       <div v-if="mode === 'file' && !workspace" class="picker-empty">请先选择工作区，再选择目标文件。</div>
       <div v-else v-loading="loading" class="picker-list">
         <div v-if="error" class="picker-error">{{ error }}</div>
         <template v-else>
+          <!-- 新建文件夹：就地输入，回车即建并直接进去，不再多开一层弹窗。 -->
+          <div v-if="creating" class="row is-dir is-creating">
+            <el-icon class="row-icon"><Folder /></el-icon>
+            <el-input
+              ref="folderInput"
+              v-model="newDirName"
+              size="small"
+              placeholder="文件夹名，回车创建"
+              maxlength="80"
+              @keyup.enter="submitDir"
+              @keyup.esc="cancelCreate"
+            />
+            <el-button
+              size="small"
+              type="primary"
+              :loading="creatingBusy"
+              :disabled="!newDirName.trim()"
+              @click="submitDir"
+            >创建</el-button>
+            <el-button size="small" text :disabled="creatingBusy" @click="cancelCreate">取消</el-button>
+          </div>
+
           <!-- 文件模式把文件排在前面：这里的目标是选文件，子目录只用于进入下级。 -->
           <div v-if="mode === 'file' && files.length" class="list-label">文件 · {{ files.length }}</div>
           <div
@@ -68,7 +99,7 @@
             <span v-else class="row-enter">进入 ›</span>
           </div>
 
-          <div v-if="!dirs.length && !files.length" class="picker-empty">
+          <div v-if="!dirs.length && !files.length && !creating" class="picker-empty">
             {{ mode === 'dir' ? '这个目录下没有子目录' : '这个目录下没有可选的测试文件' }}
           </div>
         </template>
@@ -101,7 +132,8 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import { Document, Folder } from '@element-plus/icons-vue'
 import api from '../api'
 
@@ -128,6 +160,11 @@ const loading = ref(false)
 const error = ref('')
 const selectedFile = ref('')
 const newName = ref('')
+// 新建文件夹：就地输入，不弹二级弹窗（弹窗套弹窗的层级很难看）
+const creating = ref(false)
+const creatingBusy = ref(false)
+const newDirName = ref('')
+const folderInput = ref(null)
 
 const dialogTitle = computed(() => (props.mode === 'dir' ? '选择工作区目录' : '选择目标文件'))
 const segments = computed(() => (path.value ? path.value.split('/').filter(Boolean) : []))
@@ -176,7 +213,45 @@ function formatSize(size) {
   return `${value} B`
 }
 
-function close(visible = false) { emit('update:modelValue', visible) }
+function close(visible = false) {
+  // 没创建的半截输入不跟着留到下一次打开
+  cancelCreate()
+  emit('update:modelValue', visible)
+}
+
+// ---- 新建文件夹 ----
+function startCreate() {
+  creating.value = true
+  newDirName.value = ''
+  nextTick(() => folderInput.value?.focus())
+}
+
+function cancelCreate() {
+  creating.value = false
+  newDirName.value = ''
+}
+
+async function submitDir() {
+  const name = newDirName.value.trim()
+  if (!name || creatingBusy.value) return
+  creatingBusy.value = true
+  try {
+    const { data } = await api.createAutomationFolder({
+      // 文件模式的路径相对工作区，目录模式相对根目录——和两个 GET 接口的基准保持一致。
+      workspace: props.mode === 'file' ? props.workspace : '',
+      path: path.value,
+      name
+    })
+    ElMessage.success(`已创建文件夹：${data.name}`)
+    cancelCreate()
+    await go(data.path)
+  } catch (err) {
+    // 不关输入行：名字重了或含非法字符时，用户改两个字就能重试。
+    ElMessage.warning(err.response?.data?.error || '创建文件夹失败')
+  } finally {
+    creatingBusy.value = false
+  }
+}
 
 function onOpen() {
   error.value = ''
@@ -186,6 +261,8 @@ function onOpen() {
 }
 
 async function go(target, allowFallback = true) {
+  // 换目录时收起输入行：否则它会跟着到新目录，一不小心就建到别处去。
+  cancelCreate()
   path.value = target || ''
   if (props.mode === 'file' && !props.workspace) {
     dirs.value = []
@@ -245,6 +322,7 @@ function confirm() {
 <style scoped>
 .picker { display:flex; flex-direction:column; gap:12px; }
 .picker-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 10px; border:1px solid var(--line-soft); border-radius:10px; background:var(--bg-sunken); }
+.bar-actions { display:flex; align-items:center; gap:2px; flex-shrink:0; }
 .crumbs { display:flex; align-items:center; flex-wrap:wrap; gap:2px; min-width:0; }
 .crumb { padding:2px 6px; border:none; border-radius:6px; background:transparent; color:var(--accent); font-size:12.5px; font-weight:600; cursor:pointer; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .crumb:hover { background:var(--accent-soft); }
@@ -259,6 +337,10 @@ function confirm() {
 .row { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:8px; cursor:pointer; transition:background .15s ease; }
 .row:hover { background:var(--bg-hover); }
 .row.is-file.selected { background:var(--accent-soft); box-shadow:inset 0 0 0 1px var(--accent-line); }
+/* 新建输入行：不是真目录，别给「可点击」的悬停反馈 */
+.row.is-creating, .row.is-creating:hover { background:var(--bg-sunken); cursor:default; }
+.row.is-creating .el-input { flex:1; min-width:0; }
+.row.is-creating .el-button { flex-shrink:0; margin-left:0; }
 .row-icon { color:var(--muted); font-size:16px; flex-shrink:0; }
 .row.is-dir .row-icon { color:var(--warn); }
 .row-name { flex:1; min-width:0; color:var(--ink); font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

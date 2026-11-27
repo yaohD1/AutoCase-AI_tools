@@ -341,6 +341,15 @@ batchDeleteTestcases(ids) {
   deleteRecordingAction(actionId) {
     return api.delete(`/automation/recording/actions/${actionId}`)
   },
+  // 展开动作卡：子步骤按这次调用的实参填好返回（不参与轮询，点开才取一次）。
+  getRecordingAction(actionId, callNo = null) {
+    return api.get(`/automation/recording/actions/${actionId}`,
+      { params: callNo == null ? {} : { call_no: callNo } })
+  },
+  // 保存动作编辑：items 是动作新顺序，flow 是流程新顺序；后端一次事务完成。
+  editRecordingAction(actionId, payload) {
+    return api.put(`/automation/recording/actions/${actionId}/edit`, payload)
+  },
   // 插入一次调用；args 缺的键会用第一次调用时的值补上。
   insertRecordingCall(actionId, afterNo = null, args = null) {
     return api.post(`/automation/recording/actions/${actionId}/calls`, { after_no: afterNo, args })
@@ -514,6 +523,10 @@ batchDeleteTestcases(ids) {
   },
   browseAutomationFiles(workspace, path = '', framework = '') {
     return api.get('/automation/browse/files', { params: { workspace, path, framework } })
+  },
+  // 在选择器里新建文件夹：给了 workspace 就以工作区为基准，否则以根目录为基准。
+  createAutomationFolder(payload) {
+    return api.post('/automation/browse/mkdir', payload)
   },
 
   // 自动化脚本

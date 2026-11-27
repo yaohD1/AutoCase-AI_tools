@@ -201,6 +201,35 @@ class ActionTest(unittest.TestCase):
         self.assertEqual(out['action_vars']['a1']['1'], '${新增确定按钮}')
         self.assertEqual(out['action_vars']['a2']['1'], '${删除确定按钮}')
 
+    def test_common_file_does_not_grow_on_every_build(self):
+        """公共文件读回来没有来源标记，按「同名同来源」判会每轮加一套 _2/_3。
+
+        实测过 6→12→18：生成三次就多出十二个用不到的变量，变量名还会从
+        ${登录账号输入框} 漂到 ${登录账号输入框_3}。同一条定位只该留一个名字。
+        """
+        root = tempfile.mkdtemp()
+        actions = {'act1': {'name': '登录', 'steps': [
+            _step(1, '账号', 'xpath=//input[@id="u"]', kind='fill', tag='input'),
+        ]}}
+        counts = []
+        for _ in range(3):
+            out = lv.build([], actions, '测试用例层/a/b.robot', root, _locator_of)
+            counts.append(out['files'][0]['count'])
+            names = set(out['action_vars']['act1'].values())
+            self.assertEqual(names, {'${登录账号输入框}'})
+        self.assertEqual(counts, [1, 1, 1])
+
+    def test_second_action_pointing_at_same_element_reuses_the_variable(self):
+        """两个动作指向同一个元素时共用一条变量：变量是「定位的别名」。"""
+        root = tempfile.mkdtemp()
+        actions = {
+            'a1': {'name': '登录', 'steps': [_step(1, '账号', 'xpath=//input[@id="u"]', kind='fill', tag='input')]},
+            'a2': {'name': '登录2', 'steps': [_step(1, '账号', 'xpath=//input[@id="u"]', kind='fill', tag='input')]},
+        }
+        out = lv.build([], actions, '测试用例层/a/b.robot', root, _locator_of)
+        self.assertEqual(out['action_vars']['a1']['1'], '${登录账号输入框}')
+        self.assertEqual(out['action_vars']['a2']['1'], '${登录账号输入框}')
+
 
 if __name__ == '__main__':
     unittest.main()

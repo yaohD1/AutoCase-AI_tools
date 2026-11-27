@@ -1306,10 +1306,23 @@ def _build_locator(root, target_path, steps, actions, framework, teardown=None, 
         if var and var not in aliases:
             aliases[var] = target.get('alias') or ''
     rel = locator_vars.file_rel(target_path)
+    # 只导本次真的写出来的文件：纯 call 用例没有可抽的步骤，用例那份不会生成，
+    # 导入一个不存在的资源文件会让整个 suite 起不来（比缺变量更糟）。
+    wrote = {item['path'] for item in built['files']}
+    libs = []
+    if rel in wrote:
+        libs.append(_rel_from_case(rel, target_path))
+    if built.get('action_vars') and locator_vars.common_rel() in wrote:
+        # 动作（登录这类）的定位在公共文件里。只导用例那份的话，关键字里的 ${变量}
+        # 在脚本里找不到定义——而且不报编译错，是跑到那一步才
+        # `Variable '...' not found`，看起来像模型写错了变量名。
+        libs.append(_rel_from_case(locator_vars.common_rel(), target_path))
     return {
         'vars': built['vars'],
         'action_vars': built['action_vars'],
-        'lib': _rel_from_case(rel, target_path),
+        # lib 保留成「用例那份」：老调用点只认一个路径，别让它们拿到公共文件。
+        'lib': libs[0] if libs else None,
+        'libs': libs,
         'file': {'path': rel,
                  'variables': [{'name': k, 'alias': v} for k, v in aliases.items()]},
     }
@@ -1431,8 +1444,39 @@ def _is_close_line(body):
     return low.startswith('close browser') or (body or '').strip().startswith('关闭浏览器')
 
 
+def _resource_libs_for_script(root, target_path, candidates, text):
+    """按正文实际引用的变量，挑出必须导入的资源文件。
+
+    `_build_locator` 已经给出该导的清单，这里再按正文核一遍：模型可能引用了某份
+    文件里的变量，而平台那边没算进去（比如动作来自后置处理）。缺一行 Resource
+    不会报语法错，只会等到跑到那一步才 `Variable '...' not found`，
+    看起来像变量名写错了——不如在写盘前补齐。
+
+    文件不存在时跳过：导入一个不存在的资源文件会让整个 suite 直接起不来，
+    比缺变量更糟。
+    """
+    used = set()
+    for name in re.findall(r'\$\{([^}]+)\}', text or ''):
+        used.add(locator_vars.normalize_name(name.split('.')[0]))
+    if not used:
+        return []
+    case_dir = (Path(root) / target_path).parent
+    picked = []
+    for rel in candidates:
+        if not rel or rel in picked:
+            continue
+        try:
+            declared = locator_vars.parse((case_dir / rel).read_text(encoding='utf-8'))
+        except OSError:
+            continue
+        if used & set(declared):
+            picked.append(rel)
+    return picked
+
+
 def _normalize_rf_script(root, target_path, steps, actions=None,
-                         slider_lib=None, files_lib=None, teardown=None, locator_lib=None):
+                         slider_lib=None, files_lib=None, teardown=None,
+                         locator_lib=None, locator_libs=None):
     """把 agent 写的 .robot 改成「平台头 + 模型正文」，返回被替换掉的行。
 
     只保留 Test Cases / Keywords / Variables 三段，Settings 整段重写：
@@ -1520,10 +1564,19 @@ def _normalize_rf_script(root, target_path, steps, actions=None,
         out.append('Library    ${CURDIR}/%s    ${CURDIR}/downloads' % files_lib)
     if slider_lib:
         out.append('Library    ${CURDIR}/%s' % slider_lib)
-    if locator_lib:
-        # 定位变量：同目录用例共享一份，改版只改这一个文件。
-        # 放在 Library 之后、Teardown 之前，和项目里人工维护的资源文件写法一致。
-        out.append('Resource    ${CURDIR}/%s' % locator_lib)
+    # 资源文件放 Library 之后、Teardown 之前，和项目里人工维护的资源文件写法一致。
+    # 清单里的无条件导（抽了变量就建了文件）；再按正文引用补漏掉的——
+    # 用例那份在前，动作的公共文件在后。缺哪份都是跑起来才报变量找不到。
+    libs = []
+    for rel in (locator_libs or ([locator_lib] if locator_lib else [])):
+        if rel and rel not in libs:
+            libs.append(rel)
+    candidates = libs + [_rel_from_case(locator_vars.common_rel(), target_path)]
+    for rel in _resource_libs_for_script(root, target_path, candidates, raw):
+        if rel not in libs:
+            libs.append(rel)
+    for rel in libs:
+        out.append('Resource    ${CURDIR}/%s' % rel)
     if teardown_name:
         # 实参由平台写：后置是用户在界面上设的，模型只负责写同名关键字。
         args = [str((teardown.get('args') or {}).get(p.get('key'), ''))
@@ -2089,7 +2142,7 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
         if framework == RF_FRAMEWORK:
             replaced = _normalize_rf_script(root, target_path, steps, actions,
                                             slider_utils, files_utils, teardown,
-                                            locator_lib=(locator or {}).get('lib'))
+                                            locator_libs=(locator or {}).get('libs'))
             if replaced:
                 logger.info('录制生成：头部已由平台重写，替换 %s 行：%s',
                             len(replaced), ' / '.join(replaced[:4]))
@@ -2104,7 +2157,7 @@ def generate(runner, workspace, model, steps, framework, target_path, title, pyt
             if framework == RF_FRAMEWORK:
                 _normalize_rf_script(root, target_path, steps, actions,
                                      slider_utils, files_utils, teardown,
-                                     locator_lib=(locator or {}).get('lib'))
+                                     locator_libs=(locator or {}).get('libs'))
             elif framework == PW_FRAMEWORK:
                 _normalize_pw_script(root, target_path)
 

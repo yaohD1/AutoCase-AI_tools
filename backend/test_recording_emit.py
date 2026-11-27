@@ -91,11 +91,11 @@ class EmitTest(unittest.TestCase):
         shutil.rmtree(self.ws, ignore_errors=True)
 
     def _gen(self, runner, dryrun_results, target=TARGET, overwrite=False, steps=None, plan=None,
-             plan_feedback=None):
+             plan_feedback=None, actions=None):
         with PATCH_KW, mock.patch.object(toolchain, 'dryrun', side_effect=dryrun_results):
             return emit.generate(runner, self.ws, 'p/m', steps or [_rf_step()], 'robot-selenium',
                                  target, 'Login', python=sys.executable, overwrite=overwrite,
-                                 plan=plan, plan_feedback=plan_feedback)
+                                 plan=plan, plan_feedback=plan_feedback, actions=actions)
 
     def test_success_writes_only_the_target_file(self):
         runner = FakeRunner(write(TARGET, ROBOT()))
@@ -139,6 +139,42 @@ class EmitTest(unittest.TestCase):
         self.assertIn('.autocase/locators/login页面元素.resource', paths)
         self.assertEqual(result['locator']['variables'], 1)
         self.assertEqual(result['locator']['bare'], [], '正文不该留裸定位')
+
+    def test_action_locator_gets_its_own_resource_import(self):
+        """动作（登录这类）的定位在公共文件里，必须一起导入。
+
+        只导用例那份时，Keyword 里的 ${登录用户名输入框} 在脚本里找不到定义，
+        而且不报编译错——跑到那一步才 Variable not found，看着像模型写错了变量名。
+        """
+        action = {'id': 'act-1', 'name': '登录', 'params': [], 'steps': [_rf_step(no=1)]}
+        steps = [{'no': 1, 'type': 'call', 'action': 'act-1', 'label': '登录'}]
+        runner = FakeRunner(write(TARGET, ROBOT('    Input Text    ${登录用户名输入框}    alice\n')))
+        self._gen(runner, [(True, 'ok')], steps=steps, actions={'act-1': action})
+        text = (self.ws / TARGET).read_text(encoding='utf-8')
+        self.assertIn(
+            'Resource    ${CURDIR}/../.autocase/locators/公共/公共页面元素.resource', text)
+        # 纯 call 用例没有可抽的步骤，用例那份文件不该凭空出现在头部
+        self.assertNotIn('login页面元素.resource', text)
+
+    def test_missing_resource_import_is_filled_in(self):
+        """正文引用了资源文件里的变量，头部却没导入它 → 写盘前补上。
+
+        这一步是兜底：清单由生成侧算，但模型可能引用了别处的变量。
+        缺一行 Resource 只会在运行时炸，不如在这里补齐。
+        """
+        common = self.ws / '.autocase/locators/公共/公共页面元素.resource'
+        common.parent.mkdir(parents=True, exist_ok=True)
+        common.write_text(
+            '# 由平台生成\n*** Variables ***\n${公共按钮}    xpath=//ok\n', encoding='utf-8')
+        target = self.ws / TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            '*** Settings ***\n\n*** Test Cases ***\nLogin\n    Click Element    ${公共按钮}\n',
+            encoding='utf-8')
+        emit._normalize_rf_script(self.ws, TARGET, [], locator_libs=[])
+        text = target.read_text(encoding='utf-8')
+        self.assertIn(
+            'Resource    ${CURDIR}/../.autocase/locators/公共/公共页面元素.resource', text)
 
     def test_generate_uses_the_confirmed_plan_and_does_not_plan_again(self):
         """规划已经独立成一步：写入只认传进来的任务书，不许自己再烧一次模型调用。"""

@@ -312,6 +312,252 @@ def ungroup(steps, actions, no):
     return result
 
 
+def _int_of(value, what):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ActionError('%s必须是整数' % what)
+
+
+def _step_name(step):
+    """报错时指的「哪一步」：优先用元素别名，其次类型，最后编号。"""
+    target = step.get('target') or {}
+    return (target.get('alias') or step.get('label') or step.get('type')
+            or ('第 %s 步' % step.get('no')))
+
+
+def _placeholder_left(node):
+    """深找第一个还没替换掉的 {{参数}}，没有返回空串。
+
+    移出动作的子步骤要填上这次调用的实参；缺参数时不能把 `{{key}}` 漏进流程，
+    否则生成的脚本里会出现一段没人替换的模板。
+    """
+    if isinstance(node, dict):
+        for value in node.values():
+            key = _placeholder_left(value)
+            if key:
+                return key
+        return ''
+    if isinstance(node, list):
+        for value in node:
+            key = _placeholder_left(value)
+            if key:
+                return key
+        return ''
+    if isinstance(node, str):
+        match = _PLACEHOLDER.search(node)
+        return match.group(1) if match else ''
+    return ''
+
+
+def edit(steps, actions, action_id, call_no, items, flow, dropped=None):
+    """按前端草稿重建动作定义和流程：拖进、拖出、删除、重排一次生效。
+
+    `items` 是动作的新顺序，每项 `{src: 'action'|'flow', no}`：
+    - action 取自原动作的第 no 步；
+    - flow 取自当前流程的第 no 步（同时从流程里移走）。
+
+    `flow` 是流程的新顺序，每项 `{kind: 'step'|'out', no}`：
+    - step 保留当前流程里的第 no 步；
+    - out 把原动作的第 no 步填上这次调用的实参后插进流程。
+
+    `dropped` 是「从流程拖进动作后又点了删除」的流程步骤号：动作里没有、流程里也没有，
+    等于整步删掉。只做数据改写，不碰浏览器。编号对不上一律报错——宁可让用户重来，
+    也不能悄悄丢一步。
+    """
+    action = (actions or {}).get(action_id)
+    if not action:
+        raise ActionError('动作不存在')
+    call_no = _int_of(call_no, '调用步骤编号')
+    call = next((s for s in steps if s.get('no') == call_no), None)
+    if call is None or call.get('type') != 'call' or call.get('action') != action_id:
+        raise ActionError('第 %s 步不是这个动作的调用，可能已被删除或改动' % call_no)
+
+    old_subs = action.get('steps') or []
+    old_by_no = {s.get('no'): s for s in old_subs}
+    old_index = {s.get('no'): i for i, s in enumerate(old_subs)}
+
+    if not isinstance(items, list) or not items:
+        raise ActionError('动作至少要保留一步；要删掉整个动作请用动作库的删除')
+    if not isinstance(flow, list):
+        raise ActionError('流程顺序格式不对')
+
+    # ---- 动作的新步骤 ----
+    picked_action = set()
+    picked_flow = set()
+    sources = []  # [(src, no, step)]
+    for item in items:
+        if not isinstance(item, dict):
+            raise ActionError('动作步骤格式不对')
+        src = item.get('src')
+        no = _int_of(item.get('no'), '动作步骤编号')
+        if src == 'action':
+            if no in picked_action:
+                raise ActionError('动作步骤 %s 重复' % no)
+            sub = old_by_no.get(no)
+            if sub is None:
+                raise ActionError('动作里没有第 %s 步' % no)
+            if sub.get('type') == 'call':
+                raise ActionError('动作里不能嵌套动作调用')
+            picked_action.add(no)
+            sources.append(('action', no, sub))
+        elif src == 'flow':
+            if no in picked_flow:
+                raise ActionError('流程步骤 %s 重复拖入' % no)
+            step = next((s for s in steps if s.get('no') == no), None)
+            if step is None:
+                raise ActionError('流程里没有第 %s 步' % no)
+            if step.get('type') == 'call':
+                raise ActionError('动作调用不能拖进动作里（暂不支持嵌套）')
+            if step.get('type') == 'new_page':
+                raise ActionError('标签页切换要跟着它的前一步一起动，不能单独拖进动作')
+            idx = next(i for i, s in enumerate(steps) if s.get('no') == no)
+            if idx + 1 < len(steps) and steps[idx + 1].get('type') == 'new_page':
+                raise ActionError('这一步后面跟着标签页切换，不能单独拖进动作')
+            picked_flow.add(no)
+            sources.append(('flow', no, step))
+        else:
+            raise ActionError('动作步骤来源只能是 action 或 flow')
+
+    # 「从流程拖进动作后又点了删除」：这一步在动作里和流程里都不该再出现。
+    dropped_nos = set()
+    for value in (dropped or []):
+        no = _int_of(value, '删除步骤编号')
+        if no in dropped_nos:
+            continue
+        if no in picked_flow:
+            raise ActionError('第 %s 步既拖进了动作又被删除' % no)
+        step = next((s for s in steps if s.get('no') == no), None)
+        if step is None:
+            raise ActionError('流程里没有第 %s 步' % no)
+        if step.get('type') == 'call':
+            raise ActionError('调用步骤不能从动作编辑器里删除')
+        if step.get('type') == 'new_page':
+            raise ActionError('标签页切换要跟着它的前一步一起处理，不能单独删除')
+        idx = next(i for i, s in enumerate(steps) if s.get('no') == no)
+        if idx + 1 < len(steps) and steps[idx + 1].get('type') == 'new_page':
+            raise ActionError('这一步后面跟着标签页切换，不能单独删除')
+        dropped_nos.add(no)
+    picked_flow |= dropped_nos
+
+    # ---- 标签页切换的绑定 ----
+    # 「前一步 → new_page」是一对：new_page 留在动作里，前一步就必须紧挨在它前面；
+    # new_page 被移出/删除时，前一步也不能单独留在动作里。
+    item_keys = [(src, no) for src, no, _ in sources]
+    for i, sub in enumerate(old_subs):
+        if sub.get('type') != 'new_page' or i == 0:
+            continue
+        prev = old_subs[i - 1]
+        key = ('action', sub.get('no'))
+        if key in item_keys:
+            pos = item_keys.index(key)
+            if pos == 0 or item_keys[pos - 1] != ('action', prev.get('no')):
+                raise ActionError('标签页切换「%s」要留在这步的前一步后面，不能分开'
+                                  % _step_name(sub))
+        elif ('action', prev.get('no')) in item_keys:
+            raise ActionError('标签页切换不能单独删除或移出')
+
+    new_subs = []
+    rel_map = {}
+    for new_no, (src, no, sub) in enumerate(sources, 1):
+        clone = clean(sub)
+        clone['no'] = new_no
+        new_subs.append(clone)
+        if src == 'action':
+            rel_map[no] = new_no
+
+    # 参数跟着它所在的步骤走；步骤被移出或删掉，参数一起消失。
+    new_params = []
+    for param in action.get('params') or []:
+        if not isinstance(param, dict):
+            continue
+        step_no = param.get('step')
+        if step_no not in rel_map:
+            continue
+        item = dict(param)
+        item['step'] = rel_map[step_no]
+        new_params.append(item)
+    new_params.sort(key=lambda p: p.get('step') or 0)
+
+    # ---- 流程的新顺序 ----
+    remaining = [s for s in steps if s.get('no') not in picked_flow]
+    remaining_by_no = {s.get('no'): s for s in remaining}
+    if call_no not in remaining_by_no:
+        raise ActionError('调用步骤不能移进动作')
+
+    seen_steps = set()
+    out_seen = set()
+    new_steps = []
+    for entry in flow:
+        if not isinstance(entry, dict):
+            raise ActionError('流程顺序格式不对')
+        kind = entry.get('kind') or 'step'
+        no = _int_of(entry.get('no'), '流程步骤编号')
+        if kind == 'step':
+            if no in seen_steps:
+                raise ActionError('流程步骤 %s 重复' % no)
+            step = remaining_by_no.get(no)
+            if step is None:
+                if no in picked_flow:
+                    raise ActionError('第 %s 步已经拖进动作，不能再留在流程里' % no)
+                raise ActionError('流程里没有第 %s 步' % no)
+            seen_steps.add(no)
+            # 原对象直接复用：`_frame` 这类录制期引用不能因为一次编辑就丢掉。
+            new_steps.append(step)
+        elif kind == 'out':
+            if no in out_seen:
+                raise ActionError('动作步骤 %s 重复移出' % no)
+            if no in picked_action:
+                raise ActionError('动作步骤 %s 既在动作里又要移出' % no)
+            sub = old_by_no.get(no)
+            if sub is None:
+                raise ActionError('动作里没有第 %s 步' % no)
+            if sub.get('type') == 'call':
+                raise ActionError('动作里不能嵌套动作调用')
+            if sub.get('type') == 'new_page':
+                raise ActionError('标签页切换要跟着它的前一步一起处理，不能单独移出')
+            idx = old_index.get(no)
+            if idx is not None and idx + 1 < len(old_subs) \
+                    and old_subs[idx + 1].get('type') == 'new_page':
+                raise ActionError('这一步后面跟着标签页切换，不能单独移出')
+            filled = fill_args(sub, call.get('args') or {})
+            left = _placeholder_left(filled)
+            if left:
+                raise ActionError('参数 %s 没有实参，不能把这一步移出动作' % left)
+            out_seen.add(no)
+            new_steps.append(clean(filled))
+        else:
+            raise ActionError('流程步骤来源只能是 step 或 out')
+
+    if seen_steps != set(remaining_by_no):
+        missing = sorted(set(remaining_by_no) - seen_steps)
+        raise ActionError('流程步骤对不上（第 %s 步既没保留也没移进动作）'
+                          % '、'.join(str(n) for n in missing))
+
+    # 拖出来的步骤不能插进「点击 → new_page」中间：那一步会失去「谁打开了这个标签页」。
+    # 用对象身份判断，普通步骤在 new_steps 里是原对象，只有 out 是新造的。
+    prev_of_new_page = {}
+    for i, step in enumerate(steps):
+        if step.get('type') == 'new_page' and i > 0:
+            prev_of_new_page[step.get('no')] = steps[i - 1]
+    for i, step in enumerate(new_steps):
+        if step.get('type') != 'new_page':
+            continue
+        prev = prev_of_new_page.get(step.get('no'))
+        if prev is None:
+            continue
+        if i == 0 or new_steps[i - 1] is not prev:
+            raise ActionError('不能在点击和它打开的标签页之间插入步骤')
+
+    for i, step in enumerate(new_steps, 1):
+        step['no'] = i
+
+    new_action = dict(action)
+    new_action['steps'] = new_subs
+    new_action['params'] = new_params
+    return new_steps, new_action
+
+
 def calls_of(steps, action_id):
     """这个动作在流程里被调用了几次、分别在哪几步。生成时要用它告诉写手复用。"""
     return [s.get('no') for s in steps

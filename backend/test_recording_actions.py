@@ -6,6 +6,7 @@
 1. 封装后的子步骤必须保留完整定位，解封要能原样还原；
 2. 生成时 call **不能展开**——展开成平铺后，写手会照着写 4 行重复代码，封装就白做了。
 """
+import copy
 import json
 import tempfile
 import threading
@@ -296,6 +297,197 @@ class PromptShapeTest(unittest.TestCase):
         self.assertNotIn('actions', payload)
 
 
+class EditTest(unittest.TestCase):
+    """编辑动作：拖进/拖出/删除/重排，参数跟着步骤走。"""
+
+    def setup_group(self, extra=()):
+        steps, action = a.group(LOGIN, [1, 2, 3, 4], '登录', params=login_params())
+        no = 2
+        for item in extra:
+            steps.append(ir.make_step(item[0], no, url=item[1] if len(item) > 1 else None))
+            no += 1
+        return steps, action
+
+    def edit(self, steps, action, items, flow, call_no=1):
+        return a.edit(steps, {action['id']: action}, action['id'], call_no, items, flow)
+
+    def test_move_flow_step_into_action(self):
+        steps, action = self.setup_group([('sleep', None)])
+        new_steps, new_action = self.edit(
+            steps, action,
+            [{'src': 'action', 'no': 1}, {'src': 'action', 'no': 2},
+             {'src': 'action', 'no': 3}, {'src': 'action', 'no': 4},
+             {'src': 'flow', 'no': 2}],
+            [{'kind': 'step', 'no': 1}])
+        self.assertEqual(1, len(new_steps))
+        self.assertEqual(['fill', 'fill', 'click', 'assert', 'sleep'],
+                         [s['type'] for s in new_action['steps']])
+        self.assertEqual([1, 2, 3, 4, 5], [s['no'] for s in new_action['steps']])
+        # 参数索引不变：前两步还在原位
+        self.assertEqual([1, 2], [p['step'] for p in new_action['params']])
+
+    def test_move_action_step_out_fills_call_args(self):
+        steps, action = self.setup_group()
+        new_steps, new_action = self.edit(
+            steps, action,
+            [{'src': 'action', 'no': 2}, {'src': 'action', 'no': 3},
+             {'src': 'action', 'no': 4}],
+            [{'kind': 'step', 'no': 1}, {'kind': 'out', 'no': 1}])
+        self.assertEqual(['call', 'fill'], [s['type'] for s in new_steps])
+        # 移出的输入框用这次调用的实参填好，不是 {{username}}
+        self.assertEqual('admin', new_steps[1]['value'])
+        self.assertEqual(['fill', 'click', 'assert'],
+                         [s['type'] for s in new_action['steps']])
+        self.assertEqual([1, 2, 3], [s['no'] for s in new_action['steps']])
+        # username 参数跟着步骤一起没了；password 从第 2 步挪到第 1 步
+        self.assertEqual([{'key': 'password', 'label': '密码', 'step': 1, 'field': 'value'}],
+                         new_action['params'])
+
+    def test_move_out_without_arg_rejected(self):
+        steps, action = self.setup_group()
+        steps[0]['args'] = {'password': '123456'}
+        with self.assertRaises(a.ActionError) as ctx:
+            self.edit(steps, action,
+                      [{'src': 'action', 'no': 2}, {'src': 'action', 'no': 3},
+                       {'src': 'action', 'no': 4}],
+                      [{'kind': 'step', 'no': 1}, {'kind': 'out', 'no': 1}])
+        self.assertIn('username', str(ctx.exception))
+
+    def test_delete_step_drops_its_param(self):
+        steps, action = self.setup_group()
+        new_steps, new_action = self.edit(
+            steps, action,
+            [{'src': 'action', 'no': 2}, {'src': 'action', 'no': 3},
+             {'src': 'action', 'no': 4}],
+            [{'kind': 'step', 'no': 1}])
+        self.assertEqual(1, len(new_steps))
+        self.assertEqual([{'key': 'password', 'label': '密码', 'step': 1, 'field': 'value'}],
+                         new_action['params'])
+
+    def test_reorder_follows_param_steps(self):
+        steps, action = self.setup_group()
+        _, new_action = self.edit(
+            steps, action,
+            [{'src': 'action', 'no': 3}, {'src': 'action', 'no': 2},
+             {'src': 'action', 'no': 1}, {'src': 'action', 'no': 4}],
+            [{'kind': 'step', 'no': 1}])
+        self.assertEqual(['click', 'fill', 'fill', 'assert'],
+                         [s['type'] for s in new_action['steps']])
+        # 排序后按新位置升序：password 第 2 步、username 第 3 步
+        self.assertEqual([2, 3], [p['step'] for p in new_action['params']])
+        self.assertEqual(['password', 'username'], [p['key'] for p in new_action['params']])
+
+    def test_empty_action_rejected(self):
+        steps, action = self.setup_group()
+        with self.assertRaises(a.ActionError):
+            self.edit(steps, action, [], [{'kind': 'step', 'no': 1}])
+
+    def test_missing_flow_step_rejected(self):
+        steps, action = self.setup_group([('sleep', None)])
+        with self.assertRaises(a.ActionError) as ctx:
+            self.edit(steps, action,
+                      [{'src': 'action', 'no': 1}, {'src': 'action', 'no': 2},
+                       {'src': 'action', 'no': 3}, {'src': 'action', 'no': 4}],
+                      [{'kind': 'step', 'no': 1}])
+        self.assertIn('第 2 步', str(ctx.exception))
+
+    def test_call_cannot_move_into_action(self):
+        steps, action = a.group(LOGIN, [1, 2, 3, 4], '填账号')
+        steps.append(ir.make_step('call', 2, action=action['id'], args={}))
+        with self.assertRaises(a.ActionError) as ctx:
+            self.edit(steps, action,
+                      [{'src': 'action', 'no': 1}, {'src': 'action', 'no': 2},
+                       {'src': 'flow', 'no': 2}],
+                      [{'kind': 'step', 'no': 1}])
+        self.assertIn('不能拖进动作', str(ctx.exception))
+
+    def new_page_action(self):
+        flow = [
+            ir.make_step('click', 1, target=target('打开')),
+            ir.make_step('new_page', 2, url='http://example.test/2'),
+            ir.make_step('fill', 3, target=target('搜索'), value='q'),
+        ]
+        return a.group(flow, [1, 2, 3], '开页')
+
+    def test_moving_new_page_alone_rejected(self):
+        steps, action = self.new_page_action()
+        with self.assertRaises(a.ActionError):
+            self.edit(steps, action,
+                      [{'src': 'action', 'no': 1}, {'src': 'action', 'no': 3}],
+                      [{'kind': 'step', 'no': 1}, {'kind': 'out', 'no': 2}])
+        with self.assertRaises(a.ActionError):
+            self.edit(steps, action,
+                      [{'src': 'action', 'no': 2}, {'src': 'action', 'no': 3}],
+                      [{'kind': 'step', 'no': 1}, {'kind': 'out', 'no': 1}])
+
+    def test_new_page_pair_order_rejected(self):
+        steps, action = self.new_page_action()
+        with self.assertRaises(a.ActionError):
+            self.edit(steps, action,
+                      [{'src': 'action', 'no': 2}, {'src': 'action', 'no': 1},
+                       {'src': 'action', 'no': 3}],
+                      [{'kind': 'step', 'no': 1}])
+        # 把开关标签页的两步整体挪到最后是合法的
+        _, new_action = self.edit(steps, action,
+                                  [{'src': 'action', 'no': 3}, {'src': 'action', 'no': 1},
+                                   {'src': 'action', 'no': 2}],
+                                  [{'kind': 'step', 'no': 1}])
+        self.assertEqual(['fill', 'click', 'new_page'],
+                         [s['type'] for s in new_action['steps']])
+
+    def test_out_step_cannot_split_click_and_new_page(self):
+        flow = [
+            ir.make_step('click', 1, target=target('打开')),
+            ir.make_step('new_page', 2, url='http://example.test/2'),
+            ir.make_step('fill', 3, target=target('账号'), value='a'),
+            ir.make_step('fill', 4, target=target('密码'), value='b'),
+            ir.make_step('click', 5, target=target('提交')),
+            ir.make_step('assert', 6, target=target('完成')),
+        ]
+        steps, action = a.group(flow, [3, 4, 5, 6], '填表')
+        with self.assertRaises(a.ActionError) as ctx:
+            self.edit(steps, action,
+                      [{'src': 'action', 'no': 2}, {'src': 'action', 'no': 3},
+                       {'src': 'action', 'no': 4}],
+                      [{'kind': 'step', 'no': 1}, {'kind': 'out', 'no': 1},
+                       {'kind': 'step', 'no': 2}, {'kind': 'step', 'no': 3}],
+                      call_no=3)
+        self.assertIn('标签页', str(ctx.exception))
+
+    def test_delete_dragged_in_flow_step(self):
+        steps, action = self.setup_group([('sleep', None)])
+        new_steps, new_action = a.edit(
+            steps, {action['id']: action}, action['id'], 1,
+            [{'src': 'action', 'no': 1}, {'src': 'action', 'no': 2},
+             {'src': 'action', 'no': 3}, {'src': 'action', 'no': 4}],
+            [{'kind': 'step', 'no': 1}],
+            dropped=[2])
+        self.assertEqual(1, len(new_steps))
+        self.assertEqual(4, len(new_action['steps']))
+        with self.assertRaises(a.ActionError):
+            a.edit(steps, {action['id']: action}, action['id'], 1,
+                   [{'src': 'action', 'no': 1}, {'src': 'flow', 'no': 2}],
+                   [{'kind': 'step', 'no': 1}],
+                   dropped=[2])
+
+    def test_edit_multi_call_shared_definition(self):
+        steps, action = a.group(LOGIN, [1, 2, 3, 4], '登录', params=login_params())
+        call2 = ir.make_step('call', 2, action=action['id'],
+                             args={'username': 'root', 'password': '123456'})
+        steps = steps + [call2]
+        new_steps, new_action = self.edit(
+            steps, action,
+            [{'src': 'action', 'no': 2}, {'src': 'action', 'no': 3},
+             {'src': 'action', 'no': 4}],
+            [{'kind': 'step', 'no': 1}, {'kind': 'out', 'no': 1},
+             {'kind': 'step', 'no': 2}],
+            call_no=1)
+        self.assertEqual(['call', 'fill', 'call'], [s['type'] for s in new_steps])
+        self.assertEqual('admin', new_steps[1]['value'])  # 用的是第 1 个调用点的实参
+        self.assertEqual(3, len(new_action['steps']))
+        self.assertEqual(2, len(a.calls_of(new_steps, action['id'])))
+
+
 def make_session(workspace=None):
     """不启动浏览器的最小会话：够 group_steps / insert_call / snapshot 用。"""
     session = RecordingSession.__new__(RecordingSession)
@@ -395,6 +587,37 @@ class SessionActionsTest(unittest.TestCase):
         action_id = session.actions_snapshot()[0]['id']
         data = session.update_action(action_id, {'name': '输入账号'})
         self.assertEqual('输入账号', data['steps'][0]['label'])
+
+    def test_action_detail_fills_call_args(self):
+        session = make_session()
+        session.group_steps([1, 2, 3, 4], '登录', params=login_params())
+        action_id = session.actions_snapshot()[0]['id']
+        session.update_call(1, {'username': 'root'})
+        data = session.action_detail(action_id, 1)
+        self.assertEqual(4, len(data['items']))
+        self.assertEqual('root', data['items'][0]['value'])
+        self.assertEqual('123456', data['items'][1]['value'])
+        self.assertEqual([1], data['calls'])
+
+    def test_edit_action_writes_library_and_updates_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_session(workspace=tmp)
+            session.group_steps([1, 2, 3, 4], '登录', params=login_params())
+            action_id = session.actions_snapshot()[0]['id']
+            session._steps.append(ir.make_step('sleep', 2))
+            data = session.edit_action(
+                action_id, 1,
+                [{'src': 'action', 'no': 1}, {'src': 'action', 'no': 2},
+                 {'src': 'action', 'no': 3}, {'src': 'action', 'no': 4},
+                 {'src': 'flow', 'no': 2}],
+                [{'kind': 'step', 'no': 1}])
+            self.assertEqual(1, len(data['steps']))
+            self.assertEqual(5, data['actions'][0]['steps'])
+            saved = json.loads((Path(tmp) / a.LIBRARY_DIR / a.LIBRARY_FILE).read_text('utf-8'))
+            self.assertEqual(5, len(saved['actions'][0]['steps']))
+            detail = session.action_detail(action_id, 1)
+            self.assertEqual(5, len(detail['items']))
+            self.assertEqual('sleep', detail['items'][4]['type'])
 
     def test_replay_keeps_order_after_expand(self):
         session = make_session()

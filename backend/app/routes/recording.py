@@ -436,11 +436,42 @@ def group_recording_action():
         nos, body.get('name'), desc=body.get('desc') or '', params=params or []))
 
 
+@recording_bp.route('/automation/recording/actions/<action_id>', methods=['GET'])
+def get_recording_action(action_id):
+    """展开动作卡：返回填好这次调用实参的子步骤。
+
+    只读一次，不塞进 /current 的轮询快照——动作定义可能很长，每 1–2 秒传一遍不值。
+    """
+    call_no = request.args.get('call_no', type=int)
+    return _mutate(lambda session: session.action_detail(action_id, call_no))
+
+
 @recording_bp.route('/automation/recording/actions/<action_id>', methods=['PATCH'])
 def update_recording_action(action_id):
     """只改动作名和说明；子步骤要改就解封，改完重新封装。"""
     body = request.get_json(silent=True) or {}
     return _mutate(lambda session: session.update_action(action_id, body))
+
+
+@recording_bp.route('/automation/recording/actions/<action_id>/edit', methods=['PUT'])
+def edit_recording_action(action_id):
+    """保存动作编辑：动作步骤顺序 + 流程顺序一次性提交。
+
+    items 每项 `{src: 'action'|'flow', no}`；flow 每项 `{kind: 'step'|'out', no}`。
+    具体校验在 actions.edit：编号对不上、动作被掏空、标签页绑定被拆开都会 409。
+    """
+    body = request.get_json(silent=True) or {}
+    items = body.get('items')
+    flow = body.get('flow')
+    dropped = body.get('dropped')
+    if not isinstance(items, list) or not items:
+        return _error('动作至少要保留一步', 400)
+    if not isinstance(flow, list):
+        return _error('缺少流程顺序', 400)
+    if dropped is not None and not isinstance(dropped, list):
+        return _error('dropped 必须是数组', 400)
+    return _mutate(lambda session: session.edit_action(
+        action_id, body.get('call_no'), items, flow, dropped=dropped or []))
 
 
 @recording_bp.route('/automation/recording/actions/<action_id>', methods=['DELETE'])

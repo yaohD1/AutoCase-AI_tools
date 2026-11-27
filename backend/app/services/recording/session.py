@@ -1110,6 +1110,52 @@ class RecordingSession(object):
         with lock:
             return build()
 
+    def action_detail(self, action_id, call_no=None):
+        """展开动作卡用：子步骤按这次调用的实参填好再给前端。
+
+        动作定义本身留在服务端（snapshot 只给步数）；这里只读一次，不参与轮询。
+        `call_no` 决定 `{{参数}}` 用哪一次调用的值填——同一个动作在不同调用点
+        展开时看到的输入值本来就不一样。
+        """
+        def build():
+            action = (getattr(self, '_actions', None) or {}).get(action_id)
+            if action is None:
+                raise RecordingError('动作不存在，可能已被删除')
+            steps = getattr(self, '_steps', []) or []
+            calls = actions_mod.calls_of(steps, action_id)
+            call = None
+            if call_no is not None:
+                try:
+                    wanted = int(call_no)
+                except (TypeError, ValueError):
+                    raise RecordingError('调用步骤编号必须是整数')
+                call = next((s for s in steps if s.get('no') == wanted), None)
+                if call is None or call.get('type') != 'call' \
+                        or call.get('action') != action_id:
+                    raise RecordingError('第 %s 步不是这个动作的调用' % wanted)
+            elif calls:
+                call = next((s for s in steps if s.get('no') == calls[0]), None)
+            args = dict((call or {}).get('args') or {})
+            items = []
+            for sub in action.get('steps') or []:
+                filled = actions_mod.fill_args(sub, args)
+                items.append(ir.public_step(actions_mod.clean(filled)))
+            return {
+                'id': action['id'],
+                'name': action['name'],
+                'desc': action.get('desc') or '',
+                'params': [dict(p) for p in action.get('params') or []],
+                'steps': len(action.get('steps') or []),
+                'items': items,
+                'calls': calls,
+            }
+
+        lock = getattr(self, '_lock', None)
+        if lock is None:
+            return build()
+        with lock:
+            return build()
+
     def group_steps(self, nos, name, desc='', params=None):
         """把连续的几步合成一个动作，原位置替换成一次调用。"""
         with self._lock:
@@ -1135,6 +1181,26 @@ class RecordingSession(object):
             except actions_mod.ActionError as exc:
                 raise RecordingError(str(exc))
             self._renumber()
+        self._schedule_hud()
+        return self.snapshot()
+
+    def edit_action(self, action_id, call_no, items, flow, dropped=None):
+        """保存动作编辑：动作的新步骤顺序 + 流程的新顺序，一次事务。
+
+        改动作定义会影响所有调用点，这是动作的语义；拖出来的步骤只落在本次
+        展开的调用点（call_no）后面/所在位置。`dropped` 是拖进动作后又删掉的流程步骤。
+        """
+        with self._lock:
+            try:
+                steps, action = actions_mod.edit(
+                    self._steps, self._actions, action_id, call_no, items, flow,
+                    dropped=dropped)
+            except actions_mod.ActionError as exc:
+                raise RecordingError(str(exc))
+            self._steps = steps
+            self._actions[action_id] = action
+            self._renumber()
+        self._save_actions()
         self._schedule_hud()
         return self.snapshot()
 

@@ -79,6 +79,86 @@
     }
     return parts.join(' > ');
   };
+
+  // 稳定选择器：优先用 id / class，实在没有才退回上面那条绝对路径。
+  //
+  // cssPath 只保证「此刻唯一」，它从头到尾只用标签名 + nth-of-type，一个 class 都不用，
+  // 所以拿到的是 `div:nth-of-type(1) > canvas:nth-of-type(2)` 这种：页面多包一层 div、
+  // 或者前面插一个兄弟节点，整条就废了。滑块、上传区这类「需要一条能长期用的 CSS」的
+  // 场景（用户点一下就要把选择器存进步骤里）不能用它。
+  //
+  // 规则：元素自身 id → 自身唯一 class → 最近带 class 的祖先 + 相对路径，每一步都
+  // 在页面里真数一遍命中数（必须是 1 且就是它），数不中才往下试。全都失败返回空串，
+  // 调用方自己决定退回 cssPath。
+  const CSS_SAFE_CLASS = /^[A-Za-z_][\w-]*$/;
+  // 这些类名是框架/状态的「无意义类」：拿它当选择器要么命中一大片，要么下个状态就没了。
+  const CLASS_NOISE = /^(is-|has-|v-enter|v-leave|active$|hover$|focus$|selected$|disabled$|el-|mdi-)/;
+  const cssEscape = (text) => {
+    try {
+      if (window.CSS && CSS.escape) return CSS.escape(text);
+    } catch (e) { /* 老内核没有 CSS.escape，按原样用 */ }
+    return String(text);
+  };
+  const classNames = (node) => {
+    const raw = (node && (node.className || (node.getAttribute && node.getAttribute('class')))) || '';
+    const list = String(raw).split(/\s+/).filter((n) => n && CSS_SAFE_CLASS.test(n) && !CLASS_NOISE.test(n));
+    // 同时把「短类名」排后面：geetest_canvas_bg 这类业务类名比 vt 这类缩写更可能是专属的。
+    return list.sort((a, b) => b.length - a.length);
+  };
+  const uniqueHit = (scope, selector, el) => {
+    try {
+      const hits = scope.querySelectorAll(selector);
+      return hits.length === 1 && hits[0] === el;
+    } catch (e) {
+      return false;
+    }
+  };
+  // 从 ancestor 到 el 的相对路径（不含 ancestor），和 cssPath 同一套规则。
+  const relativePath = (ancestor, el) => {
+    const parts = [];
+    let cur = el;
+    while (cur && cur !== ancestor && parts.length < 6) {
+      let part = cur.tagName.toLowerCase();
+      const parent = cur.parentElement;
+      if (parent) {
+        const sibs = Array.from(parent.children).filter((c) => c.tagName === cur.tagName);
+        if (sibs.length > 1) part += ':nth-of-type(' + (sibs.indexOf(cur) + 1) + ')';
+      }
+      parts.unshift(part);
+      cur = parent;
+    }
+    return cur === ancestor ? parts.join(' > ') : '';
+  };
+  const stableSelector = (el) => {
+    if (!el || el.nodeType !== 1) return '';
+    let scope = document;
+    try {
+      const root = el.getRootNode ? el.getRootNode() : null;
+      if (root && root.querySelectorAll) scope = root;
+    } catch (e) { /* 拿不到根就按 document 数 */ }
+    const id = el.getAttribute && el.getAttribute('id');
+    if (id) {
+      const selector = '#' + cssEscape(id);
+      if (uniqueHit(scope, selector, el)) return selector;
+    }
+    // 自身 class：一个元素可能挂着七八个类，只试最有区分度的前 3 个，别把每个都数一遍。
+    for (const name of classNames(el).slice(0, 3)) {
+      const selector = '.' + cssEscape(name);
+      if (uniqueHit(scope, selector, el)) return selector;
+    }
+    // 最近的带 class 的祖先 + 相对路径：滑块这类 canvas 常常自己没有类名，
+    // 但外层容器有（.geetest_slider / .verify-wrap），拼上去就稳定了。
+    let cur = el.parentElement;
+    for (let up = 0; up < 4 && cur && cur !== document.body; up++, cur = cur.parentElement) {
+      const rel = relativePath(cur, el);
+      if (!rel) continue;
+      for (const name of classNames(cur).slice(0, 2)) {
+        const selector = '.' + cssEscape(name) + ' > ' + rel;
+        if (uniqueHit(scope, selector, el)) return selector;
+      }
+    }
+    return '';
+  };
   // 语义可点击元素：命中最内层图形时先按这张表向上找一个「人眼中的控件」。
   // 注意它不含 div/svg——图标按钮（div > svg + click handler）不在表里，
   // 这类元素靠下面的中心点校正兜住。
@@ -206,6 +286,9 @@
       // 这类元素上的 click 和按键都要如实记录。
       readonly: !!(el.readOnly || el.getAttribute('readonly') !== null),
       css: cssPath(el),
+      // 同一条选择器的「稳定版」：优先 id / class，验过唯一才给。滑块步骤拿它当 selector，
+      // 空串表示这个元素实在没有可用特征，调用方退回 css。
+      css_stable: stableSelector(el),
       // 元素在表格行 / 列表项里时，记下这一行与它各单元格的文本：
       // 目标自身定位不唯一时，生成侧用「行 + 行内元素」代替「第 3 行的按钮」。
       row_scope: rowScopeOf(el),

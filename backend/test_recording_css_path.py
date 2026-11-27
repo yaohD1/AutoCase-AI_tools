@@ -138,5 +138,78 @@ class CssPathOnRealPageTest(unittest.TestCase):
         self.assertEqual(snap['class_raw'], '_saveBtn_1a2b3_7')
 
 
+# 滑块那类 canvas：自己没有 class / id，外层容器才有。
+# cssPath 只认标签名，给的是 div:nth-of-type(1) > canvas:nth-of-type(2)；
+# 页面多包一层就废，而滑块的选择器是要存进步骤、跟着脚本长期跑的。
+SLIDER = ('<!doctype html><html><head><meta charset="utf-8"></head><body>'
+          '<div class="login-box"><div class="verify-wrap">'
+          '<canvas></canvas><canvas></canvas>'
+          '</div></div></body></html>')
+
+CLASSED = ('<!doctype html><html><head><meta charset="utf-8"></head><body>'
+           '<div class="a"><div class="only-one-box" data-idx="x">点这里</div></div>'
+           '</body></html>')
+
+IDENT = ('<!doctype html><html><head><meta charset="utf-8"></head><body>'
+         '<div class="a"><div id="unique-id-box" data-idx="x">有 id</div></div></body></html>')
+
+
+class StableSelectorTest(unittest.TestCase):
+    """拾取时要的「能长期用」的选择器（snap.css_stable），和结构路径 css 分开两份。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+        cls._pw = sync_playwright().start()
+        cls._browser = cls._pw.chromium.launch()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._browser.close()
+        cls._pw.stop()
+
+    def setUp(self):
+        self.page = self._browser.new_page()
+
+    def tearDown(self):
+        self.page.close()
+
+    def _snap_of_click(self, html, selector):
+        self.page.set_content(html)
+        self.page.evaluate("""() => {
+            window.__events = [];
+            window.__pwEmit = (raw) => window.__events.push(raw);
+        }""")
+        self.page.add_script_tag(path=RECORDER_JS)
+        self.page.click(selector)
+        events = [json.loads(raw) for raw in self.page.evaluate('window.__events')]
+        clicks = [e for e in events if e.get('type') == 'click']
+        self.assertTrue(clicks, '没有录到 click 事件')
+        return clicks[-1]['snap']
+
+    def test_canvas_without_class_uses_the_container(self):
+        snap = self._snap_of_click(SLIDER, '.verify-wrap canvas:nth-of-type(2)')
+        self.assertEqual(snap['css_stable'], '.verify-wrap > canvas:nth-of-type(2)')
+        # 结构路径还是原来那条全 nth-of-type 的，两个都留着：一个耐用、一个一定唯一
+        self.assertNotIn('.', snap['css'])
+        self.assertEqual(self.page.eval_on_selector_all(snap['css_stable'], 'els => els.length'), 1)
+
+    def test_unique_class_is_used_as_is(self):
+        snap = self._snap_of_click(CLASSED, '[data-idx="x"]')
+        self.assertEqual(snap['css_stable'], '.only-one-box')
+
+    def test_id_wins(self):
+        snap = self._snap_of_click(IDENT, '[data-idx="x"]')
+        self.assertEqual(snap['css_stable'], '#unique-id-box')
+
+    def test_stable_selector_must_be_unique(self):
+        """两个同名 class 各命中一次时不能拿它当稳定选择器。"""
+        html = ('<!doctype html><html><head><meta charset="utf-8"></head><body>'
+                '<div class="item" data-idx="a">a</div><div class="item" data-idx="b">b</div>'
+                '</body></html>')
+        snap = self._snap_of_click(html, '[data-idx="b"]')
+        self.assertNotEqual(snap['css_stable'], '.item')
+
+
 if __name__ == '__main__':
     unittest.main()

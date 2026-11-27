@@ -1,4 +1,4 @@
-"""工作区与目标文件的目录浏览接口（只读）。
+"""工作区与目标文件的目录浏览接口。
 
 浏览器拿不到本地绝对路径（安全限制），工作区又必须落在 `AUTOMATION_WORKSPACE_ROOT` 内，
 所以改由后端在根目录内列目录与文件名，前端只传相对路径：
@@ -6,9 +6,12 @@
 - `GET /automation/browse`：列出根目录下的子目录，用于选择工作区；返回相对根目录的路径。
 - `GET /automation/browse/files`：列出某个工作区内的子目录与测试文件，用于选择目标文件；
   这一组路径相对工作区，和 `/automation/recording/generate` 的 `target_path` 语义一致。
+- `POST /automation/browse/mkdir`：在选择器里新建一个文件夹。
 
-只读：不读文件内容、不创建文件、不越过根目录。写入仍走既有的生成接口校验。
+浏览仍然只读：不读文件内容、不越过根目录。唯一的写操作是 mkdir，而且只建目录、不建文件；
+生成脚本的写入仍走 `/automation/recording/generate` 自己的校验。
 """
+import re
 from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, request
@@ -74,6 +77,30 @@ def _marks(path):
         # 单个目录不可读不应该让整个列表失败。
         pass
     return marks
+
+
+def _folder_name_error(name):
+    """校验待建文件夹名；合法返回空串。
+
+    比「系统允许什么」更严一点，因为这里建出来是给人看的目录：点开头的不显示在列表里
+    （见 _sub_dirs 的过滤），SKIP_DIRS 里的名字会被当成依赖目录跳过——建了等于没建，
+    所以宁可当场拒绝并说清楚。
+    """
+    if not name:
+        return '请填写文件夹名'
+    if len(name) > 80:
+        return '文件夹名不能超过 80 个字符'
+    if name in ('.', '..'):
+        return '不能用 . 或 .. 作为文件夹名'
+    if name.startswith('.'):
+        return '文件夹名不能以 . 开头（这类目录不会显示在列表里）'
+    if name in SKIP_DIRS:
+        return '这个名称会被目录列表当成依赖目录跳过，请换一个'
+    if re.search(r'[\\/:*?"<>|\x00-\x1f]', name):
+        return r'文件夹名不能包含这些字符：\ / : * ? " < > |'
+    if name.endswith(('.', ' ')):
+        return '文件夹名不能以点或空格结尾'
+    return ''
 
 
 def _sub_dirs(root, current):
@@ -187,3 +214,46 @@ def browse_target_files():
         'files': files,
         'truncated': truncated,
     }), 200
+
+
+@browse_bp.route('/automation/browse/mkdir', methods=['POST'])
+def make_folder():
+    """在当前浏览位置下新建一个文件夹。
+
+    两种模式共用：给了 workspace 就以工作区为基准（选目标文件的场景），
+    不给就以根目录为基准（选工作区的场景）——和两个 GET 接口的路径语义保持一致。
+    只建一层（`mkdir` 不带 parents），上层目录必须已经存在，避免一次请求建出一串。
+    """
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get('name') or '').strip()
+    try:
+        root = _root()
+        workspace = str(payload.get('workspace') or '').strip()
+        base = root
+        if workspace:
+            base = _resolve(root, workspace)
+            if not base.is_dir():
+                return jsonify({'error': '工作区目录不存在：%s' % _relative(root, base)}), 404
+        current = _resolve(base, payload.get('path'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    problem = _folder_name_error(name)
+    if problem:
+        return jsonify({'error': problem}), 400
+    if not current.is_dir():
+        return jsonify({'error': '目录不存在：%s' % _relative(base, current)}), 404
+
+    target = current / name
+    try:
+        target.mkdir()
+    except FileExistsError:
+        return jsonify({'error': '当前目录下已有同名文件夹：%s' % name}), 409
+    except OSError as exc:
+        return jsonify({'error': '创建文件夹失败：%s' % exc}), 400
+
+    return jsonify({
+        'name': name,
+        'path': _relative(base, target),
+        'workspace': '' if base == root else _relative(root, base),
+    }), 201

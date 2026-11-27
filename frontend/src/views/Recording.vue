@@ -801,9 +801,9 @@
           </template>
         </div>
 
-        <ol v-if="steps.length" ref="timelineEl" class="timeline">
+        <ol v-if="steps.length" ref="timelineEl" :class="['timeline', { 'is-action-editing': actionEdit.open }]">
           <li
-            v-for="step in steps"
+            v-for="(step, index) in shownFlowSteps"
             :key="step.no"
             :data-step-no="step.no"
             :class="['step', 'type-' + step.type, {
@@ -811,7 +811,10 @@
               'is-flash': flashingNo === step.no,
               'is-selecting': selectMode,
               'is-picked': isPicked(step.no),
-              'is-call': step.type === 'call'
+              'is-call': step.type === 'call',
+              'is-draft-out': step.no < 0,
+              'is-tied-step': tiedFlowNos.has(step.no),
+              'is-action-editing': actionEdit.open
             }]"
             @click="onRowClick(step)"
           >
@@ -819,7 +822,15 @@
             <div v-if="selectMode" class="step-check" :class="{ 'is-on': isPicked(step.no) }">
               <span v-if="isPicked(step.no)" class="step-check-mark"></span>
             </div>
-            <div v-else class="step-no" :title="canEdit ? '按住拖动可排序' : ''">{{ step.no }}</div>
+            <div
+              v-else
+              class="step-no"
+              :title="canEdit
+                ? (actionEdit.open
+                    ? (tiedFlowNos.has(step.no) ? '和标签页切换绑定，不能单独拖进动作' : '按住可拖进展开的动作；编辑动作时不能单独调整流程顺序')
+                    : '按住拖动可排序')
+                : ''"
+            >{{ actionEdit.open ? index + 1 : step.no }}</div>
             <div class="step-body">
               <!-- 就地编辑：只改值，不动定位 -->
               <div v-if="editing && editing.no === step.no" class="step-editor">
@@ -904,12 +915,28 @@
                 </div>
               </div>
               <template v-else>
-                <div class="step-main">
+                <div class="step-main" @click="onStepMainClick(step)">
+                  <!-- 调用卡左侧的展开箭头：动作内容要铺开读、要拖步骤，收起时只留这一行。
+                       放在 step-main 里而不是右侧操作区：编辑态会收掉右侧按钮，但收起的入口不能消失。 -->
+                  <el-button
+                    v-if="step.type === 'call' && callAction(step)"
+                    class="call-expand"
+                    text
+                    :icon="actionEdit.open && actionEdit.callNo === step.no ? ArrowUp : ArrowDown"
+                    :disabled="!canEditAction"
+                    :title="canEditAction
+                      ? (actionEdit.open && actionEdit.callNo === step.no
+                          ? '收起动作内容（未保存的改动会问一句）'
+                          : `展开动作内容（${callAction(step).steps} 步）`)
+                      : '暂停或停止录制后才能编辑动作'"
+                    @click.stop="toggleActionEditor(step)"
+                  />
                   <span :class="['kind-tag', 'kind-' + stepTone(step.type)]">
                     <!-- 带等待的断言和立即断言在列表里必须一眼分得开，加个小钟做标识 -->
                     <el-icon v-if="step.type === 'wait'" class="kind-icon"><Timer /></el-icon>{{ stepKindLabel(step.type) }}
                   </span>
                   <span class="step-text" :title="stepDescription(step)">{{ compactMode ? panelStepText(step) : stepDescription(step) }}</span>
+                  <span v-if="step.no < 0" class="draft-out-tag" title="从动作里拖出来，保存后正式成为流程步骤">从动作移出</span>
                 </div>
                 <!-- 面板窄：goto 的地址单独一行等宽小字。挤在同一行时它会被省略成「打开 https:」，
                      而地址恰恰是这一步最该看清的东西。 -->
@@ -925,6 +952,77 @@
                   <span v-if="callMissing(step)" class="call-missing" title="动作库里找不到这个动作，解封或删除它">动作已删除</span>
                 </div>
                 <div v-if="step.text" class="step-note">{{ step.text }}</div>
+                <!-- 动作编辑：展开后是一份草稿，保存才落到动作和流程上；取消/收起直接丢草稿。 -->
+                <div
+                  v-if="step.type === 'call' && actionEdit.open && actionEdit.callNo === step.no"
+                  class="action-editor"
+                  @click.stop
+                >
+                  <div class="ae-head">
+                    <span class="ae-title">动作内容</span>
+                    <span class="ae-count">{{ actionEdit.items.length }} 步</span>
+                    <span v-if="actionEdit.calls > 1" class="ae-warn"
+                          :title="`这个动作在流程里被调用了 ${actionEdit.calls} 次，保存后所有调用点一起变`">
+                      被调用 {{ actionEdit.calls }} 次 · 改动会影响所有调用点
+                    </span>
+                    <span v-if="session && !session.actions_saved" class="ae-warn"
+                          title="没有选择工作区，动作库不落盘，改动只在本次录制有效">仅本次会话</span>
+                    <span v-if="callAction(step) && callAction(step).used_as === 'teardown'"
+                          class="ae-warn" title="这个动作同时被当成后置处理，保存后收尾也会一起变">同时是后置处理</span>
+                    <span v-if="actionEdit.dirty" class="ae-dirty">未保存</span>
+                  </div>
+                  <div v-if="actionEdit.busy" class="ae-empty">正在读取动作内容…</div>
+                  <template v-else>
+                    <ol :ref="setActionListEl" :class="['action-steps', { 'is-empty': !actionEdit.items.length }]">
+                      <li
+                        v-for="(item, idx) in actionEdit.items"
+                        :key="item.sid"
+                        :class="['action-step', { 'is-tied': tiedActionSids.has(item.sid) }]"
+                      >
+                        <span
+                          class="action-step-no"
+                          :title="tiedActionSids.has(item.sid)
+                            ? '标签页切换和它的前一步绑定，不能单独拖动'
+                            : '按住拖动排序；拖到上面的流程里可移出动作'"
+                        >{{ idx + 1 }}</span>
+                        <span :class="['kind-tag', 'kind-' + stepTone(item.step.type)]">{{ stepKindLabel(item.step.type) }}</span>
+                        <span class="action-step-text" :title="stepDescription(item.step)">{{ stepDescription(item.step) }}</span>
+                        <span class="action-step-tail">
+                          <span v-if="item.src === 'flow'" class="ae-from" title="从流程拖进来；保存后会从流程移走">来自流程</span>
+                          <span v-for="key in item.paramKeys" :key="key" class="ae-param"
+                                :title="`参数 {{${key}}}：调用时按各调用点的实参填充`">{{ key }}</span>
+                          <el-button
+                            class="action-step-del"
+                            text
+                            :icon="Delete"
+                            :disabled="tiedActionSids.has(item.sid)"
+                            :title="tiedActionSids.has(item.sid)
+                              ? '标签页切换和它的前一步绑定，不能单独删除'
+                              : '从动作里删除这一步（保存后生效）'"
+                            @click.stop="removeActionItem(idx)"
+                          />
+                        </span>
+                      </li>
+                      <li v-if="!actionEdit.items.length" class="action-empty-drop">
+                        动作里没有步骤了；把流程里的步骤拖到这里，至少保留一步才能保存。
+                      </li>
+                    </ol>
+                    <div class="ae-foot">
+                      <span class="ae-hint">
+                        保存直接更新这个动作{{ actionEdit.calls > 1 ? '，所有调用点一起生效' : '' }}；
+                        拖进/拖出会同时调整流程，保存后重新编号。
+                      </span>
+                      <el-button size="small" :disabled="actionEdit.saving" @click="cancelActionEdit">取消</el-button>
+                      <el-button
+                        size="small"
+                        type="primary"
+                        :loading="actionEdit.saving"
+                        :disabled="!actionEdit.dirty || !actionEdit.items.length"
+                        @click="saveActionEdit"
+                      >保存</el-button>
+                    </div>
+                  </template>
+                </div>
                 <!-- 点击引起的跳转：脚本里会在这一步后补一句「等跳转落地」，
                      这里把落点标出来，否则生成的那行 waitForURL 看起来像凭空多出来的 -->
                 <div v-if="step.nav_to" class="step-nav" :title="step.nav_to">
@@ -935,7 +1033,7 @@
                   <!-- 页面归属：两个页面都有「确定」时，只看元素名分不出是哪个。 -->
                   <span v-if="pageLabel(step)" class="step-page" :title="pageTitleAttr(step)">{{ pageLabel(step) }}</span>
                   <span class="step-alias">{{ step.target.alias || '未命名元素' }}</span>
-                  <code class="locator-code">{{ locatorText(step.target) }}</code>
+                  <code v-if="!panelMode" class="locator-code">{{ locatorText(step.target) }}</code>
                   <el-tag size="small" :type="statusTone(effectiveStatus(step))" effect="light" :title="statusHint(step)">
                     {{ statusLabel(effectiveStatus(step)) }}
                   </el-tag>
@@ -949,6 +1047,7 @@
                   <!-- 人眼确认：把这条定位匹配到的元素全部框出来。比任何文字都可靠，
                        尤其是「两个都叫确定」这种文本和行文本都一样的场景。 -->
                   <el-button
+                    v-if="step.no > 0"
                     class="peek-btn"
                     text
                     :icon="Aim"
@@ -960,6 +1059,7 @@
                   <!-- 定位详情：采用的到底是哪一条、此刻页面上还在不在、唯不唯一。
                        和准星分工：准星是「圈出来我自己看」，这里是「给我一个结论 + 逐条候选」。 -->
                   <el-button
+                    v-if="step.no > 0"
                     class="loc-detail-btn"
                     text
                     :icon="Search"
@@ -967,6 +1067,15 @@
                     :title="canInspect ? '查看定位并在当前页面校验唯一性' : '浏览器已关闭，无法校验当前页面'"
                     @click.stop="openLocDetail(step)"
                   />
+                </div>
+                <!-- 面板里定位默认收起，hover / 聚焦时展开。
+                     不放在上面那行里：它是 flex-wrap 的子项，收起时也会占掉一整行和
+                     行间距，卡片会白高 8px。也不用 display:none↔block —— 不可过渡，
+                     卡片会在一帧内跳高，下面的行全被顶一下。 -->
+                <div v-if="panelMode && step.target" class="locator-reveal">
+                  <div class="locator-reveal-inner">
+                    <code class="locator-code">{{ locatorText(step.target) }}</code>
+                  </div>
                 </div>
                 <div v-if="peek.no === step.no" class="peek-panel">
                   <div class="peek-head">
@@ -997,7 +1106,7 @@
                 </div>
               </template>
             </div>
-            <div v-if="!selectMode" class="step-actions">
+            <div v-if="!selectMode && !actionEdit.open" class="step-actions">
               <!-- 上移/下移已删掉：排序拖编号就行，省下的宽度留给标题。
                    执行前等待平时只显示「⏱ 5s」；点时钟才展开秒数输入，再点一次收回。 -->
               <span v-if="step.type === 'click'" class="settle-ctrl">
@@ -1596,8 +1705,8 @@
         </div>
       </el-card>
 
-      <!-- 生成：面板模式下录制中就藏起来，停止或暂停后再出现（录制中空间留给步骤；
-           暂停时步骤不再增长，正好可以回放/生成）。 -->
+      <!-- 收尾：面板模式下录制中就藏起来，停止或暂停后再出现（录制中空间留给步骤；
+           暂停时步骤不再增长，正好可以回放；生成任务书则收掉面板回主配置页做）。 -->
       <aside v-if="session && (!compactMode || isStopped || paused)" :class="['side-rail', { 'is-line': compactMode }]">
         <!-- 面板模式：这一块压成一行——左边状态、右边两颗按钮，标题和说明都不占位置。
              它下面就是步骤区，留 260px 给三行字等于让人看不清步骤（用户实测反馈）。 -->
@@ -1613,6 +1722,13 @@
                          :title="canReplay ? '打开独立回放窗口' : '先暂停录制'"
                          @click="openDebugReplay">调试回放</el-button>
               <el-button v-if="planState" size="small" type="primary" @click="openPlanSheet">打开任务书</el-button>
+              <!-- 面板窗口只有 420–600 宽，任务书正文在这儿读不开：这颗按钮不再就地规划，
+                   而是按「停止录制」的方式关掉面板与录制浏览器，回主配置页再生成。
+                   生成仍然只有主窗口那一个入口，不在两个窗口各跑一遍。 -->
+              <el-button v-else-if="panelMode" size="small" type="primary" :loading="stopping"
+                         :disabled="!canPlan"
+                         :title="canPlan ? '停止录制并关闭面板，回 AutoCase 主窗口点「生成任务书」' : (generating ? '正在生成，请等主窗口完成' : (generateBlockReason || '暂不可生成'))"
+                         @click="goGenerateInConfig">去生成任务书</el-button>
               <el-button v-else size="small" type="primary" :loading="generating"
                          :disabled="!canPlan" @click="runPlan(false)">生成任务书</el-button>
             </span>
@@ -2441,13 +2557,17 @@
           <div class="stop-loading-copy">
             <p class="stop-title">{{ stopDialog.timedOut ? '关闭时间较长' : '正在关闭录制窗口' }}</p>
             <p class="stop-text">
-              {{ stopDialog.timedOut ? '窗口没有自动关闭，请手动关闭这个窗口。' : '已停止录制，正在关闭被测浏览器…' }}
+              {{ stopDialog.timedOut
+                ? '窗口没有自动关闭，请手动关闭这个窗口。'
+                : (stopDialog.planNext
+                    ? '已停止录制，正在关闭面板与录制浏览器…'
+                    : '已停止录制，正在关闭被测浏览器…') }}
             </p>
           </div>
         </div>
         <template #footer>
           <template v-if="!stopDialog.closing">
-            <el-button @click="stopDialog.visible = false">继续录制</el-button>
+            <el-button @click="stopDialog.visible = false">{{ stopDialog.planNext ? '取消' : '继续录制' }}</el-button>
             <el-button type="danger" @click="confirmStop">{{ stopDialog.confirm }}</el-button>
           </template>
           <div v-else class="stop-foot">
@@ -2464,7 +2584,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Aim, ArrowDown, Box, CircleCheck, Clock, Close, Delete, Document, Download, EditPen, Files, FolderOpened, Loading, MoreFilled, Plus, Pointer, Postcard, Refresh, Search, Setting, Tickets, Timer, Unlock, Upload, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { Aim, ArrowDown, ArrowUp, Box, CircleCheck, Clock, Close, Delete, Document, Download, EditPen, Files, FolderOpened, Loading, MoreFilled, Plus, Pointer, Postcard, Refresh, Search, Setting, Tickets, Timer, Unlock, Upload, VideoCamera, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import api from '../api'
 import PathPickerDialog from '../components/PathPickerDialog.vue'
@@ -2721,7 +2841,10 @@ const stopDialog = reactive({
   timedOut: false,
   title: '',
   message: '',
-  confirm: ''
+  confirm: '',
+  // 面板里点的是「去生成任务书」：停止只是顺带，弹窗收尾的文案要按这个目的说，
+  // 别让人以为这次点的是普通停止。embed 模式不会走这条。
+  planNext: false
 })
 let stopDialogTimer = null
 const closingBrowser = ref(false)
@@ -3501,11 +3624,11 @@ function applySession(data) {
     const latest = data.picks[data.picks.length - 1]
     if (draft.value.kind === 'slider') {
       // 滑块没有目标元素，拾取只是为了拿到「验证码在哪」这段选择器。
-      draft.value.sliderSelector = sliderSelectorFrom(latest.target && latest.target.snap)
+      draft.value.sliderSelector = sliderSelectorFrom(latest.target)
       draft.value.sliderPicked = (latest.target && latest.target.alias) || '已拾取'
     } else if (draft.value.kind === 'captcha') {
       // 验证码同理：拾取只取位置，不存 target。两个拾取按钮靠 pickField 区分。
-      const selector = sliderSelectorFrom(latest.target && latest.target.snap)
+      const selector = sliderSelectorFrom(latest.target)
       const alias = (latest.target && latest.target.alias) || '已拾取'
       if (draft.value.pickField === 'input') {
         draft.value.captchaInputSelector = selector
@@ -4348,6 +4471,7 @@ async function startFromConfig() {
 // 工具栏那颗「开始」：配置没填全就别先报错，直接把配置送到眼前。
 // 面板模式下配置是内联卡，展开它而不是打开抽屉。
 function onStartClick() {
+  if (actionEditBlocked()) return
   if (!configReady.value) {
     if (compactMode.value) configExpanded.value = true
     else configOpen.value = true
@@ -4447,6 +4571,7 @@ const draftTip = computed(() => {
 // 保存只是一次快照：浏览器、暂停状态、录制状态都不动，用户可以接着录。
 // 同一条会话再存一次是更新，不会在记录里堆副本（draft_id 由后端记在会话上）。
 async function saveDraft() {
+  if (actionEditBlocked()) return
   if (savingDraft.value || !steps.value.length) return
   // 草稿只存步骤和定位（drafts._lean_target 会剥掉 shot / matches）。
   // 还有未确认的步骤时，续录后它们既没有当时的图、也没有候选行文本，
@@ -4488,10 +4613,12 @@ async function saveDraft() {
 function stopConfirmText() {
   const total = steps.value.length
   const kept = total ? `已录制的 ${total} 个步骤会保留。` : ''
+  // 面板关掉时动作编辑草稿也一起没了；确认框里要说清，别让人以为还能回来接着改。
+  const draft = actionEdit.open ? '动作编辑里未保存的改动会一起丢弃。' : ''
   if (panelMode.value) {
     return {
       title: '停止录制并关闭面板',
-      message: `${kept}停止后面板窗口与录制浏览器一并关闭，回到 AutoCase 主窗口即可继续生成任务书。`,
+      message: `${kept}${draft}停止后面板窗口与录制浏览器一并关闭，回到 AutoCase 主窗口即可继续生成任务书。`,
       confirm: '停止并关闭'
     }
   }
@@ -4515,6 +4642,24 @@ function stopRecording() {
   stopDialog.title = ask.title
   stopDialog.message = ask.message
   stopDialog.confirm = ask.confirm
+  stopDialog.planNext = false
+  stopDialog.closing = false
+  stopDialog.timedOut = false
+  stopDialog.visible = true
+}
+
+// 面板里的「去生成任务书」：任务书正文要铺开读，面板这扇窄窗口放不下，所以这里
+// 先按停止的方式把录制收掉（面板与录制浏览器一起关），人回到 AutoCase 主配置页
+// 再点「生成任务书」。多一次点击，换来的是不会在关窗时把正在跑的规划一起打断。
+function goGenerateInConfig() {
+  if (stopping.value || stopDialog.visible) return
+  const total = steps.value.length
+  const kept = total ? `已录制的 ${total} 个步骤会保留。` : ''
+  const draft = actionEdit.open ? '动作编辑里未保存的改动会一起丢弃。' : ''
+  stopDialog.title = '去配置页生成任务书'
+  stopDialog.message = `${kept}${draft}这里会先停止录制并关闭面板与录制浏览器，回到 AutoCase 主窗口点「生成任务书」继续。`
+  stopDialog.confirm = '停止并关闭'
+  stopDialog.planNext = true
   stopDialog.closing = false
   stopDialog.timedOut = false
   stopDialog.visible = true
@@ -4537,11 +4682,18 @@ async function confirmStop() {
     if (data.browser_open) {
       // 兜底：正常并排不会走到这里，但嵌入模式仍然需要把弹窗收掉。
       stopDialog.visible = false
-      ElMessage.success('已停止录制 · 浏览器保持打开，可继续拾取或验证断言')
+      ElMessage.success(stopDialog.planNext
+        ? '已停止录制 · 浏览器仍在，回到主窗口点「生成任务书」'
+        : '已停止录制 · 浏览器保持打开，可继续拾取或验证断言')
       return
     }
     if (panelMode.value) {
       // 当前窗口就是面板：转圈转到后端把它关掉为止，不主动收弹窗。
+      // 例外是会话早就停过（录制线程已退，stop 直接返回快照）：后端不会再关这扇窗，
+      // 自己关一次，别让人对着转圈干等 20 秒。
+      if (data.close_done) {
+        try { window.close() } catch (e) { /* 浏览器不允许脚本关窗时留给用户手动关 */ }
+      }
       return
     }
     const done = await waitRecordingClosed()
@@ -4596,6 +4748,8 @@ async function togglePick(on, quiet = false) {
 
 async function togglePause() {
   if (pausing.value) return
+  // 继续录制会让草稿和实时步骤打架：先把动作编辑收掉（有改动会问一句）。
+  if (!paused.value && actionEdit.open && !(await requestCloseActionEditor())) return
   pausing.value = true
   try {
     const { data } = await api.setRecordingPause(!paused.value)
@@ -4615,6 +4769,61 @@ const pickedNos = ref([])
 const groupDialog = reactive({ visible: false, busy: false, name: '', desc: '', params: [], steps: [], noWorkspace: false, mode: 'action' })
 const argsDialog = reactive({ visible: false, busy: false, kind: 'call', no: 0, name: '', rows: [] })
 const actionLib = reactive({ open: false })
+
+// ---- 动作展开编辑 ----
+// 展开后看到的是动作定义的「草稿」：拖进/拖出/删除都只改这份草稿，点保存才提交。
+// 取消、收起、以及继续录制都直接丢草稿，流程本身没动过。
+const actionEdit = reactive({
+  open: false,
+  busy: false,
+  saving: false,
+  dirty: false,
+  callNo: 0,
+  actionId: '',
+  name: '',
+  calls: 0,
+  items: [],   // 动作子步骤：{sid, src:'action'|'flow', no, step, paramKeys}
+  flow: [],    // 流程草稿：{sid, kind:'step'|'out', no, srcNo, step, paramKeys}
+  dropped: []  // 从流程拖进动作后又删掉的流程步骤号（整步删除）
+})
+const actionListEl = ref(null)
+let actionSortable = null
+let draftOutSeq = 0
+// 主列表的 Sortable 在编辑态要带上跨列表 group；记住上次的模式，换模式时重建。
+let sortableDraft = false
+
+// 录制中不允许编辑：录制线程还在追加步骤，草稿会漏步、列表跳动也容易拖错。
+const canEditAction = computed(() =>
+  (paused.value || isStopped.value) && !selectMode.value && !generating.value && !actionEdit.saving
+)
+// 编辑态下列表按草稿渲染；未编辑时还是原来的 steps，模板里的逻辑不用分叉。
+const shownFlowSteps = computed(() => (actionEdit.open
+  ? actionEdit.flow.map((entry) => entry.step)
+  : steps.value))
+// 标签页切换和它的前一步是绑定的：整对不能单独拖动、删除。
+const tiedFlowNos = computed(() => {
+  const set = new Set()
+  if (!actionEdit.open) return set
+  const list = actionEdit.flow
+  for (let i = 0; i < list.length; i += 1) {
+    if (list[i].step.type === 'new_page') {
+      set.add(list[i].step.no)
+      if (i > 0) set.add(list[i - 1].step.no)
+    }
+  }
+  return set
+})
+const tiedActionSids = computed(() => {
+  const set = new Set()
+  const items = actionEdit.items
+  for (let i = 0; i < items.length; i += 1) {
+    if (items[i].step.type === 'new_page') {
+      set.add(items[i].sid)
+      if (i > 0) set.add(items[i - 1].sid)
+    }
+  }
+  return set
+})
 
 const actions = computed(() => session.value?.actions || [])
 // 后置处理：null 表示没设。它不在 steps 里，单独渲染在列表末尾。
@@ -4636,6 +4845,7 @@ const pickHint = computed(() => {
 const pickHintBad = computed(() => pickedNos.value.length > 0 && !pickContiguous.value)
 
 function toggleSelectMode() {
+  if (actionEditBlocked()) return
   selectMode.value = !selectMode.value
   if (!selectMode.value) pickedNos.value = []
   // 多选态关掉拖拽，开着的话拖一下就和勾选打架。
@@ -4691,6 +4901,12 @@ function onSelectKeydown(event) {
     configOpen.value = false
     return
   }
+  if (event.key === 'Escape' && actionEdit.open) {
+    // 任务书浮层在最上面，它有自己的 Esc；别把下面的动作编辑一起收了。
+    if (planSheetOpen.value || groupDialog.visible || argsDialog.visible) return
+    requestCloseActionEditor()
+    return
+  }
   if (event.key === 'Escape' && selectMode.value) {
     // 弹窗开着时先让弹窗自己收（它的 Esc 比这里更近），这里只处理列表态。
     if (groupDialog.visible || argsDialog.visible) return
@@ -4739,6 +4955,7 @@ function defaultActionName(picked) {
 }
 
 function openGroupDialog(mode = 'action') {
+  if (actionEditBlocked()) return
   const ready = mode === 'teardown' ? canTeardown.value : canGroup.value
   if (!ready) return
   const picked = steps.value.filter((step) => pickedSorted.value.includes(step.no))
@@ -4814,6 +5031,7 @@ function callArgs(step) {
 }
 
 async function insertAction(action) {
+  if (actionEditBlocked()) return
   try {
     const { data } = await api.insertRecordingCall(action.id)
     applySession(data)
@@ -4827,6 +5045,7 @@ async function insertAction(action) {
 // 动作名是封装时随手填的，事后发现不贴切很常见。改名字会同步所有调用卡的显示，
 // 但不动子步骤——要改内容只能解封。
 async function renameAction(action) {
+  if (actionEditBlocked()) return
   let name
   try {
     const answer = await ElMessageBox.prompt('给这个动作起个新名字', '重命名动作', {
@@ -4847,6 +5066,7 @@ async function renameAction(action) {
 }
 
 async function removeAction(action) {
+  if (actionEditBlocked()) return
   try {
     await ElMessageBox.confirm(
       `从动作库删除「${action.name}」？已经解封出来的步骤不受影响。`,
@@ -4865,6 +5085,7 @@ async function removeAction(action) {
 }
 
 async function ungroupStep(step) {
+  if (actionEditBlocked()) return
   const action = callAction(step)
   const count = action ? action.steps : ''
   try {
@@ -4885,6 +5106,7 @@ async function ungroupStep(step) {
 }
 
 function openArgsDialog(step) {
+  if (actionEditBlocked()) return
   const action = callAction(step)
   if (!action) return
   argsDialog.kind = 'call'
@@ -4927,6 +5149,326 @@ async function submitArgs() {
   }
 }
 
+// ---- 动作展开编辑：草稿 / 拖拽 / 保存 ----
+
+function actionEditBlocked() {
+  if (!actionEdit.open) return false
+  ElMessage.warning('先保存或取消动作编辑')
+  return true
+}
+
+function nextDraftOutNo() {
+  draftOutSeq += 1
+  return -draftOutSeq
+}
+
+function setActionListEl(el) {
+  if (!el) {
+    actionListEl.value = null
+    return
+  }
+  if (actionListEl.value === el) return
+  actionListEl.value = el
+  nextTick(initActionSorter)
+}
+
+// 读一次动作内容。快照里只有步数，子步骤（含定位）留在服务端；
+// 这里按这次调用的实参填好再给界面，用户看到的就是「这个调用点实际会做的几步」。
+async function openActionEditor(step) {
+  const action = callAction(step)
+  if (!action) return
+  actionEdit.busy = true
+  actionEdit.saving = false
+  actionEdit.dirty = false
+  actionEdit.open = true
+  actionEdit.callNo = step.no
+  actionEdit.actionId = action.id
+  actionEdit.name = action.name
+  actionEdit.calls = action.calls || 0
+  actionEdit.items = []
+  actionEdit.dropped = []
+  // 流程草稿先按当前列表铺好：动作内容还在路上，列表不能先空一帧。
+  actionEdit.flow = steps.value.map((s) => ({
+    sid: 's' + s.no,
+    kind: 'step',
+    no: s.no,
+    step: s
+  }))
+  draftOutSeq = 0
+  editing.value = null
+  closePeek()
+  await nextTick()
+  initSortable(true)
+  try {
+    const { data } = await api.getRecordingAction(action.id, step.no)
+    // 等请求回来时用户可能已经收起/换了另一张卡。
+    if (!actionEdit.open || actionEdit.callNo !== step.no) return
+    actionEdit.name = data.name
+    actionEdit.calls = (data.calls || []).length
+    const params = data.params || []
+    actionEdit.items = (data.items || []).map((sub) => ({
+      sid: 'a' + sub.no,
+      src: 'action',
+      no: sub.no,
+      step: sub,
+      paramKeys: params.filter((p) => p.step === sub.no).map((p) => p.key)
+    }))
+    // 先落 busy：<ol> 要等 busy=false 那一帧才渲染出来，早一步 initActionSorter 只会拿到 null。
+    actionEdit.busy = false
+    await nextTick()
+    initActionSorter()
+  } catch (error) {
+    ElMessage.error(errorText(error))
+    closeActionEditor(true)
+  } finally {
+    actionEdit.busy = false
+  }
+}
+
+async function toggleActionEditor(step) {
+  if (actionEdit.open && actionEdit.callNo === step.no) {
+    await requestCloseActionEditor()
+    return
+  }
+  if (!canEditAction.value) {
+    ElMessage.info('暂停或停止录制后才能编辑动作')
+    return
+  }
+  if (actionEdit.open && !(await requestCloseActionEditor())) return
+  await openActionEditor(step)
+}
+
+// 普通态点调用卡的标题也能展开/收起，不逼着用户去点那个小箭头；多选态让给勾选。
+function onStepMainClick(step) {
+  if (selectMode.value) return
+  if (step.type === 'call' && callAction(step)) toggleActionEditor(step)
+}
+
+async function requestCloseActionEditor() {
+  if (actionEdit.dirty) {
+    try {
+      await ElMessageBox.confirm(
+        '动作编辑里还有未保存的改动，收起会丢弃这些改动。继续？',
+        '放弃动作改动',
+        { type: 'warning', confirmButtonText: '放弃改动', cancelButtonText: '继续编辑' }
+      )
+    } catch {
+      return false
+    }
+  }
+  closeActionEditor(true)
+  return true
+}
+
+async function cancelActionEdit() {
+  if (actionEdit.saving) return
+  await requestCloseActionEditor()
+}
+
+function closeActionEditor(force = false) {
+  if (!actionEdit.open) return
+  if (!force && actionEdit.dirty) return
+  actionEdit.open = false
+  actionEdit.busy = false
+  actionEdit.saving = false
+  actionEdit.dirty = false
+  actionEdit.callNo = 0
+  actionEdit.actionId = ''
+  actionEdit.name = ''
+  actionEdit.calls = 0
+  actionEdit.items = []
+  actionEdit.flow = []
+  actionEdit.dropped = []
+  actionListEl.value = null
+  nextTick(() => {
+    destroyActionSorter()
+    initSortable(true)
+  })
+}
+
+async function saveActionEdit() {
+  if (!actionEdit.open || actionEdit.saving) return
+  if (!actionEdit.items.length) {
+    ElMessage.warning('动作至少要保留一步')
+    return
+  }
+  if (!actionEdit.dirty) return
+  if (actionEdit.calls > 1) {
+    try {
+      await ElMessageBox.confirm(
+        `这个动作在流程里被调用了 ${actionEdit.calls} 次，保存后所有调用点一起变。继续？`,
+        '更新动作',
+        { type: 'warning', confirmButtonText: '保存' }
+      )
+    } catch {
+      return
+    }
+  }
+  actionEdit.saving = true
+  try {
+    const items = actionEdit.items.map((it) => ({ src: it.src, no: it.no }))
+    const flow = actionEdit.flow.map((entry) => (entry.kind === 'out'
+      ? { kind: 'out', no: entry.srcNo }
+      : { kind: 'step', no: entry.no }))
+    const { data } = await api.editRecordingAction(actionEdit.actionId, {
+      call_no: actionEdit.callNo,
+      items,
+      flow,
+      // 拖进动作又删掉的流程步骤：动作里没有、流程里也没有，后端据此整步删除。
+      dropped: [...actionEdit.dropped]
+    })
+    const name = actionEdit.name
+    applySession(data)
+    // 动作定义变了，之前那份任务书里的「复用/参数」描述可能已经不对；保留正文但标过期，
+    // 让人重新规划后再执行。流动步骤变没变都这么做，宁可多一次规划。
+    if (planState.value) planState.value = { ...planState.value, stale: true }
+    closeActionEditor(true)
+    ElMessage.success(`动作「${name}」已更新`)
+  } catch (error) {
+    ElMessage.error(errorText(error))
+  } finally {
+    actionEdit.saving = false
+  }
+}
+
+async function removeActionItem(index) {
+  const item = actionEdit.items[index]
+  if (!item) return
+  if (tiedActionSids.value.has(item.sid)) {
+    ElMessage.warning('标签页切换和它的前一步绑定，不能单独删除')
+    return
+  }
+  if (item.src === 'flow' || item.paramKeys.length) {
+    const why = item.src === 'flow'
+      ? '这一步是从流程拖进来的，删除后流程里也会没有它。'
+      : `这一步带着参数 ${item.paramKeys.join('、')}，删除后参数也一起删。`
+    try {
+      await ElMessageBox.confirm(`${why}保存后生效。继续？`, '删除动作步骤',
+        { type: 'warning', confirmButtonText: '删除' })
+    } catch {
+      return
+    }
+  }
+  actionEdit.items.splice(index, 1)
+  if (item.src === 'flow') actionEdit.dropped.push(item.no)
+  actionEdit.dirty = true
+  await nextTick()
+  initActionSorter()
+}
+
+function initActionSorter() {
+  destroyActionSorter()
+  if (!actionListEl.value) return
+  actionSortable = Sortable.create(actionListEl.value, {
+    animation: 150,
+    handle: '.action-step-no',
+    // 和主列表共用一个 group：流程步骤能拖进来，动作步骤能拖出去。
+    group: { name: 'rec-steps', pull: true, put: true },
+    draggable: '.action-step',
+    filter: '.is-tied',
+    ghostClass: 'action-step-ghost',
+    chosenClass: 'action-step-chosen',
+    onEnd: onDraftActionEnd
+  })
+}
+
+function destroyActionSorter() {
+  if (actionSortable) {
+    actionSortable.destroy()
+    actionSortable = null
+  }
+}
+
+// Sortable 已经把 DOM 挪过去了；顺序以草稿数组为准，先把它放回原位再改数据，
+// 否则 Vue 的 keyed diff 会和它打架。
+function restoreSortableDom(evt) {
+  const { from, to, item, oldIndex } = evt
+  if (!from || !item) return
+  const siblings = Array.from(from.children).filter((el) => el !== item)
+  from.insertBefore(item, siblings[oldIndex] || null)
+  for (const root of [from, to]) {
+    if (!root || !root.querySelectorAll) continue
+    root.querySelectorAll('.step-chosen, .step-ghost, .step-drag, .action-step-chosen, .action-step-ghost')
+      .forEach((el) => el.classList.remove('step-chosen', 'step-ghost', 'step-drag',
+        'action-step-chosen', 'action-step-ghost'))
+  }
+}
+
+function onDraftActionEnd(evt) {
+  const { from, to, oldIndex, newIndex } = evt
+  restoreSortableDom(evt)
+  if (oldIndex == null || newIndex == null) return
+  if (from === to) {
+    if (oldIndex === newIndex) return
+    const [moved] = actionEdit.items.splice(oldIndex, 1)
+    actionEdit.items.splice(newIndex, 0, moved)
+    actionEdit.dirty = true
+    return
+  }
+  if (to !== timelineEl.value) return
+  const moved = actionEdit.items[oldIndex]
+  if (!moved) return
+  if (tiedActionSids.value.has(moved.sid)) {
+    ElMessage.warning('标签页切换和它的前一步绑定，不能单独移出')
+    return
+  }
+  actionEdit.items.splice(oldIndex, 1)
+  if (moved.src === 'flow') {
+    actionEdit.dropped = actionEdit.dropped.filter((no) => no !== moved.no)
+  }
+  const outNo = nextDraftOutNo()
+  const entry = moved.src === 'flow'
+    ? { sid: 's' + moved.no, kind: 'step', no: moved.no, step: moved.step }
+    : {
+        sid: 'o' + (-outNo),
+        kind: 'out',
+        no: outNo,
+        srcNo: moved.no,
+        step: { ...moved.step, no: outNo },
+        paramKeys: moved.paramKeys
+      }
+  actionEdit.flow.splice(newIndex, 0, entry)
+  actionEdit.dirty = true
+}
+
+function onDraftFlowEnd(evt) {
+  const { from, to, oldIndex, newIndex } = evt
+  restoreSortableDom(evt)
+  if (oldIndex == null || newIndex == null) return
+  if (to === from) {
+    // 编辑动作时不顺带改流程顺序：拖进动作框才算有效操作。
+    if (oldIndex !== newIndex) {
+      ElMessage.info('编辑动作时只支持把步骤拖进动作；流程顺序保存后再调')
+    }
+    return
+  }
+  if (to !== actionListEl.value) return
+  const entry = actionEdit.flow[oldIndex]
+  if (!entry) return
+  if (tiedFlowNos.value.has(entry.step.no)) {
+    ElMessage.warning('标签页切换和它的前一步绑定，不能单独拖进动作')
+    return
+  }
+  if (entry.step.type === 'call') {
+    ElMessage.warning('动作调用不能拖进动作里（暂不支持嵌套）')
+    return
+  }
+  actionEdit.flow.splice(oldIndex, 1)
+  actionEdit.dropped = actionEdit.dropped.filter((no) => no !== entry.no)
+  const item = entry.kind === 'step'
+    ? { sid: 'f' + entry.no, src: 'flow', no: entry.no, step: entry.step, paramKeys: [] }
+    : {
+        sid: 'a' + entry.srcNo,
+        src: 'action',
+        no: entry.srcNo,
+        step: { ...entry.step, no: entry.srcNo },
+        paramKeys: entry.paramKeys || []
+      }
+  actionEdit.items.splice(newIndex, 0, item)
+  actionEdit.dirty = true
+}
+
+
 async function clearTeardown() {
   if (!teardown.value) return
   try {
@@ -4942,6 +5484,7 @@ async function clearTeardown() {
 }
 
 async function removeStep(no) {
+  if (actionEditBlocked()) return
   try {
     const { data } = await api.deleteRecordingStep(no)
     applySession(data)
@@ -4993,6 +5536,7 @@ function editableFields(step) {
 }
 
 function startEdit(step) {
+  if (actionEditBlocked()) return
   // 滑块的三个参数（选择器 / 重试 / 超时）不在就地编辑的支持范围内：
   // 点进去只会得到一个空表单和一次必然失败的保存。要改就删掉重插。
   if (step.type === 'slider') {
@@ -5063,10 +5607,11 @@ async function saveEdit() {
 const timelineEl = ref(null)
 let sortable = null
 
-function initSortable() {
+function initSortable(force = false) {
   if (!timelineEl.value) return
-  // `.timeline` 是 v-if 渲染的，元素变化时重建实例。
-  if (sortable && sortable.el === timelineEl.value) {
+  // `.timeline` 是 v-if 渲染的，元素变化时重建实例；进/出动作编辑态也要重建，
+  // 因为只有编辑态才挂跨列表 group 和草稿版的 onEnd。
+  if (sortable && sortable.el === timelineEl.value && !force && sortableDraft === actionEdit.open) {
     sortable.option('disabled', !canEdit.value || selectMode.value)
     return
   }
@@ -5074,32 +5619,40 @@ function initSortable() {
     sortable.destroy()
     sortable = null
   }
+  sortableDraft = actionEdit.open
   sortable = Sortable.create(timelineEl.value, {
     animation: 150,
     handle: '.step-no',
+    draggable: '.step',
+    // 编辑动作时主列表和动作子列表共用一个 group：双向拖拽靠它。
+    group: actionEdit.open ? { name: 'rec-steps', pull: true, put: true } : undefined,
+    // 标签页切换和它的前一步绑定，单独拖动没有意义。
+    filter: actionEdit.open ? '.is-tied-step' : undefined,
     ghostClass: 'step-ghost',
     chosenClass: 'step-chosen',
     disabled: !canEdit.value || selectMode.value,
-    onEnd: async (evt) => {
-      const { oldIndex, newIndex, from, item } = evt
-      if (oldIndex === newIndex || oldIndex == null || newIndex == null) return
-      // 先把 DOM 还原：顺序以后端返回的数据为准，避免 Vue 的 keyed diff 和 sortable 打架。
-      // 注意 item 已经被 sortable 移动过，要先把它排除再取 oldIndex 位置，否则会错一位。
-      const siblings = Array.from(from.children).filter((el) => el !== item)
-      from.insertBefore(item, siblings[oldIndex] || null)
-      // sortable 加的临时类不会自动清掉，残留会让某一行一直带阴影。
-      from.querySelectorAll('.step-chosen, .step-ghost, .step-drag')
-        .forEach((el) => el.classList.remove('step-chosen', 'step-ghost', 'step-drag'))
-      const moved = steps.value[oldIndex]
-      if (!moved) return
-      try {
-        const { data } = await api.reorderRecordingStep(moved.no, newIndex)
-        applySession(data)
-      } catch (error) {
-        ElMessage.warning(errorText(error))
-      }
-    }
+    onEnd: actionEdit.open ? onDraftFlowEnd : onFlowSortEnd
   })
+}
+
+// 正常态：拖完把 DOM 还原，让后端改顺序，再以快照为准重建。
+async function onFlowSortEnd(evt) {
+  const { oldIndex, newIndex, from, item } = evt
+  if (oldIndex === newIndex || oldIndex == null || newIndex == null) return
+  // 注意 item 已经被 sortable 移动过，要先把它排除再取 oldIndex 位置，否则会错一位。
+  const siblings = Array.from(from.children).filter((el) => el !== item)
+  from.insertBefore(item, siblings[oldIndex] || null)
+  // sortable 加的临时类不会自动清掉，残留会让某一行一直带阴影。
+  from.querySelectorAll('.step-chosen, .step-ghost, .step-drag')
+    .forEach((el) => el.classList.remove('step-chosen', 'step-ghost', 'step-drag'))
+  const moved = steps.value[oldIndex]
+  if (!moved) return
+  try {
+    const { data } = await api.reorderRecordingStep(moved.no, newIndex)
+    applySession(data)
+  } catch (error) {
+    ElMessage.warning(errorText(error))
+  }
 }
 
 // ---- 断言 / 等待 模板 ----
@@ -5170,6 +5723,7 @@ watch(formSig, () => {
 })
 
 function openDraft(kind, afterNo = null) {
+  if (actionEditBlocked()) return
   const first = draftKindTypes(kind)[0]
   draft.value = {
     kind,
@@ -5407,6 +5961,7 @@ async function expandPanel() {
 
 // 行内「+」的四个入口：刷新走独立通道，其余三种打开草稿卡。
 function onInsertCommand(kind, afterNo) {
+  if (actionEditBlocked()) return
   if (kind === 'reload') return insertReload(afterNo)
   if (kind === 'close') return insertClose(afterNo)
   openDraft(kind, afterNo)
@@ -5717,8 +6272,13 @@ async function insertDownloadStep() {
 
 // 滑块拾取：优先用 id（短、稳），没有就退到录制时算好的绝对路径。
 // 绝对路径长一点，但不依赖 class 名；失效时只会退回自动识别，不会点错地方。
-function sliderSelectorFrom(snap) {
+function sliderSelectorFrom(target) {
+  const snap = (target && target.snap) || target || {}
   if (!snap) return ''
+  // 录制侧算好的稳定版（id / 唯一 class / 带 class 的祖先 + 相对路径，都在页面里验过唯一）。
+  // 比下面的绝对路径耐用得多：滑块那种 canvas 没有 id，退回 css 就是
+  // div:nth-of-type(1) > canvas:nth-of-type(2)，页面多包一层就废。
+  if (snap.css_stable) return snap.css_stable
   if (snap.id) {
     try {
       return '#' + CSS.escape(snap.id)
@@ -6404,6 +6964,7 @@ function notePayload() {
 
 // ---- 规划：只出任务书，不写文件 ----
 async function runPlan(replan) {
+  if (actionEditBlocked()) return
   if (generating.value) return
   planPending.value = true
   planError.value = null
@@ -6491,6 +7052,7 @@ async function cancelEmit() {
 }
 
 async function executePlan(overwrite) {
+  if (actionEditBlocked()) return
   // 没有确认过的写入位置就不写：任务书的「按此执行」本身就是授权动作。
   if (!planData.value || !planTarget.value || planStale.value || generating.value) return
   // 待确认不再是「提醒一下再放行」：直接把那几步排队弹出来，选完或明确降级之后才能写。
@@ -7319,6 +7881,9 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 
 /* 时间线 */
 .timeline { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:0; }
+/* 编辑动作时给列表底部留一块落点：否则拖到最后一个步骤下面的空白处不算「放进流程」，
+   Sortable 会把动作步骤弹回动作里（实测）。 */
+.timeline.is-action-editing { padding-bottom:44px; }
 /* 时间轴：卡片改成「一条线串起来的行」。左侧序号是节点，按步骤类型着色，
    扫一眼能看出这一段是操作、动作还是校验；卡片边框去掉后密集步骤也不会碎。
    竖线的横坐标不从行推导，而是由 --rail-x 直接给出圆心：面板行有 10px 左内边距，
@@ -7378,11 +7943,22 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .steps-pages-list { min-width:0; word-break:break-all; }
 .locator-code { color:var(--muted); font-size:11.5px; background:var(--bg-card); border:1px solid var(--line-soft); border-radius:6px; padding:2px 6px; word-break:break-all; }
 /* 面板窗口（悬浮窄条）里定位默认收起：一行只留「别名 + 状态」，鼠标移上去再把定位摊开。
-   420px 宽下常显定位会把每一行撑成两三行，一屏只能看四步。 */
-.is-panel .locator-code { display:none; }
-.is-panel .step:hover .locator-code,
-.is-panel .step:focus-within .locator-code {
-  display:block; flex-basis:100%; margin-top:2px; max-height:60px; overflow:auto;
+   420px 宽下常显定位会把每一行撑成两三行，一屏只能看四步。
+
+   高度用 grid-template-rows 0fr→1fr 过渡：0fr 就是真正的 0 高，不用猜一个够大的
+   max-height（内容短时会留一段空白），也不用 display:none↔block——那两个都不可过渡，
+   卡片会在一帧内跳高，下面的行全被顶一下。 */
+.is-panel .locator-reveal { display:grid; grid-template-rows:0fr; opacity:0; margin-top:0; }
+.is-panel .locator-reveal-inner { min-height:0; overflow:hidden; }
+.is-panel .locator-reveal .locator-code { display:block; max-height:64px; overflow:auto; }
+.is-panel .step:hover .locator-reveal,
+.is-panel .step:focus-within .locator-reveal { grid-template-rows:1fr; opacity:1; margin-top:2px; }
+@media (prefers-reduced-motion: no-preference) {
+  .is-panel .locator-reveal {
+    transition:grid-template-rows .18s cubic-bezier(.2, .8, .3, 1),
+               opacity .14s ease,
+               margin-top .18s cubic-bezier(.2, .8, .3, 1);
+  }
 }
 /* 操作条回到标题右侧同一行：正文占满剩余宽度，图标靠右。
    上移/下移删掉后，常驻的只剩 插入 / 编辑 / 解封 / 删除。 */
@@ -8323,6 +8899,72 @@ code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-siz
 .call-arg { display:inline-flex; align-items:center; gap:4px; max-width:100%; padding:1px 7px; border-radius:5px; background:var(--call-soft); font-size:11.5px; line-height:1.7; }
 .call-arg-key { color:var(--call); font-weight:600; }
 .call-arg-value { color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:190px; }
+
+/* ---- 动作卡展开编辑 ---- */
+/* 箭头放在 step-main 左侧：编辑态右侧操作区整块收起，但收起入口必须一直在。 */
+.call-expand { flex:none; width:18px; height:18px; padding:0; margin-left:-2px; color:var(--muted); }
+.call-expand:hover { color:var(--ink); background:transparent; }
+.call-expand.is-disabled { color:var(--faint); }
+.draft-out-tag {
+  flex:none; font-size:10.5px; line-height:1.6; padding:0 5px; border-radius:4px;
+  color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, transparent);
+  border:1px solid var(--warn-line);
+}
+.step.is-draft-out { outline:1px dashed var(--warn-line); outline-offset:-1px; }
+.step.is-tied-step .step-no { cursor:not-allowed; }
+.action-editor {
+  margin-top:8px; padding:8px 9px 9px;
+  border:1px solid var(--line-soft); border-radius:9px; background:var(--bg-sunken);
+}
+.ae-head { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-bottom:6px; }
+.ae-title { font-size:11.5px; font-weight:600; color:var(--ink-2); }
+.ae-count { font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.ae-warn {
+  font-size:11px; line-height:1.6; padding:0 7px; border-radius:999px;
+  color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, transparent);
+  border:1px solid var(--warn-line);
+}
+.ae-dirty { font-size:10.5px; color:var(--warn); }
+.ae-empty { font-size:11.5px; color:var(--muted); padding:4px 1px; }
+.action-steps { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:3px; }
+.action-steps.is-empty { padding:4px 0; }
+.action-step {
+  display:flex; align-items:center; gap:6px; min-width:0; flex-wrap:wrap; row-gap:2px;
+  padding:3px 4px; border-radius:6px; background:var(--bg-card); border:1px solid transparent;
+}
+.action-step:hover { border-color:var(--line-soft); }
+.action-step-no {
+  flex:none; width:17px; height:17px; display:inline-flex; align-items:center; justify-content:center;
+  border-radius:50%; background:var(--bg-sunken); color:var(--muted);
+  font-size:10px; cursor:grab; font-variant-numeric:tabular-nums;
+}
+.action-step-no:active { cursor:grabbing; }
+.action-step .kind-tag { flex:none; font-size:10.5px; padding:0 5px; line-height:1.6; }
+.action-step-text {
+  flex:1 1 120px; min-width:0; font-size:12px; color:var(--ink-2);
+  line-height:1.45; overflow-wrap:anywhere;
+}
+/* 参数名和删除按钮绑在一组：窄面板里文字可以折行，但这组不能被拆散到看不见。 */
+.action-step-tail {
+  display:flex; align-items:center; gap:4px; flex:0 0 auto; margin-left:auto;
+  flex-wrap:wrap; justify-content:flex-end;
+}
+.ae-from, .ae-param { flex:none; font-size:10.5px; line-height:1.6; padding:0 5px; border-radius:4px; }
+.ae-from { color:var(--muted); background:var(--bg-sunken); border:1px solid var(--line-soft); }
+.ae-param { color:var(--call); background:var(--call-soft); font-family:var(--mono); }
+.action-step-del { flex:none; width:20px; height:20px; padding:2px; color:var(--faint); }
+.action-step-del:hover { color:var(--danger); }
+.action-empty-drop {
+  padding:10px 6px; border:1px dashed var(--line-soft); border-radius:7px;
+  text-align:center; font-size:11.5px; color:var(--muted);
+}
+.ae-foot { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:8px; }
+.ae-hint { flex:1 1 160px; min-width:0; font-size:11px; color:var(--muted); line-height:1.5; }
+.action-step-ghost { opacity:.35; }
+.action-step-chosen { box-shadow:0 0 0 1px var(--focus-ring); }
+/* 面板窄：说明文字让位给按钮，保存/取消不能被挤到看不见。 */
+.is-panel .ae-hint { display:none; }
+
 .call-noarg { font-size:11.5px; color:var(--faint); }
 .call-missing { font-size:11.5px; color:var(--danger); }
 

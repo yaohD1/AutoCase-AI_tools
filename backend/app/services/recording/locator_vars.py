@@ -177,7 +177,7 @@ def _next_name(taken, base):
     return '%s_%d' % (base, index)
 
 
-def merge(existing, entries):
+def merge(existing, entries, reuse_by_locator=False):
     """把本次的变量并进已有文件。
 
     覆盖只发生在「确实是同一条定位」的情况下。三种情况要区分开：
@@ -189,11 +189,31 @@ def merge(existing, entries):
     - 其余情况才是「同一条定位又用了一次」，直接覆盖——页面改版要的正是这个效果。
 
     已有但本次没出现的变量原样保留：它可能还被这个目录下别的用例引用着。
+
+    reuse_by_locator 用于动作的公共文件。那份文件不写页面注释，读回来时认不出来源，
+    按「同名 + 同来源」判断会永远不相等，于是每生成一次就多一套 _2/_3（实测 6→12→18）。
+    变量本来就是「定位的别名」，一条定位留一个名字就够，所以这里改成按定位认领：
+    文件里已经有这条定位，就沿用它的名字，绝不再新增。
     """
     merged = dict(existing)
+    by_locator = {}
+    if reuse_by_locator:
+        for item in merged.values():
+            by_locator.setdefault(item['locator'], item['name'])
     taken = {}
     for raw in entries:
         entry = dict(raw)
+        if reuse_by_locator:
+            reused = by_locator.get(entry['locator'])
+            if reused:
+                entry['name'] = reused
+                entry.pop('collided', None)
+                taken.setdefault(normalize_name(reused), entry['locator'])
+                merged[normalize_name(reused)] = entry
+                # 回写到调用方那份：同一个元素被两条规则认领时（两个动作指向同一元素），
+                # 两边都要拿到最终名字，回填才不会漏掉其中一条。
+                raw['name'] = reused
+                continue
         base_key = normalize_name(entry['name'])
         known = taken.get(base_key)
         if known is not None and known != entry['locator']:
@@ -205,6 +225,9 @@ def merge(existing, entries):
             entry['collided'] = True
         taken.setdefault(base_key, entry['locator'])
         merged[normalize_name(entry['name'])] = entry
+        raw['name'] = entry['name']
+        if reuse_by_locator:
+            by_locator.setdefault(entry['locator'], entry['name'])
     return merged
 
 
@@ -261,15 +284,17 @@ def _fill(merged, entries, scope):
     """把合并后的变量名回填到步骤编号上。
 
     一个元素被点了两次会产生两个步骤、同一个定位，合并后只留一条变量——
-    两个步骤共用这一个变量才是对的，所以回填必须按定位找，不能按编号。
+    两个步骤共用这一个变量才是对的，所以按「这条 entry 最终叫什么」回填，
+    不能按编号找：按编号找第二处就丢了。
+
+    entry 上的 name 由 merge 回写（撞名改过名的、被别的动作复用走的，都以它为准）。
     """
-    by_key = {(item.get('scope'), item['locator']): item['name']
-              for item in merged.values()}
+    known = {normalize_name(item['name']): item['name'] for item in merged.values()}
     out = {}
     for entry in entries:
         if entry.get('scope') != scope:
             continue
-        name = by_key.get((scope, entry['locator']))
+        name = known.get(normalize_name(entry.get('name')))
         if name:
             out[str(entry['no'])] = '${%s}' % name
     return out
@@ -313,7 +338,8 @@ def build(steps, actions, target_path, root, locator_of, page_names=None):
         rel = common_rel()
         path = Path(root) / rel
         # 动作用 scope 区分来源，不写页面（同一个动作会被不同页面调用）。
-        merged = merge(parse(_read(path)), action_entries)
+        # 合并按定位认领：这份文件读回来没有来源标记，按来源比会每轮加一套 _N。
+        merged = merge(parse(_read(path)), action_entries, reuse_by_locator=True)
         state = write(path, render(merged, source='动作定义（跨用例共享）', grouped=False))
         files.append({'path': rel.replace('\\', '/'), 'state': state, 'count': len(merged)})
         for action_id in {item.get('scope') for item in action_entries}:
